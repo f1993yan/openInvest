@@ -176,6 +176,28 @@ def get_history_data(
                 pass  # 日期格式错误就不拉
 
     if should_fetch_yf:
+        # 优先国内源（Sina/Tencent），Yahoo 对 A股/港股从国内常 429。
+        # CN 源拉到就落 DB + 返回，完全不碰 yfinance。
+        try:
+            from utils.cn_market_provider import fetch_history, is_supported
+            if is_supported(symbol):
+                df_cn = fetch_history(symbol, fetch_period)
+                if df_cn is not None and not df_cn.empty:
+                    print(f"📈 [cn_market] {symbol} ← Sina/Tencent ({len(df_cn)} bars)")
+                    for idx, row in df_cn.iterrows():
+                        _STORE.save_generic_price(
+                            symbol, idx.strftime('%Y-%m-%d'), row['Close'],
+                            source="cn_market",
+                            high=_nan_to_none(row.get('High')),
+                            low=_nan_to_none(row.get('Low')),
+                            volume=_nan_to_none(row.get('Volume')),
+                        )
+                    df_db = _STORE.get_history_df(symbol)
+                    should_fetch_yf = False   # CN 源成功，跳过 yfinance
+        except Exception as e:  # noqa: BLE001
+            print(f"⚠️ [cn_market] {symbol} 拉取异常，回退 yfinance: {e}")
+
+    if should_fetch_yf:
         try:
             print(f"🔄 [yfinance] Refreshing {symbol} (period={fetch_period})...")
             ticker = yf.Ticker(symbol)

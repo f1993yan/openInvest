@@ -18,7 +18,10 @@ from services.news_sources import RawNewsItem
 
 @pytest.fixture
 def tmp_event_db(monkeypatch):
-    with tempfile.TemporaryDirectory() as d:
+    # Windows：EventStore 的 SQLite 连接在 GC 前仍占文件句柄，TemporaryDirectory
+    # 清理时 unlink events.db 会抛 PermissionError(WinError 32)。POSIX 不受影响。
+    # ignore_cleanup_errors 让 teardown 不因此报错（测试体本身不受影响）。
+    with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as d:
         path = os.path.join(d, "events.db")
         monkeypatch.setattr("db.event_store.DB_PATH", path)
         yield path

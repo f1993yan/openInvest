@@ -18,41 +18,52 @@ def _stub_items(prefix: str, n: int):
 
 def test_fetch_all_runs_each_source_and_dedups_urls():
     with patch("services.news_sources.ddgs_news.fetch_ddgs_news") as m_ddgs, \
-         patch("services.news_sources.yfinance_news.fetch_yfinance_news") as m_yf, \
+         patch("services.news_sources.cls_news.fetch_cls_telegraph") as m_cls, \
+         patch("services.news_sources.sina_news.fetch_sina_news") as m_sina, \
          patch("services.news_sources.rss_feed.fetch_rss") as m_rss:
         m_ddgs.return_value = _stub_items("ddgs", 3)
-        m_yf.return_value = _stub_items("yf", 2)
+        m_cls.return_value = _stub_items("cls", 2)
+        m_sina.return_value = _stub_items("sina", 2)
         m_rss.return_value = [
             RawNewsItem(src_name="rss:r", title="t", url="https://ddgs.example/0", snippet="dup"),
             RawNewsItem(src_name="rss:r", title="t", url="https://rss.example/0", snippet="x"),
         ]
         out = fetch_all(
             queries=["foo"],
-            symbols=["NDQ.AX"],
+            symbols=["NDQ.AX"],   # symbols 已废弃但保留兼容，应被忽略
             rss_feeds=[{"name": "r", "url": "https://feed"}],
         )
-    # 3 ddgs + 2 yf + 2 rss = 7 raw，1 条 url 跟 ddgs/0 重复 → 6 条
-    assert len(out) == 6
-    assert m_ddgs.called and m_yf.called and m_rss.called
+    # 3 ddgs + 2 cls + 2 sina + 2 rss = 9 raw，1 条 url 跟 ddgs/0 重复 → 8 条
+    assert len(out) == 8
+    assert m_ddgs.called and m_cls.called and m_sina.called and m_rss.called
 
 
 def test_fetch_all_continues_on_per_source_failure():
     with patch("services.news_sources.ddgs_news.fetch_ddgs_news",
                side_effect=RuntimeError("boom")), \
-         patch("services.news_sources.yfinance_news.fetch_yfinance_news") as m_yf, \
+         patch("services.news_sources.cls_news.fetch_cls_telegraph") as m_cls, \
+         patch("services.news_sources.sina_news.fetch_sina_news") as m_sina, \
          patch("services.news_sources.rss_feed.fetch_rss") as m_rss:
-        m_yf.return_value = _stub_items("yf", 2)
+        m_cls.return_value = _stub_items("cls", 2)
+        m_sina.return_value = _stub_items("sina", 2)
         m_rss.return_value = _stub_items("rss", 1)
         out = fetch_all(
             queries=["x"], symbols=["A"],
             rss_feeds=[{"name": "r", "url": "https://feed"}],
         )
-    # ddgs 挂了不影响其他
-    assert len(out) == 3
+    # ddgs 挂了不影响其他：2 cls + 2 sina + 1 rss = 5
+    assert len(out) == 5
 
 
-def test_fetch_all_empty_inputs():
-    assert fetch_all() == []
+def test_fetch_all_cn_sources_run_without_queries():
+    """CLS + 新浪是实时财经源，不依赖 query/rss，每轮都应触发。"""
+    with patch("services.news_sources.cls_news.fetch_cls_telegraph") as m_cls, \
+         patch("services.news_sources.sina_news.fetch_sina_news") as m_sina:
+        m_cls.return_value = _stub_items("cls", 1)
+        m_sina.return_value = _stub_items("sina", 1)
+        out = fetch_all()   # 无 queries / 无 rss
+    assert len(out) == 2
+    assert m_cls.called and m_sina.called
 
 
 def test_rss_feed_parses_minimal_feed():
