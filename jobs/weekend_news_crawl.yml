@@ -1,0 +1,6 @@
+name: weekend_news_crawl
+description: 周六周日 12:00/20:00 抓取国内新闻缓存；周日晚 20:00 额外总结+委员会评估龙头股
+schedule: "0 12,20 * * 6,0"
+timezone: Asia/Shanghai
+entry: jobs.weekend_news_crawl:run
+enabled: true

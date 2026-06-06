@@ -211,7 +211,7 @@ def load_config(
     # 2. YAML（默认 defaults.yaml，可被 custom 覆盖）
     effective_yaml = yaml_path if yaml_path is not None else _DEFAULTS_YAML
     if effective_yaml.exists():
-        yaml_data = yaml.safe_load(effective_yaml.read_text()) or {}
+        yaml_data = yaml.safe_load(effective_yaml.read_text(encoding="utf-8")) or {}
         base = _deep_merge(base, yaml_data)
 
     # 3. CLI overrides（含持久 override）

@@ -30,6 +30,7 @@ def test_fetch_all_runs_each_source_and_dedups_urls():
             queries=["foo"],
             symbols=["NDQ.AX"],
             rss_feeds=[{"name": "r", "url": "https://feed"}],
+            domestic=False,
         )
     # 3 ddgs + 2 yf + 2 rss = 7 raw，1 条 url 跟 ddgs/0 重复 → 6 条
     assert len(out) == 6
@@ -46,13 +47,98 @@ def test_fetch_all_continues_on_per_source_failure():
         out = fetch_all(
             queries=["x"], symbols=["A"],
             rss_feeds=[{"name": "r", "url": "https://feed"}],
+            domestic=False,
         )
     # ddgs 挂了不影响其他
     assert len(out) == 3
 
 
-def test_fetch_all_empty_inputs():
-    assert fetch_all() == []
+def test_fetch_all_empty_inputs_without_domestic_sources():
+    assert fetch_all(domestic=False) == []
+
+
+def test_domestic_hot_news_infers_sector_and_leaders():
+    from services.news_sources.domestic_hot_news import (
+        enrich_news_items,
+        format_sector_brief,
+        summarize_sector_hits,
+    )
+
+    items = enrich_news_items([
+        RawNewsItem(
+            src_name="stub",
+            title="国产大模型推动AI算力服务器需求提升",
+            url="https://n.example/1",
+            snippet="光模块、PCB和数据中心产业链受关注",
+        )
+    ])
+
+    sectors = items[0].raw_meta["sectors"]
+    assert sectors[0]["sector"] == "AI算力"
+    assert any(leader["symbol"] == "601138" for leader in sectors[0]["leaders"])
+
+    brief = format_sector_brief(items)
+    assert "涉及板块: AI算力" in brief
+    assert "工业富联(601138)" in brief
+
+    summary = summarize_sector_hits(items)
+    assert summary[0]["sector"] == "AI算力"
+    assert summary[0]["count"] == 1
+
+
+def test_fetch_all_domestic_includes_hot_news_and_enrichment():
+    with patch("services.news_sources.domestic_news.fetch_eastmoney_news", return_value=[]), \
+         patch("services.news_sources.domestic_news.fetch_cls_news", return_value=[]), \
+         patch("services.news_sources.domestic_news.fetch_sina_news", return_value=[]), \
+         patch("services.news_sources.domestic_news.fetch_xueqiu_news", return_value=[]), \
+         patch("services.news_sources.domestic_news.fetch_wallstreetcn_news", return_value=[]), \
+         patch("services.news_sources.domestic_hot_news.fetch_baidu_hot_news") as m_hot:
+        m_hot.return_value = [
+            RawNewsItem(
+                src_name="baidu_hot",
+                title="人形机器人订单增长",
+                url="https://hot.example/1",
+                snippet="减速器和伺服产业链升温",
+            )
+        ]
+        out = fetch_all(domestic=True, max_per_source=2, timeout_sec=5)
+
+    assert len(out) == 1
+    assert out[0].src_name == "baidu_hot"
+    assert out[0].raw_meta["sectors"][0]["sector"] == "机器人"
+
+
+def test_obvious_danger_news_gets_quantified_a_share_impact():
+    from services.news_sources.news_risk_model import (
+        assess_news_risk,
+        enrich_risk_impacts,
+        format_risk_impact_brief,
+    )
+
+    item = RawNewsItem(
+        src_name="sina",
+        title="中东军事冲突升级，多地遭导弹袭击，全球市场避险升温",
+        url="https://risk.example/1",
+        snippet="冲突导致油价大幅波动，投资者担忧全球供应链风险。",
+    )
+
+    impacts = assess_news_risk(item)
+    assert impacts
+    top = impacts[0]
+    assert top["category"] == "地缘冲突/战争"
+    assert isinstance(top["csi300_impact_bps"], float)
+    assert top["csi300_impact_bps"] < -20
+    assert len(top["ci90_bps"]) == 2
+    assert top["ci90_bps"][0] < top["csi300_impact_bps"] < top["ci90_bps"][1]
+    assert top["sector_impacts"]
+    assert top["model"]["formula"] == "-base_bps(category) * severity * source_reliability * a_share_proximity"
+    assert "军事冲突" in top["evidence_keywords"]
+
+    enriched = enrich_risk_impacts([item])
+    assert enriched[0].raw_meta["risk_impacts"][0]["category"] == "地缘冲突/战争"
+    brief = format_risk_impact_brief(enriched)
+    assert "CSI300" in brief
+    assert "90%区间" in brief
 
 
 def test_rss_feed_parses_minimal_feed():

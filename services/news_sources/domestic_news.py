@@ -121,38 +121,6 @@ def fetch_cls_news(*, max_items: int = 20) -> List[RawNewsItem]:
     except Exception as e:
         log.warning(f"cls 财联社失败: {e}")
     return items
-    # --- 以下为旧实现（保留作参考）---
-    try:
-        resp = requests.get(
-            "https://www.cls.cn/telegraph",
-            headers={"User-Agent": _UA, "Referer": "https://www.cls.cn/"},
-            timeout=15,
-        )
-        resp.encoding = "utf-8"
-        # 从页面提取 <script id="__NEXT_DATA__"> JSON
-        match = re.search(r'<script id="__NEXT_DATA__"[^>]*>(.*?)</script>', resp.text, re.DOTALL)
-        if match:
-            import json as _json
-            data = _json.loads(match.group(1))
-            telegraph = (
-                data.get("props", {})
-                .get("pageProps", {})
-                .get("telegraphList", [])
-            )
-            for entry in telegraph[:max_items]:
-                items.append(RawNewsItem(
-                    src_name="cls",
-                    title=entry.get("title", "")[:100],
-                    url=f"https://www.cls.cn/detail/{entry.get('id', '')}",
-                    snippet=entry.get("content", "") or entry.get("brief", ""),
-                    published_at=datetime.fromtimestamp(
-                        entry.get("ctime", 0)
-                    ).isoformat() if entry.get("ctime") else None,
-                    fetched_at=now,
-                ))
-    except Exception as e:
-        log.warning(f"cls 财联社失败: {e}")
-    return items
 
 
 # ==========================================
@@ -187,15 +155,6 @@ def fetch_sina_news(*, max_items: int = 20) -> List[RawNewsItem]:
 # ==========================================
 # 雪球
 # ==========================================
-
-def _xueqiu_cookies() -> dict:
-    try:
-        s = requests.Session()
-        s.get("https://xueqiu.com/", headers={"User-Agent": _UA}, timeout=10)
-        return dict(s.cookies)
-    except Exception:
-        return {}
-
 
 def fetch_xueqiu_news(*, query: str = "A股", max_items: int = 20) -> List[RawNewsItem]:
     """雪球热门讨论 — 通过 Playwright 拦截 fundx/public/list.json。
@@ -261,28 +220,6 @@ def fetch_xueqiu_news(*, query: str = "A股", max_items: int = 20) -> List[RawNe
         log.warning("xueqiu 雪球: playwright 未安装，跳过")
     except Exception as e:
         log.warning(f"xueqiu 雪球失败: {e}")
-    return items
-    # --- 以下为旧实现（保留作参考）---
-    try:
-        cookies = _xueqiu_cookies()
-        resp = requests.get(
-            "https://xueqiu.com/query/v1/search/web/search.json",
-            params={"q": query, "page": 1, "size": max_items},
-            headers={"User-Agent": _UA, "Referer": "https://xueqiu.com/"},
-            cookies=cookies,
-            timeout=15,
-        )
-        data = resp.json()
-        for entry in data.get("list", [])[:max_items]:
-            items.append(RawNewsItem(
-                src_name=f"xueqiu:{query}",
-                title=entry.get("title", "") or entry.get("name", ""),
-                url=f"https://xueqiu.com{entry.get('target', '')}",
-                snippet=entry.get("description", "") or entry.get("text", "")[:200],
-                fetched_at=now,
-            ))
-    except Exception as e:
-        log.warning(f"xueqiu 失败: {e}")
     return items
 
 

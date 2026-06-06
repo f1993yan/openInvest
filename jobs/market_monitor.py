@@ -257,11 +257,87 @@ def write_report(round_time: str, results: List[Dict],
             f"共 {len(news_items)} 条（{', '.join(f'{k}:{v}' for k,v in sorted(src_counts.items()))}）",
             "",
         ])
+        sector_summary = []
+        try:
+            from services.news_sources.domestic_hot_news import summarize_sector_hits
+            sector_summary = summarize_sector_hits(news_items)
+        except Exception as e:
+            log.warning(f"新闻板块汇总失败: {e}")
+
+        if sector_summary:
+            lines.extend([
+                "### 涉及板块与龙头",
+                "",
+                "| 板块 | 热度 | 龙头股票 | 新闻源 |",
+                "|------|------|----------|--------|",
+            ])
+            for row in sector_summary:
+                leaders = "、".join(
+                    f"{leader.get('name')}({leader.get('symbol')})"
+                    for leader in row.get("leaders", [])
+                    if leader.get("name") and leader.get("symbol")
+                )
+                lines.append(
+                    f"| {row.get('sector')} | {row.get('count')} | {leaders or '-'} | "
+                    f"{', '.join(row.get('sources', []))} |"
+                )
+            lines.append("")
+            lines.append("### 新闻条目")
+            lines.append("")
+
+        try:
+            from services.news_sources.news_risk_model import summarize_risk_impacts
+            risk_rows = summarize_risk_impacts(news_items)
+        except Exception as e:
+            log.warning(f"新闻风险量化失败: {e}")
+            risk_rows = []
+
+        if risk_rows:
+            lines.extend([
+                "### 重大危险信息量化影响",
+                "",
+                "| 新闻源 | 风险类别 | CSI300冲击 | 90%区间 | 最大板块冲击 | 模型证据 |",
+                "|--------|----------|------------|---------|--------------|----------|",
+            ])
+            for row in risk_rows:
+                ci = row.get("ci90_bps", ["?", "?"])
+                top_sector = (row.get("sector_impacts") or [{}])[0]
+                sector_text = (
+                    f"{top_sector.get('sector')} {top_sector.get('impact_bps'):+.1f}bp"
+                    if top_sector.get("sector") else "-"
+                )
+                lines.append(
+                    f"| {row.get('src_name')} | {row.get('category')} | "
+                    f"{row.get('csi300_impact_bps'):+.1f}bp | "
+                    f"{ci[0]:+.1f}~{ci[1]:+.1f}bp | {sector_text} | "
+                    f"{', '.join(row.get('evidence_keywords', [])[:4])} |"
+                )
+            lines.extend([
+                "",
+                "> 模型: event_study_prior_capm_v1，公式 = -base_bps(category) * severity * source_reliability * a_share_proximity。",
+                "",
+            ])
+
         for item in news_items[:10]:
             title = item.title[:80] if item.title else ""
             if not title:
                 continue
             lines.append(f"- [{item.src_name}] {title}")
+            for sector in (item.raw_meta or {}).get("sectors", [])[:2]:
+                leaders = "、".join(
+                    f"{leader.get('name')}({leader.get('symbol')})"
+                    for leader in sector.get("leaders", [])[:3]
+                    if leader.get("name") and leader.get("symbol")
+                )
+                if leaders:
+                    lines.append(f"  - 涉及板块: {sector.get('sector')}；对应龙头: {leaders}")
+            for impact in (item.raw_meta or {}).get("risk_impacts", [])[:1]:
+                ci = impact.get("ci90_bps", ["?", "?"])
+                lines.append(
+                    f"  - 危险信号: {impact.get('category')}；"
+                    f"CSI300模型冲击 {impact.get('csi300_impact_bps'):+.1f}bp "
+                    f"(90%区间 {ci[0]:+.1f}~{ci[1]:+.1f}bp)"
+                )
 
     lines.extend([
         "",
@@ -408,7 +484,7 @@ def run_monitor_round():
     try:
         sys.path.insert(0, str(_PROJECT_ROOT))
         from services.news_sources import fetch_all
-        news_items = fetch_all(domestic=True, max_per_source=3, timeout_sec=20)
+        news_items = fetch_all(domestic=True, max_per_source=8, timeout_sec=20)
         log.info(f"新闻: {len(news_items)} 条")
     except Exception as e:
         log.warning(f"新闻拉取失败: {e}")
@@ -431,12 +507,16 @@ def run_monitor_round():
         # 构建新闻摘要文本
         news_text = ""
         if news_items:
-            lines = []
-            for item in news_items[:8]:
-                title = item.title[:100] if item.title else ""
-                if title:
-                    lines.append(f"- [{item.src_name}] {title}")
-            news_text = "\n".join(lines)
+            try:
+                from services.news_sources.domestic_hot_news import format_sector_brief
+                news_text = format_sector_brief(news_items, max_items=8)
+            except Exception:
+                lines = []
+                for item in news_items[:8]:
+                    title = item.title[:100] if item.title else ""
+                    if title:
+                        lines.append(f"- [{item.src_name}] {title}")
+                news_text = "\n".join(lines)
 
         result = call_committee(
             symbol=sym,
@@ -492,6 +572,14 @@ def run_monitor_round():
             title = item.title[:60] if item.title else ""
             if title:
                 toast_lines.append(f"  [{item.src_name}] {title}")
+                sectors = (item.raw_meta or {}).get("sectors", [])
+                if sectors:
+                    leaders = sectors[0].get("leaders", [])
+                    leader = leaders[0] if leaders else {}
+                    if leader.get("name"):
+                        toast_lines.append(
+                            f"    {sectors[0].get('sector')} → {leader.get('name')}({leader.get('symbol')})"
+                        )
 
     # actionable 标的
     if actionable:

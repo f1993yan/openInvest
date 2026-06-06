@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 import logging
+import os
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError, as_completed
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -99,11 +100,14 @@ def fetch_all(
                 fetch_eastmoney_news, fetch_cls_news, fetch_sina_news,
                 fetch_xueqiu_news, fetch_wallstreetcn_news,
             )
+            from services.news_sources.domestic_hot_news import fetch_baidu_hot_news
             tasks.append({"fn": fetch_eastmoney_news, "kwargs": {"max_items": max_per_source}, "label": "eastmoney"})
-            tasks.append({"fn": fetch_cls_news, "kwargs": {"max_items": max_per_source}, "label": "cls"})
             tasks.append({"fn": fetch_sina_news, "kwargs": {"max_items": max_per_source}, "label": "sina"})
-            tasks.append({"fn": fetch_xueqiu_news, "kwargs": {"query": "A股", "max_items": max_per_source}, "label": "xueqiu"})
             tasks.append({"fn": fetch_wallstreetcn_news, "kwargs": {"max_items": max_per_source}, "label": "wallstreetcn"})
+            tasks.append({"fn": fetch_baidu_hot_news, "kwargs": {"max_items": max_per_source}, "label": "baidu_hot"})
+            if os.getenv("INVEST_NEWS_BROWSER_SOURCES", "1") == "1":
+                tasks.append({"fn": fetch_cls_news, "kwargs": {"max_items": max_per_source}, "label": "cls"})
+                tasks.append({"fn": fetch_xueqiu_news, "kwargs": {"query": "A股", "max_items": max_per_source}, "label": "xueqiu"})
         except Exception as e:
             log.warning(f"国内新闻源加载失败: {e}")
 
@@ -111,7 +115,8 @@ def fetch_all(
         return []
 
     all_items: List[RawNewsItem] = []
-    with ThreadPoolExecutor(max_workers=min(8, len(tasks))) as pool:
+    pool = ThreadPoolExecutor(max_workers=min(8, len(tasks)))
+    try:
         futures = {pool.submit(t["fn"], **t["kwargs"]): t["label"] for t in tasks}
         # PR #5 Copilot CR 修复: as_completed(timeout=) 整体 wall-clock 用完后抛
         # concurrent.futures.TimeoutError，原版没 catch → 一个 slow source 拖
@@ -135,6 +140,8 @@ def fetch_all(
             for f in futures:
                 if not f.done():
                     f.cancel()
+    finally:
+        pool.shutdown(wait=False, cancel_futures=True)
 
     # 同 url 去重（保留先到的）
     seen_urls = set()
@@ -144,5 +151,11 @@ def fetch_all(
             continue
         seen_urls.add(it.url)
         dedup.append(it)
+    if domestic:
+        try:
+            from services.news_sources.domestic_hot_news import enrich_news_items
+            dedup = enrich_news_items(dedup)
+        except Exception as e:
+            log.warning(f"[news_sources] 新闻板块提炼失败: {type(e).__name__}: {e}")
     log.info(f"[news_sources] 总计 {len(all_items)} 条 → 去重后 {len(dedup)} 条")
     return dedup

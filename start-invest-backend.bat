@@ -7,4 +7,7 @@ start "openInvest Backend" /B uv run uvicorn backend.server:app --host 127.0.0.1
 echo Backend started.
 echo Starting market monitor (9:30-15:00, every 30min)...
 start "openInvest Monitor" /B uv run python -m jobs.market_monitor > data\market_monitor\monitor_stdout.log 2>&1
-echo Monitor started. You can close this window.
+echo Monitor started.
+echo Starting job scheduler (daily_report + weekend_news + ...)...
+start "openInvest Scheduler" /B uv run python -m scheduler.runner > logs\scheduler.log 2>&1
+echo Scheduler started. You can close this window.
