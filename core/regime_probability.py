@@ -6,6 +6,15 @@
 - 阈值 5% 做成参数，默认 5%。
 - n<10 的组返回 low_confidence 标记。
 - 数据源：memory/.dreams/verdict_review.jsonl（由 jobs/verdict_review.py 生成）。
+
+Model references:
+- Regime-switching / state-conditioned return modeling:
+  Hamilton, J. D. (1989), "A New Approach to the Economic Analysis of
+  Nonstationary Time Series and the Business Cycle".
+  https://doi.org/10.2307/1912559
+- Conditional empirical distribution + CVaR tail summary:
+  Rockafellar, R. T. and Uryasev, S. (2000), "Optimization of
+  Conditional Value-at-Risk". https://doi.org/10.21314/JOR.2000.038
 """
 from __future__ import annotations
 
@@ -39,16 +48,63 @@ class RegimeProbability:
     median_return: float # 中位 return (%)
     mean_return: float   # 均值 return (%)
     threshold_pct: float # 使用的阈值
-    low_confidence: bool # n < MIN_CONFIDENT_N
+    low_confidence: bool # effective_n < MIN_CONFIDENT_N（重叠窗口源用独立样本判定）
+    # 独立样本估计：重叠窗口源（OHLC 日度 forward return）≈ n/窗口天数；
+    # 非重叠源（verdict_review，逐决策）= n。默认 0 → summary 回退用 n。
+    effective_n: int = 0
 
     def summary_line(self) -> str:
         """一行中文摘要，给 daily report 用"""
         conf = " ⚠样本不足" if self.low_confidence else ""
+        eff = self.effective_n or self.n
+        # 重叠窗口源：明确标注独立样本量，避免 n 被误读为独立观测数
+        overlap = f"，重叠窗口独立≈{eff}" if eff != self.n else ""
         return (
-            f"{self.asset} {self.regime} (n={self.n}): "
+            f"{self.asset} {self.regime} (n={self.n}{overlap}): "
             f"涨>{self.threshold_pct:.0f}% {self.p_up * 100:.0f}%、"
             f"跌>{self.threshold_pct:.0f}% {self.p_down * 100:.0f}%、"
             f"中位 {self.median_return:+.1f}%"
+            f"{conf}"
+        )
+
+
+@dataclass
+class ConditionalReturnStats:
+    """Full conditional forward-return distribution for one (asset, regime).
+
+    Percent fields are in percentage points, e.g. mean_return_pct=2.5 means +2.5%.
+    CVaR is reported as a positive loss number: cvar_95_loss_pct=8 means the
+    worst 5% tail loses 8% on average.
+    """
+    asset: str
+    regime: str
+    window: str
+    n: int
+    effective_n: int
+    threshold_pct: float
+    p_up: float
+    p_down: float
+    p_flat: float
+    mean_return_pct: float
+    median_return_pct: float
+    q05_return_pct: float
+    q20_return_pct: float
+    q80_return_pct: float
+    q95_return_pct: float
+    cvar_95_loss_pct: float
+    upside_mean_pct: float
+    downside_mean_pct: float
+    low_confidence: bool
+
+    def summary_line(self) -> str:
+        conf = " ⚠样本不足" if self.low_confidence else ""
+        overlap = f"，重叠窗口独立≈{self.effective_n}" if self.effective_n != self.n else ""
+        return (
+            f"{self.asset} {self.regime} {self.window} (n={self.n}{overlap}): "
+            f"均值 {self.mean_return_pct:+.1f}%，中位 {self.median_return_pct:+.1f}%，"
+            f"涨>{self.threshold_pct:.0f}% {self.p_up * 100:.0f}%，"
+            f"跌>{self.threshold_pct:.0f}% {self.p_down * 100:.0f}%，"
+            f"q05 {self.q05_return_pct:+.1f}%，CVaR95亏损 {self.cvar_95_loss_pct:.1f}%"
             f"{conf}"
         )
 
@@ -116,7 +172,8 @@ def build_probability_table(
             median_return=round(statistics.median(returns), 2),
             mean_return=round(statistics.mean(returns), 2),
             threshold_pct=threshold_pct,
-            low_confidence=n < MIN_CONFIDENT_N,
+            low_confidence=n < MIN_CONFIDENT_N,  # verdict_review 非重叠 → effective_n = n
+            effective_n=n,
         )
 
     return table
@@ -183,19 +240,23 @@ class ReentryEstimate:
     downside_pct: float      # forward return 的低分位（REENTRY_DOWNSIDE_QUANTILE）
     downside_price: float    # current_price × (1 + downside_pct/100)
     has_downside: bool       # downside_price < current_price → 存在低于现价的买回参考
-    low_confidence: bool     # n < MIN_CONFIDENT_N
+    low_confidence: bool     # effective_n < MIN_CONFIDENT_N（重叠窗口源用独立样本判定）
+    # 独立样本估计：OHLC 重叠日度 forward return ≈ n/窗口天数；verdict_review = n。
+    effective_n: int = 0
 
     def summary_line(self) -> str:
         conf = " ⚠样本不足" if self.low_confidence else ""
+        eff = self.effective_n or self.n
+        overlap = f"，重叠窗口独立≈{eff}" if eff != self.n else ""
         if not self.has_downside:
             return (
-                f"{self.window} (n={self.n}): 该 regime 历史上 {self.window} 内"
+                f"{self.window} (n={self.n}{overlap}): 该 regime 历史上 {self.window} 内"
                 f"跌破现价概率仅 {self.p_below_current * 100:.0f}%，"
                 f"{int(REENTRY_DOWNSIDE_QUANTILE * 100)} 分位仍 {self.downside_pct:+.1f}%"
                 f"（无明显低于现价的买回点）{conf}"
             )
         return (
-            f"{self.window} (n={self.n}): 跌破现价概率 {self.p_below_current * 100:.0f}%、"
+            f"{self.window} (n={self.n}{overlap}): 跌破现价概率 {self.p_below_current * 100:.0f}%、"
             f"跌>{self.threshold_pct:.0f}% 概率 {self.p_down * 100:.0f}%；"
             f"悲观情形({int(REENTRY_DOWNSIDE_QUANTILE * 100)}分位) {self.downside_pct:+.1f}% "
             f"→ ¥{self.downside_price:,.2f}；中位 {self.median_return_pct:+.1f}%{conf}"
@@ -252,6 +313,9 @@ def get_reentry_estimate(
         return None
 
     n = len(returns)
+    # OHLC 源是重叠日度 forward return → 独立样本 ≈ n/窗口天数；verdict_review 非重叠 → n。
+    window_days = int(window.rstrip("d")) if source == "ohlc" else 1
+    effective_n = max(1, n // window_days)
     downside_pct = round(_percentile(returns, REENTRY_DOWNSIDE_QUANTILE), 2)
     downside_price = round(current_price * (1 + downside_pct / 100), 4)
     return ReentryEstimate(
@@ -267,7 +331,8 @@ def get_reentry_estimate(
         downside_pct=downside_pct,
         downside_price=downside_price,
         has_downside=downside_price < current_price,
-        low_confidence=n < MIN_CONFIDENT_N,
+        low_confidence=effective_n < MIN_CONFIDENT_N,
+        effective_n=effective_n,
     )
 
 
@@ -336,9 +401,17 @@ def _percentile_rank(window):  # window: np.ndarray
 
 def _make_regime_probability(
     asset: str, regime: str, returns_pct: List[float], threshold_pct: float,
+    *, window_days: int = 1,
 ) -> RegimeProbability:
-    """从一组 forward return(%) 聚合出 RegimeProbability（verdict_review / OHLC 共用）。"""
+    """从一组 forward return(%) 聚合出 RegimeProbability。
+
+    window_days: forward return 的窗口天数。OHLC 源是**重叠**的日度 forward return
+    （相邻样本重叠 window_days-1 天），独立样本 ≈ n/window_days；low_confidence 用这个
+    effective_n 而非原始 n 判定，避免重叠样本把置信度撑虚高。verdict_review 源是逐决策
+    的非重叠样本 → window_days=1 → effective_n = n。
+    """
     n = len(returns_pct)
+    effective_n = max(1, n // window_days)
     p_up = sum(1 for r in returns_pct if r > threshold_pct) / n
     p_down = sum(1 for r in returns_pct if r < -threshold_pct) / n
     return RegimeProbability(
@@ -348,7 +421,8 @@ def _make_regime_probability(
         median_return=round(statistics.median(returns_pct), 2),
         mean_return=round(statistics.mean(returns_pct), 2),
         threshold_pct=threshold_pct,
-        low_confidence=n < MIN_CONFIDENT_N,
+        low_confidence=effective_n < MIN_CONFIDENT_N,
+        effective_n=effective_n,
     )
 
 
@@ -448,6 +522,58 @@ def _ohlc_forward_returns(
     return (sub[col] * 100).tolist()
 
 
+def get_conditional_return_stats(
+    asset: str,
+    regime: str,
+    *,
+    window: str = "30d",
+    threshold_pct: float = DEFAULT_THRESHOLD_PCT,
+    days: int = 100000,
+) -> Optional[ConditionalReturnStats]:
+    """Compute full conditional return distribution for (asset, regime).
+
+    This is the trading-signal layer: instead of predicting one price target,
+    it estimates the whole forward-return distribution conditioned on regime.
+    """
+    returns = _ohlc_forward_returns(asset.upper(), regime, window, days=days)
+    if not returns:
+        return None
+    n = len(returns)
+    window_days = int(window.rstrip("d"))
+    effective_n = max(1, n // window_days)
+    q05 = _percentile(returns, 0.05)
+    q20 = _percentile(returns, 0.20)
+    q80 = _percentile(returns, 0.80)
+    q95 = _percentile(returns, 0.95)
+    tail = [r for r in returns if r <= q05]
+    cvar_loss = -statistics.mean(tail) if tail else max(0.0, -q05)
+    up = [r for r in returns if r > threshold_pct]
+    down = [r for r in returns if r < -threshold_pct]
+    p_up = len(up) / n
+    p_down = len(down) / n
+    return ConditionalReturnStats(
+        asset=asset.upper(),
+        regime=regime,
+        window=window,
+        n=n,
+        effective_n=effective_n,
+        threshold_pct=threshold_pct,
+        p_up=round(p_up, 4),
+        p_down=round(p_down, 4),
+        p_flat=round(1.0 - p_up - p_down, 4),
+        mean_return_pct=round(statistics.mean(returns), 2),
+        median_return_pct=round(statistics.median(returns), 2),
+        q05_return_pct=round(q05, 2),
+        q20_return_pct=round(q20, 2),
+        q80_return_pct=round(q80, 2),
+        q95_return_pct=round(q95, 2),
+        cvar_95_loss_pct=round(max(0.0, cvar_loss), 2),
+        upside_mean_pct=round(statistics.mean(up), 2) if up else round(max(0.0, q80), 2),
+        downside_mean_pct=round(statistics.mean(down), 2) if down else round(min(0.0, q20), 2),
+        low_confidence=effective_n < MIN_CONFIDENT_N,
+    )
+
+
 def build_probability_table_from_ohlc(
     symbols: List[str],
     *,
@@ -461,6 +587,7 @@ def build_probability_table_from_ohlc(
     """
     from db.market_store import MarketStore
     store = MarketStore()
+    window_days = int(window.rstrip("d"))  # 重叠窗口 → effective_n = n/window_days
     table: Dict[Tuple[str, str], RegimeProbability] = {}
     col = f"fwd_{window}"
     for sym in symbols:
@@ -477,6 +604,6 @@ def build_probability_table_from_ohlc(
             if not rets:
                 continue
             table[(sym, regime)] = _make_regime_probability(
-                sym, regime, rets, threshold_pct,
+                sym, regime, rets, threshold_pct, window_days=window_days,
             )
     return table

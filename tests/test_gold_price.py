@@ -78,9 +78,8 @@ def test_get_gold_snapshot_offset_applied():
 
 
 def test_get_gold_snapshot_falls_back_when_yfinance_raises():
-    """实时源（cn_market + yfinance）全挂时走 DB 兜底"""
-    with patch("utils.cn_market_provider.fetch_spot", return_value=None), \
-         patch("utils.gold_price.yf.Ticker") as MockTicker, \
+    """yfinance 抛异常时走 DB 兜底"""
+    with patch("utils.gold_price.yf.Ticker") as MockTicker, \
          patch("db.market_store.MarketStore") as MockStore:
         MockTicker.side_effect = ConnectionError("yahoo down")
         instance = MockStore.return_value
@@ -94,9 +93,8 @@ def test_get_gold_snapshot_falls_back_when_yfinance_raises():
 
 
 def test_get_gold_snapshot_returns_none_when_all_fail():
-    """cn_market + yfinance + DB 都挂时返回 None，不抛异常"""
-    with patch("utils.cn_market_provider.fetch_spot", return_value=None), \
-         patch("utils.gold_price.yf.Ticker") as MockTicker, \
+    """yfinance + DB 都挂时返回 None，不抛异常"""
+    with patch("utils.gold_price.yf.Ticker") as MockTicker, \
          patch("db.market_store.MarketStore") as MockStore:
         MockTicker.side_effect = ConnectionError("yahoo down")
         instance = MockStore.return_value

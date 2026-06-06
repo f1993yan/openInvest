@@ -88,14 +88,14 @@ TOOL_DEFINITIONS: List[Dict[str, Any]] = [
             "description": (
                 "查询 OpenClaw Dreaming 长期记忆里的相关 insight（近 90 天行为聚类）。"
                 "返回 top-k 条已通过阈值门 (score≥0.8 / count≥3) 的模式。"
-                "Risk Officer 用来引用'用户 6 个月前类似情境的过度集中持仓'等。"
+                "Risk Officer 用来引用'用户之前类似情境的行为模式'等。"
             ),
             "parameters": {
                 "type": "object",
                 "properties": {
                     "asset_symbol": {
                         "type": "string",
-                        "description": "限定相关资产（如 'GC=F'）。空字符串=不限",
+                        "description": "限定相关资产代码。空字符串=不限",
                     },
                     "top_k": {
                         "type": "integer",
@@ -117,7 +117,7 @@ TOOL_DEFINITIONS: List[Dict[str, Any]] = [
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "asset_symbol": {"type": "string", "description": "如 'GC=F' / 'NDQ.AX'"},
+                    "asset_symbol": {"type": "string", "description": "资产代码，如 '300476' / '00700'"},
                     "n": {"type": "integer", "description": "默认 5 条"},
                 },
                 "required": ["asset_symbol"],
@@ -131,7 +131,7 @@ TOOL_DEFINITIONS: List[Dict[str, Any]] = [
 
 def _impl_get_history_data(symbol: str, period: str = "1y") -> Dict[str, Any]:
     """返回压缩的行情快照（不返回完整 dataframe，token 友好）"""
-    from utils.exchange_fee import get_history_data
+    from utils.akshare_data import get_history_data
     df = get_history_data(symbol, period)
     if df.empty:
         return {"error": f"no data for {symbol}@{period}", "symbol": symbol}
@@ -152,22 +152,14 @@ def _impl_get_history_data(symbol: str, period: str = "1y") -> Dict[str, Any]:
 
 
 def _impl_analyze_multi_timeframe(symbol: str, label: Optional[str] = None) -> str:
-    from utils.exchange_fee import analyze_multi_timeframe, get_history_data
+    from utils.akshare_data import get_history_data, analyze_multi_timeframe
     df = get_history_data(symbol, "2y")
     return analyze_multi_timeframe(df, label or symbol)
 
 
 def _impl_get_macro_snapshot() -> Dict[str, Any]:
-    from utils.exchange_fee import get_history_data
-    out: Dict[str, Any] = {"as_of": datetime.now().isoformat(timespec="seconds")}
-    for sym, label in [("^VIX", "vix"), ("^TNX", "tnx"),
-                       ("USDCNY=X", "usdcny"), ("AUDCNY=X", "audcny")]:
-        df = get_history_data(sym, "5d")
-        if not df.empty:
-            out[label] = round(float(df["Close"].iloc[-1]), 4)
-        else:
-            out[label] = None
-    return out
+    from utils.akshare_data import get_macro_snapshot as _ak_macro
+    return _ak_macro()
 
 
 def _impl_query_dreaming_insights(asset_symbol: str, top_k: int = 3) -> List[Dict[str, Any]]:

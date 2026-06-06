@@ -70,28 +70,13 @@ def get_gold_snapshot(offset_pct: float = 0.015) -> Optional[GoldPriceSnapshot]:
     3. 都失败：返回 None
     """
     try:
-        gold_usd = None
-        usdcny = None
-        # 优先国内源（Sina hf_GC + fx_susdcny），Yahoo 对国内常 429
-        try:
-            from utils.cn_market_provider import fetch_spot
-            gold_usd = fetch_spot("GC=F")
-            usdcny = fetch_spot("USDCNY=X")
-        except Exception as e:  # noqa: BLE001
-            print(f"⚠️ 黄金 cn_market 拉取异常，回退 yfinance: {e}")
-        # 任一缺失再补 yfinance
-        if gold_usd is None or usdcny is None:
-            gold_df = yf.Ticker("GC=F").history(period="1d")
-            usdcny_df = yf.Ticker("USDCNY=X").history(period="1d")
-            if gold_usd is None and not gold_df.empty:
-                gold_usd = float(gold_df["Close"].iloc[-1])
-            if usdcny is None and not usdcny_df.empty:
-                usdcny = float(usdcny_df["Close"].iloc[-1])
-        if gold_usd is None or usdcny is None:
+        gold_df = yf.Ticker("GC=F").history(period="1d")
+        usdcny_df = yf.Ticker("USDCNY=X").history(period="1d")
+        if gold_df.empty or usdcny_df.empty:
             print("⚠️ 黄金数据为空，尝试 DB 兜底")
             return _get_db_fallback_snapshot(offset_pct)
-        gold_usd = float(gold_usd)
-        usdcny = float(usdcny)
+        gold_usd = float(gold_df["Close"].iloc[-1])
+        usdcny = float(usdcny_df["Close"].iloc[-1])
     except Exception as e:
         print(f"⚠️ 黄金 yfinance 拉取失败 ({e})，尝试 DB 兜底")
         return _get_db_fallback_snapshot(offset_pct)

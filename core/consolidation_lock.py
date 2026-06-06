@@ -20,7 +20,7 @@
 from __future__ import annotations
 
 import errno
-import fcntl
+import portalocker
 import os
 import time
 from pathlib import Path
@@ -78,7 +78,7 @@ def try_acquire_consolidation_lock(memory_root: Path) -> Optional[float]:
         flock_fd = os.open(str(flock_path), os.O_CREAT | os.O_RDWR, 0o644)
         try:
             # 非阻塞 LOCK_EX：拿不到立刻失败，让 caller 知道"另一进程正在认领"
-            fcntl.flock(flock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            portalocker.lock(flock_fd, portalocker.LOCK_EX | portalocker.LOCK_NB)
         except OSError as e:
             if e.errno in (errno.EAGAIN, errno.EWOULDBLOCK):
                 print("[autoDream] 另一进程正在认领锁，跳过")
@@ -103,14 +103,14 @@ def try_acquire_consolidation_lock(memory_root: Path) -> Optional[float]:
                       f"距上次刷新 {(now_ms - mtime_ms) / 1000:.0f}s，跳过")
                 return None
 
-        # 写入自己的 PID + 更新 mtime（仍在 fcntl 互斥下）
+        # 写入自己的 PID + 更新 mtime（仍在 portalocker 互斥下）
         path.write_text(str(os.getpid()))
         return mtime_ms or 0.0
     finally:
-        # 写完即释放 fcntl mutex；PID file 本身仍在，作为长生命周期的"持有者标识"
+        # 写完即释放 portalocker mutex；PID file 本身仍在，作为长生命周期的"持有者标识"
         if flock_fd is not None:
             try:
-                fcntl.flock(flock_fd, fcntl.LOCK_UN)
+                portalocker.unlock(flock_fd)
                 os.close(flock_fd)
             except OSError:
                 pass

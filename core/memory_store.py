@@ -8,7 +8,7 @@
 """
 from __future__ import annotations
 
-import fcntl
+import portalocker
 import json
 import os
 from contextlib import contextmanager
@@ -28,11 +28,11 @@ def _file_lock(path: Path):
     path.parent.mkdir(parents=True, exist_ok=True)
     lock_path = path.with_suffix(path.suffix + ".lock")
     with open(lock_path, "w") as lock_file:
-        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+        portalocker.lock(lock_file, portalocker.LOCK_EX)
         try:
             yield
         finally:
-            fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+            portalocker.unlock(lock_file)
 
 
 def _atomic_write_text(path: Path, content: str, encoding: str = "utf-8") -> None:

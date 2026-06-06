@@ -1,10 +1,16 @@
 """services/news_sources —— 多源新闻抓取，事件层 fetch 阶段统一入口
 
-国内可直连源（任一失败不连坐），不再用 yahoo（对国内常被墙/限流）：
-- cls_news.py      财联社电报（A股盘中最快中文实时，自带题材/关联个股）
-- sina_news.py     新浪财经 证券要闻 + 国际财经（覆盖中东地缘）
-- ddgs_news.py     DuckDuckGo news（宽泛查询，覆盖 macro / sector）
-- rss_feed.py      Reuters / BBC / FT / 财新 等 RSS（高质量主流财经）
+国外源（任一失败不连坐）：
+- ddgs_news.py        DuckDuckGo news（宽泛查询，覆盖 macro / sector）
+- rss_feed.py         Reuters / BBC / FT / 财新 等 RSS（高质量主流财经）
+- yfinance_news.py    yf.Ticker(sym).news（按 symbol 直接关联）
+
+国内源（任一失败不连坐，默认启用）：
+- eastmoney_news.py   东方财富（A股公告/研报/快讯）
+- cls_news.py         财联社（7×24 快讯）
+- sina_news.py        新浪财经（滚动新闻）
+- xueqiu_news.py      雪球（热门讨论+关键词搜索）
+- wallstreetcn_news.py 华尔街见闻（宏观解读+市场快讯）
 
 统一返回 RawNewsItem dataclass，给 event_normalizer 进 LLM 归一化。
 """
@@ -41,6 +47,7 @@ def fetch_all(
     queries: Optional[List[str]] = None,
     symbols: Optional[List[str]] = None,
     rss_feeds: Optional[List[Dict[str, str]]] = None,
+    domestic: bool = True,
     max_per_source: int = 20,
     extract_fulltext: bool = False,
     timeout_sec: float = 30.0,
@@ -49,31 +56,18 @@ def fetch_all(
 
     Args:
         queries:          给 ddgs_news 的关键词列表（如 ['Fed rate', 'NDQ.AX']）
-        symbols:          已废弃（原 yfinance_news 用，现移除）；保留入参兼容旧调用方
+        symbols:          给 yfinance_news 的 ticker 列表
         rss_feeds:        给 rss_feed 的 feed 列表 [{"name": "reuters", "url": "..."}]
+        domestic:         是否启用国内新闻源（东方财富/财联社/新浪/雪球/华尔街见闻）
         max_per_source:   每个源最多返回多少条
         extract_fulltext: ddgs 是否抓正文（慢，dry-run 不建议）
         timeout_sec:      单源超时
     """
-    from services.news_sources.cls_news import fetch_cls_telegraph
     from services.news_sources.ddgs_news import fetch_ddgs_news
     from services.news_sources.rss_feed import fetch_rss
-    from services.news_sources.sina_news import fetch_sina_news
+    from services.news_sources.yfinance_news import fetch_yfinance_news
 
     tasks: List[Dict[str, Any]] = []
-
-    # 国内实时财经源：财联社电报 + 新浪要闻（不依赖 query/symbol，每轮都拉）
-    tasks.append({
-        "fn": fetch_cls_telegraph,
-        "kwargs": {"max_items": max_per_source},
-        "label": "cls:电报",
-    })
-    tasks.append({
-        "fn": fetch_sina_news,
-        "kwargs": {"max_items": max_per_source},
-        "label": "sina:要闻",
-    })
-
     if queries:
         for q in queries:
             tasks.append({
@@ -81,6 +75,13 @@ def fetch_all(
                 "kwargs": {"query": q, "max_results": max_per_source,
                            "extract_fulltext": extract_fulltext},
                 "label": f"ddgs:{q[:30]}",
+            })
+    if symbols:
+        for sym in symbols:
+            tasks.append({
+                "fn": fetch_yfinance_news,
+                "kwargs": {"symbol": sym, "max_items": max_per_source},
+                "label": f"yfinance:{sym}",
             })
     if rss_feeds:
         for feed in rss_feeds:
@@ -90,6 +91,21 @@ def fetch_all(
                            "max_items": max_per_source},
                 "label": f"rss:{feed['name']}",
             })
+
+    # --- 国内新闻源（聚合模块，每个源独立降级）---
+    if domestic:
+        try:
+            from services.news_sources.domestic_news import (
+                fetch_eastmoney_news, fetch_cls_news, fetch_sina_news,
+                fetch_xueqiu_news, fetch_wallstreetcn_news,
+            )
+            tasks.append({"fn": fetch_eastmoney_news, "kwargs": {"max_items": max_per_source}, "label": "eastmoney"})
+            tasks.append({"fn": fetch_cls_news, "kwargs": {"max_items": max_per_source}, "label": "cls"})
+            tasks.append({"fn": fetch_sina_news, "kwargs": {"max_items": max_per_source}, "label": "sina"})
+            tasks.append({"fn": fetch_xueqiu_news, "kwargs": {"query": "A股", "max_items": max_per_source}, "label": "xueqiu"})
+            tasks.append({"fn": fetch_wallstreetcn_news, "kwargs": {"max_items": max_per_source}, "label": "wallstreetcn"})
+        except Exception as e:
+            log.warning(f"国内新闻源加载失败: {e}")
 
     if not tasks:
         return []

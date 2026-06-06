@@ -176,28 +176,6 @@ def get_history_data(
                 pass  # 日期格式错误就不拉
 
     if should_fetch_yf:
-        # 优先国内源（Sina/Tencent），Yahoo 对 A股/港股从国内常 429。
-        # CN 源拉到就落 DB + 返回，完全不碰 yfinance。
-        try:
-            from utils.cn_market_provider import fetch_history, is_supported
-            if is_supported(symbol):
-                df_cn = fetch_history(symbol, fetch_period)
-                if df_cn is not None and not df_cn.empty:
-                    print(f"📈 [cn_market] {symbol} ← Sina/Tencent ({len(df_cn)} bars)")
-                    for idx, row in df_cn.iterrows():
-                        _STORE.save_generic_price(
-                            symbol, idx.strftime('%Y-%m-%d'), row['Close'],
-                            source="cn_market",
-                            high=_nan_to_none(row.get('High')),
-                            low=_nan_to_none(row.get('Low')),
-                            volume=_nan_to_none(row.get('Volume')),
-                        )
-                    df_db = _STORE.get_history_df(symbol)
-                    should_fetch_yf = False   # CN 源成功，跳过 yfinance
-        except Exception as e:  # noqa: BLE001
-            print(f"⚠️ [cn_market] {symbol} 拉取异常，回退 yfinance: {e}")
-
-    if should_fetch_yf:
         try:
             print(f"🔄 [yfinance] Refreshing {symbol} (period={fetch_period})...")
             ticker = yf.Ticker(symbol)
@@ -319,6 +297,7 @@ def analyze_multi_timeframe(hist: pd.DataFrame, title: str) -> str:
 
     ma_120 = metrics["ma120"]
     ma_250 = metrics["ma250"]
+    ma_20 = metrics.get("ma20")
     rsi_14 = metrics["rsi14"]
     pos = metrics["price_quantile_2y"]
     rvol = metrics.get("rvol")
@@ -357,8 +336,30 @@ def analyze_multi_timeframe(hist: pd.DataFrame, title: str) -> str:
     if ma_250 is not None:
         report_lines.append(f"- MA250 (Base): {ma_250:.4f}")
         if ma_250 != 0:
-            bias = (current_price / ma_250 - 1)
-            report_lines.append(f"- MA250 Deviation: {bias:.2%}")
+            bias = (current_price / ma_250 - 1) * 100
+            # 52周均线葛兰碧信号
+            if bias > 20:
+                ma250_signal = f"价格高于年线 {bias:.1f}%（极度超涨，均值回归风险极高）"
+            elif bias > 10:
+                ma250_signal = f"价格高于年线 {bias:.1f}%（超涨区域，短期追高风险大）"
+            elif bias > 0:
+                ma250_signal = f"价格高于年线 {bias:.1f}%（长期牛市确认，年线为强支撑）"
+            elif bias > -10:
+                ma250_signal = f"价格低于年线 {abs(bias):.1f}%（年线下方，趋势偏弱）"
+            elif bias > -20:
+                ma250_signal = f"价格低于年线 {abs(bias):.1f}%（深度破位，年线构成阻力）"
+            else:
+                ma250_signal = f"价格低于年线 {abs(bias):.1f}%（严重超跌，年线远离，需长时间修复）"
+            report_lines.append(f"- MA250 52周均线信号: {ma250_signal}")
+
+    # 均线排列判断
+    if ma_20 is not None and ma_120 is not None and ma_250 is not None:
+        if ma_20 > ma_120 > ma_250:
+            report_lines.append("- 均线排列: MA20 > MA120 > MA250（多头排列 ✅）")
+        elif ma_20 < ma_120 < ma_250:
+            report_lines.append("- 均线排列: MA20 < MA120 < MA250（空头排列 🔴）")
+        else:
+            report_lines.append("- 均线排列: 交织（趋势不明朗）")
 
     return "\n".join(report_lines)
 

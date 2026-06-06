@@ -1,9 +1,10 @@
 [project]
 name = "invest"
-version = "0.4.0"
+version = "0.5.0"
 description = "Add your description here"
 requires-python = ">=3.13"
 dependencies = [
+    "akshare>=1.14.0",   # 国内数据源（A股/港股/宏观）
     "ddgs>=9.10.0",
     "trafilatura>=2.0.0",
     "yfinance>=0.2.66",
@@ -26,6 +27,8 @@ dependencies = [
     "openai>=1.45",  # SDKAgent 直接走 OpenAI 兼容客户端调 DeepSeek
     "optuna>=4.0",   # 阶段 4 RL：Bayesian Optimization 搜参
     "feedparser>=6.0.10",  # 事件层 RSS 源（Reuters/BBC/FT/财新 免费 feed）
+    "portalocker>=3.0",    # fcntl 替代（Windows 兼容文件锁）
+    "playwright>=1.40",    # 国内新闻源 headless 浏览器抓取
     "sqlite-vec>=0.1.6",   # 事件层向量精排（SQLite 扩展，不需要独立向量库）
 ]
 
@@ -60,6 +63,8 @@ allow_indirect_imports = "true"
 ignore_imports = [
     # backtest_committee 是研究用，跟 production 委员会不共享 service layer
     "scripts.backtest_committee -> core.committee",
+    # full_validation 是开卷下限验证（研究用），需 patch core.committee._persist 防污染
+    "scripts.full_validation -> core.committee",
 ]
 # 已删的孤儿 dep：
 # - duckduckgo-search: 被 ddgs 取代

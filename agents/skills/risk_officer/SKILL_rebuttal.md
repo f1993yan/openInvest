@@ -29,15 +29,6 @@ Quant 给 neutral（REGIME=uptrend 锁死不能 bearish），但 Risk R2 看到"
    - Round 1 没注意到的集中度计算修正（分母用 *总资产*，不是 NDQ + cash）
    - 用户 7 天内多次买入同资产 → 情绪化追涨，给 high_risk
    - DRY_POWDER_CNY < 1000 **且** SOLVENCY_BUFFER_LEVEL=weak/unknown → 流动性风险升级
-   - **A股（.SS/.SZ）加仓物理不可行**：INVESTABLE_CASH_CNY < 现价×100（不足 1 手）→
-     加仓建议无法执行，升 concerned 并在 REASONING 注明"不足 1 手无法加仓"
-
-## A股交易规则提醒（{{asset_symbol}} 以 .SS/.SZ 结尾时附带，不构成升级 trigger）
-
-- 复核加仓建议是否为 **100 股整手的整数倍**；若 Round 1 给了买不出的零碎金额，
-  在 REASONING 折算成可买手数（floor(可投上限/(现价×100)) 手）。
-- **T+1**：当天买入次日才可卖。Quant 即便给短线 bullish，加仓后也无法日内止损，
-  ADJUSTED_STOP_LOSS 必须是"次日及以后"可执行的价位/条件，不要给日内级别的止损。
 
 ## 禁止的升级 trigger（历史 bug 修复）
 
