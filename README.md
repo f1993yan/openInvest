@@ -39,6 +39,10 @@
 - **Round 2**：Quant 和 Risk 互看对方报告，调整观点
 - **CIO** 综合所有人发言，输出 BUY / ACCUMULATE / HOLD / TRIM / SELL + 置信度
 
+新增的国内新闻层会从综合热点新闻源提取事件，不限于股票类新闻；系统会归纳事件涉及的 A 股板块、主题和候选龙头，并在出现明显危险信息时输出可解释的量化影响估计。
+
+新增的双账户账本会同时记录真实账户和委员会影子账户：真实账户只在用户明确说明交易后更新，委员会账户按委员会建议模拟执行，用日度收盘盈亏对比指标可靠性。
+
 输出一份 Markdown memo。系统不会自动下单——决策仍归你。
 
 ---
@@ -74,17 +78,17 @@ bash ~/openInvest/skill/install.sh
 
 ```env
 # === DeepSeek（默认） ===
-LLM_API_KEY=sk-xxx
+LLM_API_KEY=<your-llm-api-key>
 LLM_BASE_URL=https://api.deepseek.com
 LLM_MODEL=deepseek-v4-flash
 
 # === 千问（Aliyun DashScope） ===
-LLM_API_KEY=sk-xxx
+LLM_API_KEY=<your-llm-api-key>
 LLM_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode
 LLM_MODEL=qwen-max
 
 # === 智谱 AI ===
-LLM_API_KEY=xxx
+LLM_API_KEY=<your-llm-api-key>
 LLM_BASE_URL=https://open.bigmodel.cn/api/paas
 LLM_MODEL=glm-4-flash
 ```
@@ -104,7 +108,7 @@ LLM_MODEL=glm-4-flash
   <img src="https://raw.githubusercontent.com/longsizhuo/openInvest/pnl-data/docs/pnl_chart.svg" alt="PnL chart" width="100%"/>
   <sub>每 2h 自动更新到 <a href="https://github.com/longsizhuo/openInvest/tree/pnl-data">pnl-data 分支</a> · 上半 = 30 天趋势 · 下半 = vs 8 个基准的累计涨幅</sub>
   <br/>
-  <sub>📌 <b>图中数据为作者本人账户</b>，仅作方法论展示。你跑起来后看到的是<b>你自己的</b>持仓曲线。</sub>
+  <sub>📌 图中数据仅作方法论展示。你跑起来后看到的是<b>你自己的</b>持仓曲线。</sub>
 </div>
 
 <!-- OUTPERFORM_FEED_START — jobs/pnl_snapshot 每 2h 追加 -->
@@ -140,6 +144,10 @@ docs/wiki/ 完整架构文档 + ADR
 
 **事件层（第一层）**（实现中，默认关）：盘中每 30 分钟扫多源新闻（DDGS + RSS + yfinance），flash 归一化成结构化事件落 `db/events.db`，命中用户持仓 / target_assets 则邮件通知 + 触发委员会重跑。开关：`jobs/event_watch.yml` 的 `enabled: true` + env `DEEPSEEK_API_KEY` + `EMAIL_SENDER`。详见 [ADR-006](docs/wiki/adr/006-event-layer.md)。
 
+**国内热点新闻层**：周末或非交易时段可抓取国内综合热点新闻，提炼事件、关联板块和候选龙头股；危险事件会通过风险模型输出方向、置信度、暴露板块和可能影响区间。
+
+**双账户复盘层**：`real` 账户记录用户明确执行的交易，`committee` 账户记录委员会建议的影子执行；两者从同一初始持仓出发，按交易日沉淀收盘后盈亏快照。
+
 详见：
 - [架构总览](docs/wiki/01-architecture.md) | [4 角色 prompt 解析](docs/wiki/02-agents.md) | [Dreaming](docs/wiki/03-dreaming.md)
 - [双执行路径 — Coordinator vs Direct](docs/wiki/04-execution-paths.md)
@@ -155,7 +163,7 @@ LLM-driven 决策辅助工具。**不构成投资建议**。LLM 会出错、会�
 
 系统不会自动下单。建议先用 `what_if` 在小金额上跑两周再上真仓。
 
-公开命中率数据 / PnL 曲线 / 跑赢事件均为作者本人账户历史记录，**过去表现不预示未来收益**。
+公开命中率数据 / PnL 曲线 / 跑赢事件仅用于展示方法论和系统行为，**过去表现不预示未来收益**。
 
 **回测局限**：`scripts/backtest_runner.py` 跑的 paper-trading walk-forward 默认拒绝
 decision_date > 2024-06-30 的回测（强制跑加 `--allow-lookahead`）。原因：

@@ -1,0 +1,27 @@
+{
+  "total_assets": 100000,
+  "cash": 20000,
+  "t2_pending_cash": 0,
+  "holdings": [
+    {
+      "symbol": "600000",
+      "name": "示例A股",
+      "market": "a",
+      "sector": "示例行业",
+      "industry": "示例细分行业",
+      "position_pct": 10.0,
+      "cost": 10.0
+    }
+  ],
+  "watchlist": [
+    {
+      "symbol": "000001",
+      "name": "示例观察标的",
+      "market": "a",
+      "sector": "示例行业",
+      "industry": "示例细分行业",
+      "position_pct": 0,
+      "cost": 0
+    }
+  ]
+}

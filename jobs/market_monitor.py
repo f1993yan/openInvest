@@ -460,16 +460,47 @@ def build_holdings_list(holdings: List[Dict], exclude_symbol: str) -> List[Dict]
     ]
 
 
+def _sync_config_account_fields(config: Dict, account_stocks: List[Dict]) -> Dict:
+    """Return a monitor config view backed by real-account holdings."""
+    updated = dict(config)
+    by_symbol = {s["symbol"]: s for s in account_stocks}
+    updated["holdings"] = [
+        by_symbol.get(s.get("symbol"), s)
+        for s in config.get("holdings", [])
+    ]
+    updated["watchlist"] = [
+        by_symbol.get(s.get("symbol"), s)
+        for s in config.get("watchlist", [])
+    ]
+    return updated
+
+
 def run_monitor_round():
     """执行一轮监控"""
     round_time = datetime.now().strftime("%H:%M")
     log.info(f"=== 开始监控轮次 {round_time} ===")
 
     config = load_config()
+    try:
+        from db.account_ledger import AccountLedger, REAL_ACCOUNT
+        ledger = AccountLedger()
+        ledger.ensure_initialized(config)
+        account_stocks = ledger.stocks_for_committee_input(config, account=REAL_ACCOUNT)
+        config = _sync_config_account_fields(config, account_stocks)
+    except Exception as e:
+        ledger = None
+        log.warning(f"双账户账本初始化/读取失败，回退配置持仓: {e}")
+
     holdings = config.get("holdings", [])
     watchlist = config.get("watchlist", [])
     total_assets = config["total_assets"]
     cash = config["cash"]
+    if ledger is not None:
+        try:
+            real_summary = ledger.account_summary("real")
+            cash = float(real_summary.get("cash_cny", cash) or cash)
+        except Exception:
+            pass
 
     all_stocks = holdings + watchlist
     all_symbols = [s["symbol"] for s in all_stocks]
@@ -535,6 +566,19 @@ def run_monitor_round():
             industry=stock.get("industry", ""),
             fundamentals=stock.get("fundamentals", {}),
         )
+        if result and result.get("success"):
+            result.setdefault("symbol", sym)
+            result.setdefault("name", stock["name"])
+            if ledger is not None:
+                try:
+                    trade = ledger.apply_committee_result(result, price=price_info["price"])
+                    if trade:
+                        log.info(
+                            f"影子账户执行 {trade.direction} {trade.symbol} "
+                            f"{trade.units:.0f}股 @{trade.price:.2f}"
+                        )
+                except Exception as e:
+                    log.warning(f"影子账户执行委员会建议失败 {sym}: {e}")
         results.append(result)
 
         # 打印简要结果
@@ -560,6 +604,17 @@ def run_monitor_round():
 
     # 4. 写报告
     write_report(round_time, results, actionable, prices, news_items)
+    if ledger is not None:
+        try:
+            from db.account_ledger import prices_from_sina_result
+            pnl_rows = ledger.snapshot_daily_pnl(prices=prices_from_sina_result(prices))
+            for row in pnl_rows:
+                log.info(
+                    f"账户PnL {row['account']}: total={row['total_value_cny']:,.0f}, "
+                    f"day={row['day_pnl_cny']}, pnl={row['total_pnl_pct']:+.2f}%"
+                )
+        except Exception as e:
+            log.warning(f"双账户收盘/PnL快照失败: {e}")
 
     # 5. 通知 — 始终弹窗，包含完整监控摘要
     import re as _re

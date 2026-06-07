@@ -3218,10 +3218,12 @@ async def commsec_apply(
 
 
 from db.trades_db import TradesDB as _TradesDB
+from db.account_ledger import AccountLedger as _AccountLedger
 
 # 模块级单例 — 延迟初始化，避免 DB 文件损坏时 import 崩溃导致 crash-loop
 # （模块级 _TradesDB() 在 import 时执行，DB 损坏 → import 失败 → 服务器无法启动 → 重启死循环）
 _trades_db: Optional[_TradesDB] = None
+_account_ledger: Optional[_AccountLedger] = None
 
 
 def _get_trades_db() -> _TradesDB:
@@ -3230,6 +3232,87 @@ def _get_trades_db() -> _TradesDB:
     if _trades_db is None:
         _trades_db = _TradesDB()
     return _trades_db
+
+
+def _get_account_ledger() -> _AccountLedger:
+    global _account_ledger
+    if _account_ledger is None:
+        _account_ledger = _AccountLedger()
+        cfg_path = Path(__file__).parent.parent / "jobs" / "market_monitor_config.json"
+        if cfg_path.exists():
+            try:
+                _account_ledger.ensure_initialized(json.loads(cfg_path.read_text(encoding="utf-8")))
+            except Exception as e:
+                log.warning(f"双账户账本初始化失败: {e}")
+    return _account_ledger
+
+
+class AccountTradeRequest(BaseModel):
+    symbol: str = Field(..., min_length=1, max_length=32)
+    direction: Literal["BUY", "SELL"]
+    units: float = Field(..., gt=0)
+    price: float = Field(..., gt=0)
+    trade_date: Optional[str] = Field(None, pattern=r"^\d{4}-\d{2}-\d{2}$")
+    note: Optional[str] = Field(None, max_length=512)
+
+
+class AccountSnapshotRequest(BaseModel):
+    prices: Dict[str, float] = Field(default_factory=dict)
+    trade_date: Optional[str] = Field(None, pattern=r"^\d{4}-\d{2}-\d{2}$")
+
+
+@app.get("/api/accounts", tags=["accounts"])
+async def list_dual_accounts() -> Dict[str, Any]:
+    """查看真实账户与委员会影子账户的现金和持仓。"""
+    db = _get_account_ledger()
+    return {
+        "accounts": {
+            "real": {
+                "summary": db.account_summary("real"),
+                "holdings": db.list_holdings("real"),
+            },
+            "committee": {
+                "summary": db.account_summary("committee"),
+                "holdings": db.list_holdings("committee"),
+            },
+        }
+    }
+
+
+@app.post("/api/accounts/real/trades", tags=["accounts"])
+async def record_real_account_trade(body: AccountTradeRequest = Body(...)) -> Dict[str, Any]:
+    """用户明确告知真实账户成交后，才更新真实账户。"""
+    try:
+        trade = _get_account_ledger().apply_user_trade(
+            symbol=body.symbol,
+            direction=body.direction,
+            units=body.units,
+            price=body.price,
+            trade_date=body.trade_date,
+            note=body.note or "",
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return {"ok": True, "trade": trade.__dict__}
+
+
+@app.post("/api/accounts/snapshot", tags=["accounts"])
+async def snapshot_dual_accounts(body: AccountSnapshotRequest = Body(default=AccountSnapshotRequest())) -> Dict[str, Any]:
+    """按天记录两个账户的收盘后盈亏。prices 为空时使用持仓成本兜底。"""
+    rows = _get_account_ledger().snapshot_daily_pnl(
+        prices=body.prices,
+        trade_date=body.trade_date,
+    )
+    return {"ok": True, "rows": rows}
+
+
+@app.get("/api/accounts/pnl", tags=["accounts"])
+async def list_dual_account_pnl(
+    account: Optional[Literal["real", "committee"]] = Query(None),
+    limit: int = Query(60, ge=1, le=500),
+) -> Dict[str, Any]:
+    rows = _get_account_ledger().list_daily_pnl(account=account, limit=limit)
+    return {"count": len(rows), "rows": rows}
 
 
 class RecordTradeRequest(BaseModel):
