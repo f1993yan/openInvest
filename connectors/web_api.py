@@ -2924,6 +2924,66 @@ class RegimeRulesResponse(BaseModel):
     tools: List[Dict[str, Any]]   # 5 个可调 tool
 
 
+class SmcBacktestRequest(BaseModel):
+    symbol: str = Field(..., min_length=1, max_length=32, description="A股代码，如 300001 / 600150")
+    period: str = Field("2y", description="历史窗口，如 3mo / 6mo / 1y / 2y")
+    initial_cash: float = Field(100_000.0, gt=0)
+    risk_per_trade_pct: float = Field(1.0, gt=0, le=10)
+    reward_risk: float = Field(2.0, gt=0.1, le=10)
+    swing_lookback: int = Field(3, ge=1, le=10)
+    atr_window: int = Field(14, ge=2, le=100)
+    max_hold_bars: int = Field(20, ge=1, le=250)
+    min_stop_atr: float = Field(0.8, gt=0, le=10)
+    require_fvg: bool = False
+    require_liquidity_sweep: bool = False
+    allow_short: bool = False
+    fee_bps: float = Field(5.0, ge=0, le=100)
+
+
+class SmcBacktestResponse(BaseModel):
+    symbol: str
+    period: str
+    rows: int
+    result: Dict[str, Any]
+
+
+@app.post("/api/backtest/smc", response_model=SmcBacktestResponse, tags=["system"])
+async def run_smc_backtest(body: SmcBacktestRequest = Body(...)) -> SmcBacktestResponse:
+    """Run a deterministic SMC concept backtest for a symbol.
+
+    This endpoint does not read portfolio holdings or API keys. It only pulls
+    OHLCV history through the existing market data provider and returns a
+    research result.
+    """
+    from core.smc_backtest import SMCBacktestConfig, backtest_smc_strategy
+    from utils.akshare_data import get_history_data as get_cn_history
+
+    df = get_cn_history(body.symbol, period=body.period)
+    if df is None or df.empty:
+        raise HTTPException(status_code=404, detail=f"no OHLCV data for {body.symbol}")
+
+    cfg = SMCBacktestConfig(
+        swing_lookback=body.swing_lookback,
+        atr_window=body.atr_window,
+        risk_per_trade_pct=body.risk_per_trade_pct,
+        initial_cash=body.initial_cash,
+        reward_risk=body.reward_risk,
+        max_hold_bars=body.max_hold_bars,
+        min_stop_atr=body.min_stop_atr,
+        require_fvg=body.require_fvg,
+        require_liquidity_sweep=body.require_liquidity_sweep,
+        allow_short=body.allow_short,
+        fee_bps=body.fee_bps,
+    )
+    result = backtest_smc_strategy(df, cfg)
+    return SmcBacktestResponse(
+        symbol=body.symbol,
+        period=body.period,
+        rows=len(df),
+        result=result,
+    )
+
+
 @app.get("/api/regime_rules", response_model=RegimeRulesResponse, tags=["system"])
 async def get_regime_rules() -> RegimeRulesResponse:
     """暴露 invest 项目所有「硬规则」+「LLM 提示词」给 GUI marketing 页

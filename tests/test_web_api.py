@@ -743,6 +743,48 @@ def test_openapi_includes_strategy_writes(client):
     assert "delete" in paths["/api/strategy/asset/{symbol}"]
 
 
+def test_smc_backtest_endpoint(client, monkeypatch):
+    import utils.akshare_data as akdata
+
+    rows = [
+        (10.0, 10.4, 9.8, 10.1),
+        (10.1, 10.5, 9.9, 10.3),
+        (10.3, 10.8, 10.0, 10.7),
+        (10.7, 11.0, 10.4, 10.6),
+        (10.6, 10.9, 10.2, 10.4),
+        (10.4, 10.6, 9.9, 10.0),
+        (10.0, 10.2, 9.5, 9.7),
+        (9.7, 9.9, 9.1, 9.3),
+        (9.3, 9.6, 8.9, 9.4),
+        (9.4, 10.0, 9.2, 9.8),
+        (9.8, 10.8, 9.7, 10.7),
+        (10.7, 11.4, 10.6, 11.2),
+        (11.2, 12.0, 11.1, 11.8),
+        (11.8, 12.4, 11.7, 12.2),
+        (12.2, 12.8, 12.0, 12.6),
+    ]
+    df = pd.DataFrame(
+        rows,
+        columns=["Open", "High", "Low", "Close"],
+        index=pd.date_range("2026-01-01", periods=len(rows), freq="D"),
+    )
+    monkeypatch.setattr(akdata, "get_history_data", lambda symbol, period="2y": df)
+
+    r = client.post(
+        "/api/backtest/smc",
+        json={"symbol": "300001", "period": "1y", "swing_lookback": 2, "atr_window": 3},
+    )
+
+    assert r.status_code == 200
+    body = r.json()
+    assert body["symbol"] == "300001"
+    assert body["period"] == "1y"
+    assert body["rows"] == len(df)
+    assert body["result"]["config"]["allow_short"] is False
+    assert "metrics" in body["result"]
+    assert "signals" in body["result"]
+
+
 # ============ GUI 同步链路回归测试 ============
 # 2026-05-19 用户反馈"GUI 不显示 NapCat 同步的持仓 / 决策回放空白"。
 # 后端本身没缓存（每请求 new PortfolioManager → 直接读 disk），但中间层
