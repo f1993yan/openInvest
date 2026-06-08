@@ -1,7 +1,7 @@
 @echo off
 set PYTHONUTF8=1
 set PYTHONIOENCODING=utf-8
-cd /d D:\Documents\Code\OpenInvest
+cd /d D:\Code_for_AI\OpenInvest\openInvest
 echo openInvest backend starting on http://127.0.0.1:8766 ...
 start "openInvest Backend" /B uv run uvicorn backend.server:app --host 127.0.0.1 --port 8766 > backend.log 2>&1
 echo Backend started.

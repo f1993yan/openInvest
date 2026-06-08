@@ -478,6 +478,57 @@ def run_wealth_context_view(wealth_context: Optional[Dict[str, Any]],
     )
     return _ask(agent, ctx_brief)
 
+def run_optimizer_review_view(
+    *,
+    asset: Dict[str, Any],
+    optimizer_audit: str,
+    entry_exit_audit: str,
+    regime_brief: str,
+    fundamental_brief: str = "",
+) -> str:
+    """LLM review of deterministic optimizer outputs.
+
+    The reviewer is not allowed to change numbers. It explains whether the
+    deterministic action/price levels are coherent with regime, fundamentals,
+    risk, and trading constraints, then returns a short conclusion for display.
+    """
+    sym = asset.get("symbol", "")
+    asset_name = asset.get("display_name", sym)
+    system_prompt = (
+        "You are an optimizer audit reviewer for an investment committee. "
+        "You evaluate deterministic optimizer outputs; you do not recalculate "
+        "or invent new prices, positions, or allocation amounts. "
+        "Return only the following format:\n"
+        "OPTIMIZER_REVIEW:\n"
+        "CONCLUSION: accept | caution | override_required\n"
+        "ONE_LINE: one concise Chinese sentence\n"
+        "RISK_FLAGS: comma-separated Chinese flags or none\n"
+        "HUMAN_CHECK: one concise Chinese sentence or none\n"
+        "RATIONALE: two concise Chinese sentences max"
+    )
+    agent = _create_agent(
+        system_prompt,
+        search_enabled=False,
+        temperature=0.1,
+        role="optimizer_review",
+        asset=sym,
+        round_label="optimizer_review",
+    )
+    context = (
+        f"# Asset\n{asset_name} ({sym})\n\n"
+        f"# Regime\n{regime_brief or '(none)'}\n\n"
+        f"# Fundamental model\n{fundamental_brief or '(none)'}\n\n"
+        f"# Deterministic optimizer audit\n{optimizer_audit or '(none)'}\n\n"
+        f"# Entry/exit point audit\n{entry_exit_audit or '(none)'}\n\n"
+        "Task: judge whether the optimizer output is coherent and actionable. "
+        "Do not change the numbers. If hard constraints, tail risk, low data "
+        "confidence, or reward/risk are questionable, use CONCLUSION: caution. "
+        "Use override_required only when the deterministic output contradicts "
+        "the provided constraints or has missing critical data."
+    )
+    return _ask(agent, context)
+
+
 
 def _parallel_ask(pairs: List[Tuple[Optional[SDKAgent], str]]) -> List[str]:
     """并行跑多个 (agent, input)，返回结果列表（按入参顺序）

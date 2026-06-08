@@ -353,6 +353,21 @@ class AccountLedger:
             ).fetchall()
         return [dict(r) for r in rows]
 
+    def list_trades(self, account: Optional[str] = None, limit: int = 100) -> List[Dict[str, Any]]:
+        params: List[Any] = []
+        where = ""
+        if account:
+            _validate_account(account)
+            where = "WHERE account = ?"
+            params.append(account)
+        params.append(limit)
+        with self._lock:
+            rows = self.conn.execute(
+                f"SELECT * FROM trades {where} ORDER BY ts DESC, id DESC LIMIT ?",
+                params,
+            ).fetchall()
+        return [dict(r) for r in rows]
+
     def _apply_trade(
         self,
         *,
@@ -489,4 +504,3 @@ def prices_from_sina_result(prices: Dict[str, Dict[str, Any]]) -> Dict[str, floa
         for symbol, info in prices.items()
         if float(info.get("price") or 0) > 0
     }
-

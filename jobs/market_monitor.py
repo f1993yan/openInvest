@@ -172,7 +172,8 @@ def call_committee(symbol: str, name: str, market: str,
                    news_brief: str = "",
                    sector: str = "",
                    industry: str = "",
-                   fundamentals: Optional[Dict[str, Any]] = None) -> Optional[Dict]:
+                   fundamentals: Optional[Dict[str, Any]] = None,
+                   optimizer_review_enabled: bool = True) -> Optional[Dict]:
     """调用后端委员会 API"""
     payload = {
         "symbol": symbol,
@@ -193,6 +194,7 @@ def call_committee(symbol: str, name: str, market: str,
         "t2_pending_cash": t2_pending,
         "news_brief": news_brief,
         "fundamentals": fundamentals or {},
+        "optimizer_review_enabled": optimizer_review_enabled,
         "max_debate_rounds": 2,  # 监控模式减半辩论轮数，加速
     }
     try:
@@ -343,23 +345,29 @@ def write_report(round_time: str, results: List[Dict],
         "",
         "## 🏛️ 委员会分析汇总",
         "",
-        "| 股票 | Verdict | 置信度 | 建议 | Fundamental | Quant | Regime |",
-        "|------|---------|--------|------|-------------|-------|--------|",
+        "| 股票 | Verdict | 置信度 | 建议 | Fundamental | OptReview | Quant | Regime |",
+        "|------|---------|--------|------|-------------|-----------|-------|--------|",
     ])
     for r in results:
         if r.get("success"):
             fundamental = r.get("fundamental_model", "")
             if r.get("fundamental_score") is not None:
                 fundamental = f"{fundamental}:{r.get('fundamental_score', 50):.0f}"
+            review = ""
+            for line in (r.get("optimizer_review") or "").splitlines():
+                if line.startswith("CONCLUSION:"):
+                    review = line.split(":", 1)[1].strip()
+                    break
             lines.append(
                 f"| {r['name']} | **{r['verdict']}** | {r['confidence']:.2f} | "
                 f"¥{r.get('suggested_alloc_cny', 0):,.0f} | "
                 f"{fundamental} | "
+                f"{review or '-'} | "
                 f"{r.get('quant_view', '')[:30]}... | "
                 f"{r.get('regime', '')[:20]}... |"
             )
         else:
-            lines.append(f"| {r.get('name', r.get('symbol'))} | ❌ 失败 | — | — | — | — | — |")
+            lines.append(f"| {r.get('name', r.get('symbol'))} | ❌ 失败 | — | — | — | — | — | — |")
 
     if actionable:
         lines.extend([
@@ -439,7 +447,13 @@ def wait_until_next_round():
 def load_config() -> Dict:
     """加载持仓配置"""
     if CONFIG_PATH.exists():
-        with open(CONFIG_PATH, "r", encoding="utf-8") as f:
+        for enc in ("utf-8", "utf-8-sig", "gbk", "cp936"):
+            try:
+                with open(CONFIG_PATH, "r", encoding=enc) as f:
+                    return json.load(f)
+            except UnicodeDecodeError:
+                continue
+        with open(CONFIG_PATH, "r", encoding="utf-8", errors="replace") as f:
             return json.load(f)
     else:
         log.error(f"配置文件不存在: {CONFIG_PATH}")
@@ -565,6 +579,7 @@ def run_monitor_round():
             sector=stock.get("sector", ""),
             industry=stock.get("industry", ""),
             fundamentals=stock.get("fundamentals", {}),
+            optimizer_review_enabled=config.get("optimizer_review_enabled", True),
         )
         if result and result.get("success"):
             result.setdefault("symbol", sym)
@@ -640,52 +655,41 @@ def run_monitor_round():
     if actionable:
         toast_lines.append("── ⚠️ 需操作 ──")
         for a in actionable[:4]:
-            memo = a.get("cio_memo", "")
-            # 解析止盈止损
-            sl = _re.search(r"stop_loss_price:\s*([\d.]+)", memo)
-            tp = _re.search(r"take_profit_price:\s*([\d.]+)", memo)
-            sl_str = f" 损¥{sl.group(1)}" if sl else ""
-            tp_str = f" 盈¥{tp.group(1)}" if tp else ""
+            # 入场出场点
+            ee = a.get("entry_exit_points", {}) or {}
+            buy = ee.get("buy_pullback_price") or ee.get("buy_breakout_price")
+            sl_p = ee.get("stop_loss_price")
+            tp_p = ee.get("take_profit_price")
+            exit_p = ee.get("trim_price")
+            reentry = ee.get("reentry_price")
+            rr = ee.get("reward_risk_ratio", 0)
+
+            # LLM审核
+            review = a.get("optimizer_review", "") or ""
+            rl = _re.search(r"ONE_LINE:\s*(.+)", review) if _re else None
+            comment = rl.group(1)[:60] if rl else ""
+
             # 手数
             alloc = a.get("suggested_alloc_cny", 0)
             price = prices.get(a.get("symbol", ""), {}).get("price", 1)
             hands = int(alloc / (price * 100)) if price > 0 and alloc > 0 else 0
             hands_str = f" {hands}手" if hands > 0 else ""
-            v_map = {"ACCUMULATE": "🟢↑买", "BUY": "🟢↑买", "TRIM": "🔴↓卖", "SELL": "🔴↓卖", "HOLD": "⚪→持"}
+
+            v_map = {"ACCUMULATE": "🟢↑买", "BUY": "🟢↑买", "TRIM": "🔴↓卖", "SELL": "🔴↓卖"}
             v_icon = v_map.get(a['verdict'], a['verdict'])
-            toast_lines.append(
-                f"  {v_icon} {a['name']}{hands_str} "
-                f"¥{alloc:,.0f}{sl_str}{tp_str} "
-                f"(c={a['confidence']:.2f})"
-            )
+
+            parts = [f"  {v_icon} {a['name']}{hands_str} ¥{alloc:,.0f}"]
+            if buy: parts.append(f"买¥{buy:.2f}")
+            if sl_p: parts.append(f"损¥{sl_p:.2f}")
+            if tp_p: parts.append(f"盈¥{tp_p:.2f}")
+            if exit_p: parts.append(f"出¥{exit_p:.2f}")
+            if rr: parts.append(f"R{rr:.1f}")
+            parts.append(f"(c={a['confidence']:.2f})")
+            toast_lines.append(" ".join(parts))
+            if comment:
+                toast_lines.append(f"    💬 {comment}")
     else:
         toast_lines.append("── ✅ 无需操作 ──")
-
-    # 持仓标的快照（价格 + 涨跌幅 + verdict + 置信度）
-    toast_lines.append("── 📊 持仓 ──")
-    for r in results[:8]:
-        if r.get("success"):
-            sym = r.get("symbol", "")
-            name = r.get("name", sym)
-            v = r.get("verdict", "?")
-            conf = r.get("confidence", 0)
-            # 从 prices 取涨跌幅和价格
-            p = prices.get(sym, {})
-            price = p.get("price", 0)
-            chg = p.get("change_pct", 0)
-            arrow = "↑" if chg > 0 else "↓" if chg < 0 else "→"
-            # 解析止盈止损
-            memo = r.get("cio_memo", "")
-            sl = _re.search(r"stop_loss_price:\s*([\d.]+)", memo) if _re else None
-            tp = _re.search(r"take_profit_price:\s*([\d.]+)", memo) if _re else None
-            sl_str = f" 损{sl.group(1)}" if sl else ""
-            tp_str = f" 盈{tp.group(1)}" if tp else ""
-            v_map2 = {"ACCUMULATE": "🟢↑", "BUY": "🟢↑↑", "HOLD": "⚪→", "TRIM": "🔴↓", "SELL": "🔴↓↓"}
-            v_icon2 = v_map2.get(v, v)
-            toast_lines.append(
-                f"  {v_icon2} {name} ¥{price:.0f} {arrow}{abs(chg):.1f}% "
-                f"({conf:.2f}){sl_str}{tp_str}"
-            )
 
     toast_body = "\n".join(toast_lines[:25])  # 最多25行
     send_windows_toast(

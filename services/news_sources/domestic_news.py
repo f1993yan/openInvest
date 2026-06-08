@@ -73,7 +73,7 @@ def fetch_cls_news(*, max_items: int = 20) -> List[RawNewsItem]:
         with sync_playwright() as p:
             browser = p.chromium.launch(
                 headless=True,
-                args=['--disable-blink-features=AutomationControlled', '--no-sandbox'],
+                args=['--disable-blink-features=AutomationControlled', '--no-sandbox', '--disable-features=HostInitVerifier'],
             )
             ctx = browser.new_context(
                 user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36',
@@ -169,7 +169,7 @@ def fetch_xueqiu_news(*, query: str = "A股", max_items: int = 20) -> List[RawNe
         with sync_playwright() as p:
             browser = p.chromium.launch(
                 headless=True,
-                args=['--disable-blink-features=AutomationControlled', '--no-sandbox'],
+                args=['--disable-blink-features=AutomationControlled', '--no-sandbox', '--disable-features=HostInitVerifier'],
             )
             ctx = browser.new_context(
                 user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36',

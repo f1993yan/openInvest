@@ -27,17 +27,18 @@ if _sys.platform == "win32":
         pass
 
 import logging
+import json
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Literal, Optional
 
 # 确保项目根在 sys.path（uvicorn 启动时 workspaces 不同）
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
-from fastapi import FastAPI
+from fastapi import Body, FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
@@ -94,6 +95,7 @@ class CommitteeRequest(BaseModel):
     t2_pending_cash: float = Field(0.0, description="港股通T+2待交收资金(CNY). 卖出港股后T+2才到账，当日不可用")
     news_brief: str = Field("", description="当前新闻摘要，注入到宏观/CIO决策中")
     fundamentals: Dict[str, Any] = Field(default_factory=dict, description="基本面指标字典，如 roe/roic/revenue_growth/pe_ttm/pb 等")
+    optimizer_review_enabled: bool = Field(True, description="是否让 LLM 对确定性优化器输出做审计评估")
 
 
 class CommitteeResponse(BaseModel):
@@ -117,8 +119,24 @@ class CommitteeResponse(BaseModel):
     fundamental_score: float = 50.0
     fundamental_coverage: float = 0.0
     fundamental_anchor_multiplier: float = 1.0
+    entry_exit_points: Dict[str, Any] = Field(default_factory=dict)
+    optimizer_review: str = ""
     error: str = ""
     elapsed_sec: float = 0.0
+
+
+class AccountTradeRequest(BaseModel):
+    symbol: str = Field(..., min_length=1, max_length=32)
+    direction: Literal["BUY", "SELL"]
+    units: float = Field(..., gt=0)
+    price: float = Field(..., gt=0)
+    trade_date: Optional[str] = Field(None, pattern=r"^\d{4}-\d{2}-\d{2}$")
+    note: Optional[str] = Field(None, max_length=512)
+
+
+class AccountSnapshotRequest(BaseModel):
+    prices: Dict[str, float] = Field(default_factory=dict)
+    trade_date: Optional[str] = Field(None, pattern=r"^\d{4}-\d{2}-\d{2}$")
 
 
 # ==========================================
@@ -128,6 +146,7 @@ class CommitteeResponse(BaseModel):
 import pickle as _pickle
 
 CACHE_DIR = _PROJECT_ROOT / "data" / "committee_cache"
+MONITOR_CONFIG_PATH = _PROJECT_ROOT / "jobs" / "market_monitor_config.json"
 
 
 def _save_committee_cache(**kwargs):
@@ -246,6 +265,92 @@ async def health():
     return {"status": "ok", "timestamp": datetime.now(timezone.utc).isoformat()}
 
 
+_account_ledger = None
+
+
+def _get_account_ledger():
+    global _account_ledger
+    if _account_ledger is None:
+        from db.account_ledger import AccountLedger
+        _account_ledger = AccountLedger()
+        try:
+            if MONITOR_CONFIG_PATH.exists():
+                _account_ledger.ensure_initialized(json.loads(_read_text_fallback(MONITOR_CONFIG_PATH)))
+        except Exception as e:  # noqa: BLE001
+            log.warning(f"双账户账本初始化失败: {e}")
+    return _account_ledger
+
+
+def _read_text_fallback(path: Path) -> str:
+    for enc in ("utf-8", "utf-8-sig", "gbk", "cp936"):
+        try:
+            return path.read_text(encoding=enc)
+        except UnicodeDecodeError:
+            continue
+    return path.read_text(encoding="utf-8", errors="replace")
+
+
+@app.get("/api/accounts")
+async def list_dual_accounts() -> Dict[str, Any]:
+    """Return real account and committee shadow-account state."""
+    db = _get_account_ledger()
+    return {
+        "accounts": {
+            "real": {
+                "summary": db.account_summary("real"),
+                "holdings": db.list_holdings("real"),
+            },
+            "committee": {
+                "summary": db.account_summary("committee"),
+                "holdings": db.list_holdings("committee"),
+            },
+        }
+    }
+
+
+@app.get("/api/accounts/trades")
+async def list_account_trades(
+    account: Optional[Literal["real", "committee"]] = Query(None),
+    limit: int = Query(100, ge=1, le=1000),
+) -> Dict[str, Any]:
+    rows = _get_account_ledger().list_trades(account=account, limit=limit)
+    return {"count": len(rows), "rows": rows}
+
+
+@app.get("/api/accounts/pnl")
+async def list_account_pnl(
+    account: Optional[Literal["real", "committee"]] = Query(None),
+    limit: int = Query(60, ge=1, le=500),
+) -> Dict[str, Any]:
+    rows = _get_account_ledger().list_daily_pnl(account=account, limit=limit)
+    return {"count": len(rows), "rows": rows}
+
+
+@app.post("/api/accounts/snapshot")
+async def snapshot_accounts(body: AccountSnapshotRequest = Body(default=AccountSnapshotRequest())) -> Dict[str, Any]:
+    rows = _get_account_ledger().snapshot_daily_pnl(
+        prices=body.prices,
+        trade_date=body.trade_date,
+    )
+    return {"ok": True, "rows": rows}
+
+
+@app.post("/api/accounts/real/trades")
+async def record_real_account_trade(body: AccountTradeRequest = Body(...)) -> Dict[str, Any]:
+    try:
+        trade = _get_account_ledger().apply_user_trade(
+            symbol=body.symbol,
+            direction=body.direction,
+            units=body.units,
+            price=body.price,
+            trade_date=body.trade_date,
+            note=body.note or "",
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return {"ok": True, "trade": trade.__dict__}
+
+
 @app.get("/api/committee")
 async def run_committee_get(
     symbol: str,
@@ -264,6 +369,7 @@ async def run_committee_get(
     t_plus_1: bool = True,
     available_cash: float = 0.0,
     t2_pending_cash: float = 0.0,
+    optimizer_review_enabled: bool = True,
 ):
     """GET 版本的委员会分析（方便 web_fetch 调用）"""
     req = CommitteeRequest(
@@ -283,6 +389,7 @@ async def run_committee_get(
         t_plus_1=t_plus_1,
         available_cash=available_cash,
         t2_pending_cash=t2_pending_cash,
+        optimizer_review_enabled=optimizer_review_enabled,
     )
     return await run_committee_api(req)
 
@@ -439,6 +546,7 @@ async def run_committee_api(req: CommitteeRequest):
             log.warning(f"regime 概率表不可用，执行优化退化为指标模型: {type(e).__name__}: {e}")
 
         from core.decision_optimizer import optimize_committee_decision
+        from core.entry_exit_points import compute_entry_exit_points
 
         opt = optimize_committee_decision(
             parsed=parsed,
@@ -457,6 +565,33 @@ async def run_committee_api(req: CommitteeRequest):
             conditional_return_stats=conditional_return_stats,
             fundamental_assessment=fundamental_assessment,
         )
+        entry_exit_plan = compute_entry_exit_points(
+            symbol=req.symbol,
+            current_price=current_price,
+            metrics=metrics,
+            regime_brief=regime_brief,
+            market=req.market,
+            conditional_return_stats=conditional_return_stats,
+            expected_return_pct=opt.expected_return_pct,
+        )
+        opt_audit_text = opt.audit_text()
+        entry_exit_audit_text = entry_exit_plan.audit_text()
+        optimizer_review = ""
+        if req.optimizer_review_enabled:
+            try:
+                from core.committee import run_optimizer_review_view
+                optimizer_review = run_optimizer_review_view(
+                    asset=asset,
+                    optimizer_audit=opt_audit_text,
+                    entry_exit_audit=entry_exit_audit_text,
+                    regime_brief=regime_brief,
+                    fundamental_brief=fundamental_brief,
+                )
+            except Exception as e:  # noqa: BLE001
+                optimizer_review = (
+                    "[WORKER_UNAVAILABLE] "
+                    f"reason=optimizer_review_failed exc_type={type(e).__name__}"
+                )
         # 浮亏保护：持仓亏损时，优化器SELL/TRIM不自动覆盖LLM
         has_loss = (
             req.position_pct > 0
@@ -488,7 +623,10 @@ async def run_committee_api(req: CommitteeRequest):
             parsed["verdict"] = opt.verdict
             parsed["confidence"] = opt.confidence
             parsed["alloc_cny"] = opt.alloc_cny
-            cio_memo += opt.audit_text()
+            cio_memo += opt_audit_text
+        cio_memo += entry_exit_audit_text
+        if optimizer_review:
+            cio_memo += f"\n\n[OPTIMIZER_LLM_REVIEW]\n{optimizer_review}"
 
         elapsed = (datetime.now() - t0).total_seconds()
         log.info(f"委员会完成: verdict={parsed['verdict']} confidence={parsed['confidence']:.2f} elapsed={elapsed:.1f}s")
@@ -505,6 +643,8 @@ async def run_committee_api(req: CommitteeRequest):
             regime=regime_brief[:200],
             fundamental_model=fundamental_assessment.model_key,
             fundamental_score=fundamental_assessment.score,
+            entry_exit_points=entry_exit_plan.as_dict(),
+            optimizer_review=optimizer_review[:500],
             cio_note=cio_memo[:500],
         )
 
@@ -528,6 +668,8 @@ async def run_committee_api(req: CommitteeRequest):
             fundamental_score=fundamental_assessment.score,
             fundamental_coverage=fundamental_assessment.coverage,
             fundamental_anchor_multiplier=fundamental_assessment.anchor_multiplier,
+            entry_exit_points=entry_exit_plan.as_dict(),
+            optimizer_review=optimizer_review,
             elapsed_sec=round(elapsed, 1),
         )
 
