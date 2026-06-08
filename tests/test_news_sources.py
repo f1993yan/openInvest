@@ -108,6 +108,95 @@ def test_fetch_all_domestic_includes_hot_news_and_enrichment():
     assert out[0].raw_meta["sectors"][0]["sector"] == "机器人"
 
 
+def test_weekend_llm_summary_discovers_a_share_hot_opportunities(monkeypatch):
+    from types import SimpleNamespace
+
+    from jobs import weekend_news_crawl as mod
+
+    payload = {
+        "key_themes": ["商业航天"],
+        "theme_detail": {"商业航天": "SpaceX上市预期带动商业航天产业链关注。"},
+        "sector_opportunities": [
+            {
+                "theme": "商业航天",
+                "sector": "商业航天",
+                "logic": "海外商业航天融资热度提升 -> A股卫星制造和航天材料映射",
+                "heat_score": 0.82,
+                "freshness_score": 0.76,
+                "evidence_titles": ["SpaceX即将上市带动商业航天概念"],
+                "leaders": [
+                    {
+                        "symbol": "603308",
+                        "name": "应流股份",
+                        "leader_type": "事件受益标的",
+                        "reason": "高端铸件覆盖航空航天供应链",
+                        "confidence": 0.68,
+                        "risk_note": "海外公司上市到A股映射存在兑现风险",
+                        "evidence_titles": ["SpaceX即将上市带动商业航天概念"],
+                    }
+                ],
+            }
+        ],
+        "hot_stock_opportunities": [
+            {
+                "rank": 1,
+                "symbol": "603308",
+                "name": "应流股份",
+                "sector": "商业航天",
+                "theme": "商业航天",
+                "score": 0.79,
+                "reason": "商业航天热度提升，A股高端制造映射清晰",
+                "risk_note": "题材追高风险",
+            }
+        ],
+        "watchlist_symbols": ["603308", "00700"],
+        "rejected_topics": [],
+        "overall_sentiment": "positive",
+        "summary_one_liner": "商业航天成为周末最强题材之一。",
+    }
+
+    class FakeCompletions:
+        def create(self, **kwargs):
+            assert "不是评估用户已有持仓" in kwargs["messages"][1]["content"]
+            return SimpleNamespace(
+                choices=[
+                    SimpleNamespace(
+                        message=SimpleNamespace(content=f"```json\n{__import__('json').dumps(payload, ensure_ascii=False)}\n```")
+                    )
+                ]
+            )
+
+    class FakeOpenAI:
+        def __init__(self, **kwargs):
+            self.chat = SimpleNamespace(completions=FakeCompletions())
+
+    monkeypatch.setattr("utils.llm.get_llm_config_safe", lambda: ("fake-key", "https://example.test", "fake-model", "openai"))
+    monkeypatch.setattr("openai.OpenAI", FakeOpenAI)
+
+    caches = [
+        {
+            "slot": "2026-06-07_Sun_2000",
+            "total_items": 1,
+            "items": [
+                {
+                    "src_name": "baidu_hot",
+                    "title": "SpaceX即将上市带动商业航天概念",
+                    "snippet": "卫星制造、航天材料和高端装备产业链受关注",
+                    "url": "https://n.example/1",
+                }
+            ],
+        }
+    ]
+
+    out = mod.summarize_and_evaluate(caches, {"holdings": [{"symbol": "00700", "position_pct": 30}]})
+
+    assert out["hot_stock_opportunities"][0]["symbol"] == "603308"
+    assert out["sector_opportunities"][0]["sector"] == "商业航天"
+    assert out["watchlist_symbols"] == ["603308"]
+    assert out["need_committee_rerun"] == []
+    assert "stock_impact" not in out
+
+
 def test_obvious_danger_news_gets_quantified_a_share_impact():
     from services.news_sources.news_risk_model import (
         assess_news_risk,
