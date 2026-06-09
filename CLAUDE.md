@@ -46,6 +46,32 @@ openInvest 有三个调用层，每层服务不同对象：
 
 详见 `docs/wiki/04-execution-paths.md` + `skills/invest/references/two-paths.md`。
 
+## 账本一致性（双账户，db/account_ledger.py）
+
+`account_ledger` 跟踪两个独立账户，用于评估委员会可靠性。**两者可信源不同，别混用**：
+
+| 账户 | 可信源 | 谁能改持仓 | source 字段 |
+|---|---|---|---|
+| **real** | **用户真实成交** | 只有 `apply_user_trade`（GUI/CLI 记一笔成交） | `user_explicit` |
+| **committee** | 委员会自动决策 | `apply_committee_result`（受现金/持仓/board-lot 约束） | `committee_auto` |
+
+### 铁律（2026-06-09 确立，曾因两条对立路径互相践踏）
+
+1. **real 持仓只由成交驱动**。`sync_real_from_monitor_config` **只刷新元数据**（name/market/sector/industry/min_lot_size）+ **为 config 新标的做首次播种**，**绝不覆盖已有持仓的 units/avg_cost/cash**。用户在 config 里改 `position_pct`/`cost` 不影响已建仓位。
+   - 反例（已修）：旧实现每轮用 config 反推值整体覆盖 real 持仓，会把用户刚记的真实成交在下一轮监控里抹平，holdings 与 trades 历史自相矛盾。
+2. **`initial_equity_cny` = 实际播种权益**（`cash + Σ(units×成本)`，见 `_seed_equity`），**不是 `total_assets`**。否则零交易首日就报假亏（例：seed 30000 vs total_assets 100000 → 首日 -70%）。
+3. **喂委员会的 `position_pct` 分母用 `total_assets`**（与 config、`_seed_units` 同基准、可往返），**不是 `initial_equity_cny`**。用 seed equity 会把集中度放大数倍，Risk Officer 误判仓位爆表。
+4. 改持仓股数公式时只改 `_seed_units` 单一可信源（`initialize` 与 `sync` 都走它），别再各写一份。
+
+## 委员会影子账户路径（jobs/market_monitor.py）
+
+`market_monitor` 每轮对自选标的跑委员会，把建议落进 committee 影子账户，并发进出场告警。**这条路径独立于下面的"强制 4 层"**：它走 `backend/server.py`（默认 `INVEST_BACKEND_URL=:8766`）的 `POST /api/committee`，返回**扁平** result（顶层 `verdict:str` / `suggested_alloc_cny` / `entry_exit_points` / `market` 等），不经 `committee_runner`。下游消费这个契约的有 `apply_committee_result`、进出场告警、交易护栏——**改 result 字段名时要同步生产端（backend/server.py 的 CommitteeResponse）和所有消费端**。
+
+下单前护栏（都在 `apply_committee_result` 之前改写 result→HOLD 才能真正拦截，仅抑制提醒不够）：
+- **重复交易冷却** `apply_repeated_trade_guard`：同方向影子交易在 `INVEST_AUTO_TRADE_REPEAT_COOLDOWN_MINUTES`（默认 60）内且无新触发则拦。
+- **涨停追高** `apply_limit_up_guard`：A股 BUY 遇涨停拦截。涨停幅度按板块（主板 10% / 创业板·科创板 20% / 北交所 30% / 主板 ST 5%）。
+
+
 ## 分层契约（防漂移）
 
 跨 entry 漂移的根因：多个 entry 直接调 core 原语，各自负责"准备参数"，新加参数
@@ -136,7 +162,9 @@ scripts/skill.py           CLI 入口（doctor/init/status/run_committee/...）
 connectors/web_api.py      FastAPI 端点（GUI + CLI 共享）
 core/portfolio_manager.py  持仓 façade，with_portfolio_tx fcntl 锁
 core/committee.py          委员会编排
+db/account_ledger.py       双账户账本（real=成交驱动 / committee=委员会驱动），见"账本一致性"
 db/trades_db.py            内部账本 SQLite WAL（不连真实支付）
+jobs/market_monitor.py     委员会影子账户路径 + 进出场告警 + 交易护栏（走 backend/server.py:8766）
 docs/wiki/                 完整文档
 docs/wiki/adr/             关键决策记录（v1 退场 / daily_report 拆 / 双路径）
 ```

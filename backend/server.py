@@ -103,6 +103,7 @@ class CommitteeResponse(BaseModel):
     success: bool
     symbol: str
     name: str
+    market: str = "a"  # 回传请求的 market，供下游（如涨停拦截）区分 A股/港股/美股
     verdict: str = ""
     confidence: float = 0.0
     dominant_view: str = ""
@@ -652,6 +653,7 @@ async def run_committee_api(req: CommitteeRequest):
             success=True,
             symbol=req.symbol,
             name=req.name,
+            market=req.market,
             verdict=parsed.get("verdict", "UNCLEAR"),
             confidence=parsed.get("confidence", 0.0),
             dominant_view=parsed.get("dominant_view", "tie"),
@@ -680,6 +682,7 @@ async def run_committee_api(req: CommitteeRequest):
             success=False,
             symbol=req.symbol,
             name=req.name,
+            market=req.market,
             error=f"{type(e).__name__}: {str(e)[:300]}",
             elapsed_sec=round(elapsed, 1),
         )

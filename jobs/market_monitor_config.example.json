@@ -2,6 +2,7 @@
   "total_assets": 100000,
   "cash": 20000,
   "t2_pending_cash": 0,
+  "sync_real_account_from_config": true,
   "holdings": [
     {
       "symbol": "600000",

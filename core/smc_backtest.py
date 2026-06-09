@@ -113,13 +113,22 @@ def add_smc_features(df: pd.DataFrame, config: SMCBacktestConfig | None = None) 
     out["last_swing_low"] = np.nan
     last_high = np.nan
     last_low = np.nan
-    for i in range(len(out)):
-        out.iat[i, out.columns.get_loc("last_swing_high")] = last_high
-        out.iat[i, out.columns.get_loc("last_swing_low")] = last_low
-        if bool(out["swing_high"].iloc[i]):
-            last_high = float(high.iloc[i])
-        if bool(out["swing_low"].iloc[i]):
-            last_low = float(low.iloc[i])
+    # 关键：bar p 的 swing 枢轴用了 [p-n, p+n] 的前向窗口确认，要到 bar p+n
+    # 收盘（窗口末端全部可观测）才"可知"。若在枢轴当根 p 就更新 last_swing，则
+    # (p, p+n] 区间内的 BOS/CHOCH 判定会引用一个依赖未来数据的摆动位 —— 前视偏差。
+    # 修复：遍历到 bar j 时，先把"此刻刚好确认"的枢轴（位于 conf=j-n，其前向窗口
+    # 末端 (j-n)+n = j 正好闭合）折入累加器，再写入本行。于是 bar j 暴露的
+    # last_swing 至多含确认根 <= j 的枢轴，close[j] 与该枢轴均在 bar j 收盘时可知，
+    # 信息一致、无未来数据。该 feature 同时被 generate_smc_signals 共用，两者都受益。
+    for j in range(len(out)):
+        conf = j - n  # 前向窗口在本根收盘闭合、此刻才确认的枢轴位置
+        if conf >= 0:
+            if bool(out["swing_high"].iloc[conf]):
+                last_high = float(high.iloc[conf])
+            if bool(out["swing_low"].iloc[conf]):
+                last_low = float(low.iloc[conf])
+        out.iat[j, out.columns.get_loc("last_swing_high")] = last_high
+        out.iat[j, out.columns.get_loc("last_swing_low")] = last_low
 
     out["bullish_bos"] = close > out["last_swing_high"]
     out["bearish_bos"] = close < out["last_swing_low"]
@@ -183,6 +192,12 @@ def backtest_smc_strategy(df: pd.DataFrame, config: SMCBacktestConfig | None = N
     position: Optional[Dict[str, Any]] = None
     fee_rate = cfg.fee_bps / 10_000
     trend = "neutral"
+    # 待执行入场：SMC 信号由"当根收盘价"算出（bullish_bos = close > swing 等），
+    # 只有 bar i 收盘后才成立。若在同一根 bar 的 open 成交，就是用未来信息
+    # 回到过去价位成交（前视偏差），白吃 open→close 的位移，系统性虚高收益。
+    # 正确做法：bar i 收盘形成信号 → bar i+1 开盘成交。
+    # pending_entry 暂存上一根 bar 决定的方向与触发它的那根 row（用于算止损）。
+    pending_entry: Optional[Dict[str, Any]] = None
 
     for i, (idx, row) in enumerate(data.iterrows()):
         date = _date_str(idx)
@@ -192,28 +207,41 @@ def backtest_smc_strategy(df: pd.DataFrame, config: SMCBacktestConfig | None = N
         close = float(row["Close"])
 
         if position is not None:
-            exit_price, reason = _maybe_exit(position, high, low, close, i, cfg)
+            exit_price, reason = _maybe_exit(position, open_price, high, low, close, i, cfg)
             if exit_price is not None:
                 trade = _close_trade(position, date, exit_price, reason, fee_rate)
                 trades.append(trade)
-                cash += position["notional"] + trade.pnl
+                # 平仓返还的是不含费成本（qty*entry），出入场两笔费都已在 pnl 内扣除。
+                cash += position["qty"] * position["entry"] + trade.pnl
                 position = None
 
-        if position is None:
-            entry_direction = _entry_direction(row, trend, cfg)
-            if entry_direction:
-                position = _open_position(entry_direction, date, i, open_price, row, cash, cfg, fee_rate)
-                if position is not None:
-                    cash -= position["notional"]
+        # 执行上一根 bar 形成的待入场信号：在本根 open 成交（信号 t、成交 t+1）。
+        if position is None and pending_entry is not None:
+            position = _open_position(
+                pending_entry["direction"], date, i, open_price,
+                pending_entry["signal_row"], cash, cfg, fee_rate,
+            )
+            if position is not None:
+                # 开仓现金流 = 买入成本(qty*entry) + 入场手续费。两者分开记，
+                # 避免把入场费折进 notional 后在平仓时原样退回（旧实现的 bug：
+                # 入场费实际从未被收取，round-trip 只扣了出场单边费）。
+                cash -= position["qty"] * position["entry"] + position["entry_fee"]
+        pending_entry = None
 
         if bool(row.get("bullish_bos")):
             trend = "bullish"
         elif bool(row.get("bearish_bos")):
             trend = "bearish"
 
+        # 本根收盘形成下一根的入场信号（不在本根成交，消除前视偏差）。
+        if position is None:
+            entry_direction = _entry_direction(row, trend, cfg)
+            if entry_direction:
+                pending_entry = {"direction": entry_direction, "signal_row": row}
+
         mark_value = cash
         if position is not None:
-            mark_value += position["notional"] + _floating_pnl(position, close)
+            mark_value += position["qty"] * position["entry"] + _floating_pnl(position, close)
         equity_curve.append((date, round(mark_value, 2)))
 
     if position is not None:
@@ -221,7 +249,7 @@ def backtest_smc_strategy(df: pd.DataFrame, config: SMCBacktestConfig | None = N
         close = float(data["Close"].iloc[-1])
         trade = _close_trade(position, _date_str(idx), close, "end_of_data", fee_rate)
         trades.append(trade)
-        cash += position["notional"] + trade.pnl
+        cash += position["qty"] * position["entry"] + trade.pnl
         equity_curve[-1] = (_date_str(idx), round(cash, 2))
 
     metrics = _metrics(equity_curve, trades, cfg.initial_cash)
@@ -268,12 +296,18 @@ def _open_position(direction: str, date: str, bar_index: int, entry: float, row:
         return None
     risk_budget = cash * cfg.risk_per_trade_pct / 100
     qty = risk_budget / risk_per_unit
-    notional = qty * entry * (1 + fee_rate)
-    if notional > cash:
-        scale = cash / notional
+    # 现金需覆盖买入成本 + 入场手续费。用含费总额做现金约束，
+    # 但成本基（qty*entry）与手续费分开存，平仓时只返还成本基、两笔费各自计入 pnl。
+    gross = qty * entry
+    entry_fee = gross * fee_rate
+    total_cost = gross + entry_fee
+    if total_cost > cash:
+        scale = cash / total_cost
         qty *= scale
-        notional = cash
-    if qty <= 0 or notional <= 0:
+        gross = qty * entry
+        entry_fee = gross * fee_rate
+        total_cost = cash
+    if qty <= 0 or total_cost <= 0:
         return None
     return {
         "direction": direction,
@@ -283,21 +317,29 @@ def _open_position(direction: str, date: str, bar_index: int, entry: float, row:
         "stop": stop,
         "take_profit": take_profit,
         "qty": qty,
-        "notional": notional,
+        "entry_fee": entry_fee,
+        "cost_basis": gross,
     }
 
 
-def _maybe_exit(position: Dict[str, Any], high: float, low: float, close: float, bar_index: int, cfg: SMCBacktestConfig) -> tuple[Optional[float], str]:
+def _maybe_exit(position: Dict[str, Any], open_price: float, high: float, low: float, close: float, bar_index: int, cfg: SMCBacktestConfig) -> tuple[Optional[float], str]:
+    # 跳空成交：若开盘已穿越止损/止盈，真实成交价是更差的开盘价，而非挂单价位。
+    # 旧实现一律按挂单价成交，乐观低估了亏损（gap-through 时尤甚）。
+    # 同根 bar 内止损优先于止盈检查（保守：无法判断盘中先后，假设先触不利方向）。
     if position["direction"] == "long":
         if low <= position["stop"]:
-            return float(position["stop"]), "stop_loss"
+            fill = min(open_price, position["stop"]) if open_price <= position["stop"] else position["stop"]
+            return float(fill), "stop_loss"
         if high >= position["take_profit"]:
-            return float(position["take_profit"]), "take_profit"
+            fill = max(open_price, position["take_profit"]) if open_price >= position["take_profit"] else position["take_profit"]
+            return float(fill), "take_profit"
     else:
         if high >= position["stop"]:
-            return float(position["stop"]), "stop_loss"
+            fill = max(open_price, position["stop"]) if open_price >= position["stop"] else position["stop"]
+            return float(fill), "stop_loss"
         if low <= position["take_profit"]:
-            return float(position["take_profit"]), "take_profit"
+            fill = min(open_price, position["take_profit"]) if open_price <= position["take_profit"] else position["take_profit"]
+            return float(fill), "take_profit"
     if bar_index - int(position["entry_bar"]) >= cfg.max_hold_bars:
         return close, "time_exit"
     return None, ""
@@ -305,9 +347,12 @@ def _maybe_exit(position: Dict[str, Any], high: float, low: float, close: float,
 
 def _close_trade(position: Dict[str, Any], exit_date: str, exit_price: float, reason: str, fee_rate: float) -> SMCTrade:
     pnl = _floating_pnl(position, exit_price)
-    fee = abs(exit_price * position["qty"]) * fee_rate
-    pnl -= fee
-    ret = pnl / max(position["notional"], 1e-9) * 100
+    exit_fee = abs(exit_price * position["qty"]) * fee_rate
+    # round-trip 双边手续费：入场费在开仓时已记于 position，出场费此处计算，
+    # 两笔都从 pnl 扣除。旧实现把入场费折进 notional 又在平仓原样退回，
+    # 等于只收了出场单边费（fee_bps=5 时真实成本被低估约 50%）。
+    pnl -= position["entry_fee"] + exit_fee
+    ret = pnl / max(position["cost_basis"], 1e-9) * 100
     return SMCTrade(
         entry_date=position["entry_date"],
         exit_date=exit_date,

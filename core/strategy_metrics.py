@@ -44,7 +44,9 @@ def annualized_return_pct(daily_values: DailyValues, trading_days_per_year: int 
     total = total_return_pct(daily_values) / 100
     if n_days <= 1 or total <= -1:
         return 0.0
-    annualized = (1 + total) ** (trading_days_per_year / n_days) - 1
+    # 年化指数用"区间数"而非"点数"：N 个点跨 N-1 个收益区间，
+    # 故 CAGR 指数 = 每年交易日 / (N-1)。短序列差异显著（如 10 点：252/9 vs 252/10）。
+    annualized = (1 + total) ** (trading_days_per_year / (n_days - 1)) - 1
     return round(annualized * 100, 4)
 
 
@@ -103,10 +105,17 @@ def sortino_ratio(
     downside = excess[excess < 0]
     if len(downside) == 0:
         return 0.0  # 没亏过，Sortino 无穷大；返 0 表示"不可计算"
-    # downside 样本太少 (< 5) 时 std 不稳定，会导致 Sortino 爆炸
+    # downside 样本太少 (< 5) 时下行波动不稳定，会导致 Sortino 爆炸
     if len(downside) < 5:
         return 0.0
-    downside_dev = np.std(downside, ddof=1)
+    # 标准下行波动率（target downside deviation, MAR=0）：
+    #   TDD = sqrt( (1/N) · Σ min(0, excessₜ)² )
+    # 即对"低于目标(0)的偏离"求绕 0 的均方根，且分母用**全部** N 个观测，
+    # 不是只用亏损天数。旧实现 np.std(downside, ddof=1) 有两处偏离标准：
+    #   (a) 绕负收益子集自身均值求离差（应绕目标 0）；
+    #   (b) 除以 (亏损天数-1)（应除以总天数 N）。
+    # 两者方向相反，净偏差随数据而变，结果不可比。此处回归教科书定义。
+    downside_dev = math.sqrt(np.sum(downside ** 2) / len(excess))
     if downside_dev < 1e-6:
         return 0.0
     sortino = np.mean(excess) / downside_dev * math.sqrt(trading_days_per_year)
@@ -161,14 +170,15 @@ def win_rate_per_trade(transactions: List[Any]) -> float:
     sells = [t for t in transactions if t.action == "SELL"]
     if not sells:
         return 0.0
-    # 简化：当前 sell.price > sim 上一笔同 asset 的 BUY avg_cost 算 win
-    # （真严格要按 FIFO 算 realized PnL，这里近似）
+    # 简化：当前 sell.price > 该卖单**之前**最近一笔同 asset 的 BUY 价算 win
+    # （真严格要按 FIFO 算 realized PnL，这里近似）。
+    # 注意必须按时间只在卖单之前找：旧实现用 reversed(整个列表) 从末尾扫，
+    # 会匹配到卖出**之后**才发生的买入（因果倒置），导致 win/loss 误判。
     wins = 0
     for s in sells:
-        # 找之前最近的同 asset BUY
-        for b in reversed(transactions):
-            if b is s:
-                continue
+        s_idx = transactions.index(s)
+        # 仅在该卖单之前的事务里、从近到远找同 asset 的 BUY
+        for b in reversed(transactions[:s_idx]):
             if b.asset == s.asset and b.action == "BUY":
                 if s.price > b.price:
                     wins += 1

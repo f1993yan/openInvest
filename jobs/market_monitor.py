@@ -1,6 +1,6 @@
 """盘中行情监控 + 委员会分析
 
-每 30 分钟（9:30-15:00）自动拉行情、跑委员会、通知重点操作标的。
+每 10 分钟（9:30-15:00）自动拉行情、跑委员会、通知重点操作标的。
 
 启动方式:
   python -m jobs.market_monitor
@@ -14,9 +14,9 @@ import os
 import subprocess
 import sys
 import time
-from datetime import datetime, time as dt_time
+from datetime import datetime, time as dt_time, timedelta, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 import requests
 
@@ -50,7 +50,12 @@ TRADING_START = dt_time(9, 30)
 LUNCH_START = dt_time(11, 30)
 LUNCH_END = dt_time(13, 0)
 TRADING_END = dt_time(14, 50)  # 14:50 末轮盯盘，不等到15:00
-INTERVAL_MINUTES = 30
+INTERVAL_MINUTES = max(1, int(os.getenv("INVEST_MONITOR_INTERVAL_MINUTES", "10")))
+ENTRY_EXIT_ALERT_STATE_PATH = REPORT_DIR / "entry_exit_alert_state.json"
+AUTO_TRADE_REPEAT_COOLDOWN_MINUTES = max(
+    0,
+    int(os.getenv("INVEST_AUTO_TRADE_REPEAT_COOLDOWN_MINUTES", "60")),
+)
 
 # ==========================================
 # 行情拉取
@@ -231,9 +236,590 @@ def send_windows_toast(title: str, body: str):
     threading.Thread(target=_show, daemon=True).start()
 
 
+def _safe_num(value: Any, default: float = 0.0) -> float:
+    try:
+        if value is None:
+            return default
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _fmt_price(value: Any) -> str:
+    v = _safe_num(value, 0.0)
+    return f"{v:.2f}" if v > 0 else "-"
+
+
+def load_entry_exit_alert_state(state_path: Path = ENTRY_EXIT_ALERT_STATE_PATH) -> Dict[str, Any]:
+    if not state_path.exists():
+        return {"version": 1, "symbols": {}}
+    try:
+        data = json.loads(state_path.read_text(encoding="utf-8"))
+        if not isinstance(data, dict):
+            return {"version": 1, "symbols": {}}
+        data.setdefault("version", 1)
+        data.setdefault("symbols", {})
+        return data
+    except Exception as e:  # noqa: BLE001
+        log.warning(f"买卖点触发状态读取失败，重建状态: {e}")
+        return {"version": 1, "symbols": {}}
+
+
+def save_entry_exit_alert_state(
+    state: Dict[str, Any],
+    state_path: Path = ENTRY_EXIT_ALERT_STATE_PATH,
+) -> None:
+    state_path.parent.mkdir(parents=True, exist_ok=True)
+    state_path.write_text(
+        json.dumps(state, ensure_ascii=False, indent=2, sort_keys=True),
+        encoding="utf-8",
+    )
+
+
+def evaluate_entry_exit_triggers(
+    current_price: float,
+    entry_exit_points: Optional[Dict[str, Any]],
+    *,
+    is_holding: bool,
+) -> List[Dict[str, Any]]:
+    """Return price-level triggers for an existing entry/exit plan.
+
+    The newest plan is generated around the newest price, so this function is
+    intended to evaluate the current price against the previously effective
+    plan. Consecutive alerting then confirms that two adjacent observations
+    crossed compatible levels instead of reacting to a single noisy tick.
+    """
+    if not entry_exit_points or current_price <= 0:
+        return []
+
+    price = float(current_price)
+    buy_pullback = _safe_num(entry_exit_points.get("buy_pullback_price"))
+    buy_breakout = _safe_num(entry_exit_points.get("buy_breakout_price"))
+    stop_loss = _safe_num(entry_exit_points.get("stop_loss_price"))
+    take_profit = _safe_num(entry_exit_points.get("take_profit_price"))
+    trim = _safe_num(entry_exit_points.get("trim_price"))
+    reentry = _safe_num(entry_exit_points.get("reentry_price"))
+
+    triggers: List[Dict[str, Any]] = []
+
+    def _add(side: str, kind: str, level: float) -> None:
+        if level > 0:
+            triggers.append({
+                "side": side,
+                "kind": kind,
+                "level": round(level, 4),
+                "price": round(price, 4),
+            })
+
+    if is_holding:
+        if stop_loss > 0 and price <= stop_loss:
+            _add("sell", "stop_loss", stop_loss)
+        elif buy_pullback > 0 and price <= buy_pullback:
+            _add("buy", "buy_pullback", buy_pullback)
+        elif reentry > 0 and price <= reentry:
+            _add("buy", "reentry", reentry)
+
+        if take_profit > 0 and price >= take_profit:
+            _add("sell", "take_profit", take_profit)
+        elif trim > 0 and price >= trim:
+            _add("sell", "trim", trim)
+        elif buy_breakout > 0 and price >= buy_breakout:
+            _add("buy", "buy_breakout", buy_breakout)
+    else:
+        if buy_pullback > 0 and price <= buy_pullback:
+            _add("buy", "buy_pullback", buy_pullback)
+        elif reentry > 0 and price <= reentry:
+            _add("buy", "reentry", reentry)
+        if buy_breakout > 0 and price >= buy_breakout:
+            _add("buy", "buy_breakout", buy_breakout)
+
+    return triggers
+
+
+def _trigger_sides(triggers: List[Dict[str, Any]]) -> Set[str]:
+    return {str(t.get("side", "")) for t in triggers if t.get("side")}
+
+
+def update_entry_exit_alert_state(
+    *,
+    results: List[Dict[str, Any]],
+    prices: Dict[str, Dict[str, Any]],
+    holding_symbols: Set[str],
+    state_path: Path = ENTRY_EXIT_ALERT_STATE_PATH,
+) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+    state = load_entry_exit_alert_state(state_path)
+    symbols_state = dict(state.get("symbols") or {})
+    prices_by_symbol = {str(k).upper(): v for k, v in prices.items()}
+    holding_symbols = {s.upper() for s in holding_symbols}
+    now_text = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    confirmed_alerts: List[Dict[str, Any]] = []
+    watch_rows: List[Dict[str, Any]] = []
+
+    for result in results:
+        if not result or not result.get("success"):
+            continue
+        symbol = str(result.get("symbol") or "").upper()
+        if not symbol:
+            continue
+        entry_exit_points = result.get("entry_exit_points") or {}
+        if not entry_exit_points:
+            continue
+
+        price_info = prices_by_symbol.get(symbol) or {}
+        current_price = _safe_num(price_info.get("price"), _safe_num(entry_exit_points.get("current_price")))
+        is_holding = symbol in holding_symbols
+        previous = symbols_state.get(symbol) or {}
+        previous_triggers = previous.get("last_triggers") or []
+        current_triggers = evaluate_entry_exit_triggers(
+            current_price,
+            previous.get("entry_exit_points"),
+            is_holding=is_holding,
+        )
+        matched_sides = sorted(_trigger_sides(previous_triggers) & _trigger_sides(current_triggers))
+
+        row = {
+            "symbol": symbol,
+            "name": result.get("name") or price_info.get("name") or symbol,
+            "is_holding": is_holding,
+            "current_price": current_price,
+            "entry_exit_points": entry_exit_points,
+            "triggers": current_triggers,
+            "confirmed": bool(matched_sides),
+            "matched_sides": matched_sides,
+        }
+        watch_rows.append(row)
+
+        if matched_sides:
+            confirmed_alerts.append({
+                **row,
+                "previous_triggers": previous_triggers,
+            })
+
+        symbols_state[symbol] = {
+            "name": row["name"],
+            "is_holding": is_holding,
+            "current_price": round(current_price, 4),
+            "entry_exit_points": entry_exit_points,
+            "last_triggers": current_triggers,
+            "last_checked_at": now_text,
+        }
+
+    state["version"] = 1
+    state["updated_at"] = now_text
+    state["symbols"] = symbols_state
+    save_entry_exit_alert_state(state, state_path)
+    return confirmed_alerts, watch_rows
+
+
+def format_entry_exit_alert_body(alerts: List[Dict[str, Any]]) -> str:
+    lines = ["连续两轮买卖点被价格触发："]
+    for alert in alerts[:8]:
+        side = "/".join(alert.get("matched_sides") or [])
+        trigger_text = ", ".join(
+            f"{t.get('kind')}@{_fmt_price(t.get('level'))}"
+            for t in (alert.get("triggers") or [])[:3]
+        )
+        lines.append(
+            f"{alert['name']}({alert['symbol']}) "
+            f"现价{_fmt_price(alert.get('current_price'))} "
+            f"{side.upper()} {trigger_text}"
+        )
+    if len(alerts) > 8:
+        lines.append(f"...另有 {len(alerts) - 8} 个标的")
+    return "\n".join(lines)
+
+
+def _result_direction(result: Dict[str, Any]) -> Optional[str]:
+    verdict = str(result.get("verdict", "")).upper()
+    alloc = _safe_num(result.get("suggested_alloc_cny"))
+    if verdict in {"BUY", "ACCUMULATE"} and alloc > 0:
+        return "BUY"
+    if verdict in {"TRIM", "SELL"} and alloc < 0:
+        return "SELL"
+    return None
+
+
+def _parse_trade_ts(value: Any) -> Optional[datetime]:
+    if not value:
+        return None
+    try:
+        ts = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        if ts.tzinfo is None:
+            ts = ts.replace(tzinfo=timezone.utc)
+        return ts.astimezone(timezone.utc)
+    except ValueError:
+        return None
+
+
+def _recent_same_direction_committee_trade(
+    ledger: Any,
+    *,
+    symbol: str,
+    direction: str,
+    cooldown_minutes: int = AUTO_TRADE_REPEAT_COOLDOWN_MINUTES,
+) -> Optional[Dict[str, Any]]:
+    if ledger is None or cooldown_minutes <= 0:
+        return None
+    cutoff = datetime.now(timezone.utc) - timedelta(minutes=cooldown_minutes)
+    try:
+        trades = ledger.list_trades("committee", limit=200)
+    except Exception as e:  # noqa: BLE001
+        log.warning(f"读取影子交易记录失败，跳过重复交易保护: {e}")
+        return None
+    for trade in trades:
+        if str(trade.get("symbol", "")).upper() != symbol.upper():
+            continue
+        if str(trade.get("direction", "")).upper() != direction:
+            continue
+        if str(trade.get("source", "")) != "committee_auto":
+            continue
+        ts = _parse_trade_ts(trade.get("ts"))
+        if ts is not None and ts >= cutoff:
+            return trade
+    return None
+
+
+def apply_repeated_trade_guard(
+    result: Dict[str, Any],
+    *,
+    stock: Dict[str, Any],
+    current_price: float,
+    ledger: Any,
+    entry_exit_state: Dict[str, Any],
+) -> Dict[str, Any]:
+    direction = _result_direction(result)
+    if direction is None:
+        return result
+
+    symbol = str(result.get("symbol") or stock.get("symbol") or "").upper()
+    # 显式传 cooldown：避免依赖函数默认参数（默认参数在 def 时绑定，曾被模块后段
+    # 的重复赋值坑过——实际生效值与 memo 显示值不一致）。现在唯一来源是模块顶部
+    # 的 AUTO_TRADE_REPEAT_COOLDOWN_MINUTES（env 可配，默认 240），实际过滤与
+    # 下方 memo 写的 cooldown_minutes 必然同值。
+    recent_trade = _recent_same_direction_committee_trade(
+        ledger,
+        symbol=symbol,
+        direction=direction,
+        cooldown_minutes=AUTO_TRADE_REPEAT_COOLDOWN_MINUTES,
+    )
+    if not recent_trade:
+        return result
+
+    previous = ((entry_exit_state.get("symbols") or {}).get(symbol) or {})
+    triggers = evaluate_entry_exit_triggers(
+        current_price,
+        previous.get("entry_exit_points"),
+        is_holding=_safe_num(stock.get("position_pct")) > 0,
+    )
+    has_direction_trigger = any(t.get("side") == direction.lower() for t in triggers)
+    if has_direction_trigger:
+        return result
+
+    original_verdict = str(result.get("verdict", ""))
+    original_alloc = _safe_num(result.get("suggested_alloc_cny"))
+    blocked = dict(result)
+    blocked["execution_blocked"] = True
+    blocked["execution_block_reason"] = (
+        "recent_same_direction_committee_trade_without_new_entry_exit_trigger"
+    )
+    blocked["optimizer_verdict_before_guard"] = original_verdict
+    blocked["optimizer_alloc_cny_before_guard"] = original_alloc
+    blocked["verdict"] = "HOLD"
+    blocked["suggested_alloc_cny"] = 0
+    blocked["confidence"] = min(_safe_num(result.get("confidence"), 0.35), 0.55)
+    blocked["cio_memo"] = (
+        f"{result.get('cio_memo', '')}\n\n[EXECUTION_GUARD]\n"
+        f"side={direction.lower()} blocked=true cooldown_minutes={AUTO_TRADE_REPEAT_COOLDOWN_MINUTES}\n"
+        f"last_trade_id={recent_trade.get('id')} last_trade_ts={recent_trade.get('ts')} "
+        f"last_price={_fmt_price(recent_trade.get('price'))}\n"
+        f"current_price={_fmt_price(current_price)} previous_plan_triggers={triggers or []}\n"
+        "reason=同方向影子交易刚执行过，且当前价未触发上一轮买卖点，防止机械重复买/卖。"
+    )
+    return blocked
+
+
+def _a_share_limit_up_pct(symbol: str, name: str = "") -> float:
+    """A股当日涨停幅度（%）。先按板块定基准，再叠加 ST 折减。
+
+    板块优先于 ST：创业板(300/301)/科创板(688/689) 的 ST 股涨跌停仍是 20%，
+    不是主板 ST 的 5%。旧实现把 ST 判断放最前面无视板块，把创业板/科创板 ST
+    误判成 5%，过度拦截。北交所(8/4 开头)30%。
+    """
+    sym = (symbol or "").strip()
+    is_st = "ST" in (name or "").upper()
+    if sym.startswith(("300", "301", "688", "689")):
+        base = 20.0  # 创业板 / 科创板（含 689 CDR）
+    elif sym.startswith(("8", "4")):
+        base = 30.0  # 北交所
+    else:
+        base = 10.0  # 沪深主板
+    # ST 折减：主板 ST 为 5%；创业板/科创板 ST 仍 20%（不折减），北交所无 ST 概念。
+    if is_st and base == 10.0:
+        return 5.0
+    return base
+
+
+def _is_limit_up_buy_blocked(result: Dict[str, Any], price_info: Dict[str, Any]) -> bool:
+    symbol = str(result.get("symbol", ""))
+    market = str(result.get("market", "a")).lower()
+    # 只对 A 股做涨停拦截。非 A 股（港股 hk / 美股 us 等无涨跌停或规则不同）一律放行。
+    # 旧门控 `market not in {...} and symbol.isdigit() and len(symbol)!=6` 有两个洞：
+    # ① 港股代码也是数字且常为 5 位，但当 market 字段缺失退化成 "a" 时不会进此分支；
+    # ② 美股等字母代码 symbol.isdigit()=False，条件不成立 → 落到 10% 误判涨停。
+    # 改成正向判断：非 A 股直接放行，不再依赖代码形态猜测。
+    if market not in {"a", "cn", "ashare"}:
+        return False
+    change_pct = _safe_num(price_info.get("change_pct"))
+    limit_pct = _a_share_limit_up_pct(symbol, str(result.get("name", "")))
+    return change_pct >= limit_pct - 0.15
+
+
+def apply_limit_up_guard(
+    result: Dict[str, Any],
+    *,
+    price_info: Dict[str, Any],
+) -> Dict[str, Any]:
+    """涨停追高护栏：A股 BUY 类建议遇当日涨停时，改写为 HOLD 并标记 execution_blocked。
+
+    必须在 ledger.apply_committee_result 之前调用。否则只在 select_optimal_actionable_alerts
+    里把标的塞进 suppressed（仅抑制用户提醒），影子账户仍会照常在涨停价追买——
+    这正是旧实现的漏洞：涨停判断发生在下单之后，护栏对实际下单形同虚设。
+    与 apply_repeated_trade_guard 同构（改 verdict=HOLD + alloc=0），让 apply_committee_result
+    遇 HOLD 直接 return None，从而真正拦下影子下单。只拦买入方向，不影响卖出/止损。
+    """
+    direction = _result_direction(result)
+    if direction != "BUY":
+        return result
+    if not _is_limit_up_buy_blocked(result, price_info):
+        return result
+
+    original_verdict = str(result.get("verdict", ""))
+    original_alloc = _safe_num(result.get("suggested_alloc_cny"))
+    blocked = dict(result)
+    blocked["execution_blocked"] = True
+    blocked["execution_block_reason"] = "limit_up_buy_blocked"
+    blocked["optimizer_verdict_before_guard"] = original_verdict
+    blocked["optimizer_alloc_cny_before_guard"] = original_alloc
+    blocked["verdict"] = "HOLD"
+    blocked["suggested_alloc_cny"] = 0
+    blocked["cio_memo"] = (
+        f"{result.get('cio_memo', '')}\n\n[EXECUTION_GUARD]\n"
+        f"limit_up_buy_blocked=true change_pct={_safe_num(price_info.get('change_pct')):.2f}\n"
+        "reason=标的当日涨停（或逼近涨停），禁止追高买入，防止影子账户在涨停价成交。"
+    )
+    return blocked
+
+
+def _has_llm_hold_conflict(result: Dict[str, Any]) -> bool:
+    memo = str(result.get("cio_memo", ""))
+    return "LLM=HOLD" in memo and ("-> ACCUMULATE" in memo or "-> BUY" in memo)
+
+
+def _review_penalty(result: Dict[str, Any]) -> float:
+    text = f"{result.get('optimizer_review', '')}\n{result.get('cio_memo', '')}".lower()
+    if "reject" in text or "不建议" in text:
+        return -45.0
+    if "caution" in text or "谨慎" in text or "加仓理由不充分" in text:
+        return -30.0
+    if "approve" in text or "support" in text:
+        return 12.0
+    return 0.0
+
+
+def _entry_trigger_for_result(
+    result: Dict[str, Any],
+    *,
+    current_price: float,
+    stock: Dict[str, Any],
+    entry_exit_state: Dict[str, Any],
+) -> List[Dict[str, Any]]:
+    symbol = str(result.get("symbol") or stock.get("symbol") or "").upper()
+    previous = ((entry_exit_state.get("symbols") or {}).get(symbol) or {})
+    return evaluate_entry_exit_triggers(
+        current_price,
+        previous.get("entry_exit_points"),
+        is_holding=_safe_num(stock.get("position_pct")) > 0,
+    )
+
+
+def _action_score(
+    result: Dict[str, Any],
+    *,
+    stock: Dict[str, Any],
+    price_info: Dict[str, Any],
+    triggers: List[Dict[str, Any]],
+) -> float:
+    confidence = _safe_num(result.get("confidence"), 0.0)
+    score = 100.0 * confidence
+    verdict = str(result.get("verdict", "")).upper()
+    if verdict == "BUY":
+        score += 8.0
+    elif verdict == "ACCUMULATE":
+        score += 2.0
+    elif verdict in {"TRIM", "SELL"}:
+        score += 5.0
+    score += _review_penalty(result)
+    if _has_llm_hold_conflict(result):
+        score -= 35.0
+    if any(t.get("side") == "buy" for t in triggers):
+        score += 24.0
+    elif verdict in {"BUY", "ACCUMULATE"}:
+        score -= 18.0
+    if any(t.get("side") == "sell" for t in triggers):
+        score += 20.0
+
+    fundamental_score = result.get("fundamental_score")
+    if fundamental_score is not None:
+        score += (_safe_num(fundamental_score, 50.0) - 50.0) * 0.35
+
+    position_pct = _safe_num(stock.get("position_pct"))
+    if position_pct > 20:
+        score -= 12.0
+    elif position_pct < 5 and verdict in {"BUY", "ACCUMULATE"}:
+        score += 4.0
+
+    change_pct = _safe_num(price_info.get("change_pct"))
+    if verdict in {"BUY", "ACCUMULATE"} and change_pct > 7.0:
+        score -= 10.0
+
+    ee = result.get("entry_exit_points") or {}
+    rr = _safe_num(ee.get("reward_risk_ratio"))
+    if rr > 0:
+        score += min(12.0, rr * 4.0)
+    return score
+
+
+def select_optimal_actionable_alerts(
+    *,
+    results: List[Dict[str, Any]],
+    prices: Dict[str, Dict[str, Any]],
+    cash: float,
+    stocks: List[Dict[str, Any]],
+    entry_exit_state: Dict[str, Any],
+    max_alerts: int = 4,
+) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+    """Pick executable alerts under a portfolio-level cash budget.
+
+    This is a multiple-choice knapsack over board-lot buy options, with sells
+    admitted separately because they release risk/cash instead of consuming it.
+    """
+    stock_by_symbol = {str(s.get("symbol", "")).upper(): s for s in stocks}
+    suppressed: List[Dict[str, Any]] = []
+    sell_alerts: List[Dict[str, Any]] = []
+    buy_groups: List[List[Dict[str, Any]]] = []
+
+    for result in results:
+        if not result or not result.get("success") or result.get("execution_blocked"):
+            if result and result.get("execution_blocked"):
+                suppressed.append({
+                    "symbol": result.get("symbol"),
+                    "name": result.get("name"),
+                    "reason": "execution_guard",
+                })
+            continue
+        verdict = str(result.get("verdict", "")).upper()
+        alloc = _safe_num(result.get("suggested_alloc_cny"))
+        if verdict in {"HOLD", "REDUCE", "UNCLEAR"} or abs(alloc) <= 0:
+            continue
+
+        symbol = str(result.get("symbol", "")).upper()
+        stock = stock_by_symbol.get(symbol, {})
+        price_info = prices.get(symbol) or prices.get(str(result.get("symbol", ""))) or {}
+        price = _safe_num(price_info.get("price"))
+        if price <= 0:
+            suppressed.append({"symbol": symbol, "name": result.get("name"), "reason": "missing_price"})
+            continue
+        triggers = _entry_trigger_for_result(
+            result,
+            current_price=price,
+            stock=stock,
+            entry_exit_state=entry_exit_state,
+        )
+        score = _action_score(result, stock=stock, price_info=price_info, triggers=triggers)
+
+        if verdict in {"TRIM", "SELL"} and alloc < 0:
+            if score >= 45.0:
+                selected = dict(result)
+                selected["alert_score"] = round(score, 2)
+                selected["alert_triggers"] = triggers
+                sell_alerts.append(selected)
+            else:
+                suppressed.append({"symbol": symbol, "name": result.get("name"), "reason": "low_sell_score"})
+            continue
+
+        if verdict not in {"BUY", "ACCUMULATE"} or alloc <= 0:
+            continue
+        if _is_limit_up_buy_blocked(result, price_info):
+            suppressed.append({"symbol": symbol, "name": result.get("name"), "reason": "limit_up_buy_blocked"})
+            continue
+        if _has_llm_hold_conflict(result) and not any(t.get("side") == "buy" for t in triggers):
+            suppressed.append({"symbol": symbol, "name": result.get("name"), "reason": "llm_hold_without_buy_trigger"})
+            continue
+        if score < 55.0:
+            suppressed.append({"symbol": symbol, "name": result.get("name"), "reason": f"low_score:{score:.1f}"})
+            continue
+
+        lot = int(stock.get("min_lot_size") or result.get("min_lot_size") or 100)
+        lot = max(lot, 1)
+        lot_cost = price * lot
+        suggested_lots = int(abs(alloc) // lot_cost)
+        affordable_lots = int(max(cash, 0.0) // lot_cost)
+        max_lots = min(max(suggested_lots, 1), affordable_lots)
+        if max_lots <= 0:
+            suppressed.append({"symbol": symbol, "name": result.get("name"), "reason": "cash_insufficient"})
+            continue
+
+        group: List[Dict[str, Any]] = []
+        for lots in range(1, max_lots + 1):
+            cost = lots * lot_cost
+            option = dict(result)
+            option["suggested_alloc_cny"] = round(cost)
+            option["alert_selected_lots"] = lots
+            option["alert_score"] = round(score, 2)
+            option["alert_value"] = score * (lots ** 0.5)
+            option["alert_cost_cny"] = cost
+            option["alert_triggers"] = triggers
+            group.append(option)
+        buy_groups.append(group)
+
+    budget_unit = 10.0
+    budget = int(max(cash, 0.0) // budget_unit)
+    dp: Dict[int, Tuple[float, List[Dict[str, Any]]]] = {0: (0.0, [])}
+    for group in buy_groups:
+        next_dp = dict(dp)
+        for used, (value, chosen) in dp.items():
+            for option in group:
+                cost_units = int(_safe_num(option.get("alert_cost_cny")) // budget_unit)
+                new_used = used + cost_units
+                if new_used > budget:
+                    continue
+                new_value = value + _safe_num(option.get("alert_value"))
+                if new_value > next_dp.get(new_used, (-1.0, []))[0]:
+                    next_dp[new_used] = (new_value, chosen + [option])
+        dp = next_dp
+    selected_buys = max(dp.values(), key=lambda item: item[0])[1] if dp else []
+    selected_buy_symbols = {str(r.get("symbol", "")).upper() for r in selected_buys}
+    for group in buy_groups:
+        symbol = str(group[0].get("symbol", "")).upper() if group else ""
+        if symbol and symbol not in selected_buy_symbols:
+            suppressed.append({
+                "symbol": symbol,
+                "name": group[0].get("name") if group else symbol,
+                "reason": "cash_budget_not_selected_by_utility",
+            })
+
+    selected = sell_alerts + selected_buys
+    selected.sort(key=lambda r: _safe_num(r.get("alert_score")), reverse=True)
+    return selected[:max_alerts], suppressed
+
+
 def write_report(round_time: str, results: List[Dict],
                  actionable: List[Dict], prices: Dict,
-                 news_items: List = None):
+                 news_items: List = None,
+                 entry_exit_watch: Optional[List[Dict[str, Any]]] = None,
+                 entry_exit_alerts: Optional[List[Dict[str, Any]]] = None,
+                 suppressed_alerts: Optional[List[Dict[str, Any]]] = None):
     """写入监控报告"""
     report_path = REPORT_DIR / f"monitor_{round_time.replace(':', '-')}.md"
 
@@ -369,6 +955,73 @@ def write_report(round_time: str, results: List[Dict],
         else:
             lines.append(f"| {r.get('name', r.get('symbol'))} | ❌ 失败 | — | — | — | — | — | — |")
 
+    guarded = [r for r in results if r.get("execution_blocked")]
+    if guarded:
+        lines.extend([
+            "",
+            "## 🧯 执行保护",
+            "",
+        ])
+        for r in guarded:
+            lines.append(
+                f"- {r.get('name')} ({r.get('symbol')}): "
+                f"{r.get('optimizer_verdict_before_guard')} "
+                f"¥{_safe_num(r.get('optimizer_alloc_cny_before_guard')):,.0f} -> HOLD；"
+                f"{r.get('execution_block_reason')}"
+            )
+
+    if suppressed_alerts:
+        lines.extend([
+            "",
+            "## 🧮 提醒优化过滤",
+            "",
+        ])
+        for item in suppressed_alerts[:20]:
+            lines.append(
+                f"- {item.get('name') or item.get('symbol')}: {item.get('reason')}"
+            )
+
+    if entry_exit_watch:
+        lines.extend([
+            "",
+            "## 🎯 买入卖出点监控",
+            "",
+            "| 股票 | 类型 | 现价 | 买回调 | 买突破 | 止损 | 止盈 | 减仓 | 触发状态 |",
+            "|------|------|------|--------|--------|------|------|------|----------|",
+        ])
+        for row in entry_exit_watch:
+            ee = row.get("entry_exit_points") or {}
+            trigger_text = "、".join(
+                f"{t.get('side')}:{t.get('kind')}@{_fmt_price(t.get('level'))}"
+                for t in (row.get("triggers") or [])[:3]
+            )
+            if row.get("confirmed"):
+                trigger_text = f"连续触发({trigger_text})"
+            lines.append(
+                f"| {row.get('name')} ({row.get('symbol')}) | "
+                f"{'持仓' if row.get('is_holding') else '关注'} | "
+                f"{_fmt_price(row.get('current_price'))} | "
+                f"{_fmt_price(ee.get('buy_pullback_price'))} | "
+                f"{_fmt_price(ee.get('buy_breakout_price'))} | "
+                f"{_fmt_price(ee.get('stop_loss_price'))} | "
+                f"{_fmt_price(ee.get('take_profit_price'))} | "
+                f"{_fmt_price(ee.get('trim_price'))} | "
+                f"{trigger_text or '-'} |"
+            )
+
+    if entry_exit_alerts:
+        lines.extend([
+            "",
+            "## 🚨 连续触发提醒",
+            "",
+        ])
+        for alert in entry_exit_alerts:
+            lines.append(
+                f"- {alert.get('name')} ({alert.get('symbol')}) "
+                f"现价 {_fmt_price(alert.get('current_price'))} "
+                f"方向 {','.join(alert.get('matched_sides') or [])}"
+            )
+
     if actionable:
         lines.extend([
             "",
@@ -422,18 +1075,13 @@ def is_trading_time() -> bool:
 
 
 def wait_until_next_round():
-    """等待到下一个整30分钟"""
+    """等待到下一个监控间隔边界"""
     now = datetime.now()
-    minute = now.minute
-    # 计算下一个 0 或 30 分钟点
-    if minute < 30:
-        next_minute = 30
-        next_hour = now.hour
-    else:
-        next_minute = 0
-        next_hour = now.hour + 1
-
-    target = now.replace(hour=next_hour, minute=next_minute, second=0, microsecond=0)
+    interval = max(1, INTERVAL_MINUTES)
+    day_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    elapsed_minutes = now.hour * 60 + now.minute
+    next_slot_minutes = ((elapsed_minutes // interval) + 1) * interval
+    target = day_start + timedelta(minutes=next_slot_minutes)
     # 如果下一个整点在收盘后，强制改为14:50（末轮盯盘）
     target_end = now.replace(hour=TRADING_END.hour, minute=TRADING_END.minute, second=0, microsecond=0)
     if target > target_end:
@@ -518,6 +1166,7 @@ def run_monitor_round():
 
     all_stocks = holdings + watchlist
     all_symbols = [s["symbol"] for s in all_stocks]
+    entry_exit_state_before_round = load_entry_exit_alert_state()
 
     # 1. 拉取行情
     log.info(f"拉取 {len(all_symbols)} 只标的最新行情...")
@@ -584,6 +1233,20 @@ def run_monitor_round():
         if result and result.get("success"):
             result.setdefault("symbol", sym)
             result.setdefault("name", stock["name"])
+            # 兜底 market：委员会响应理应回传 market，但若某生产端/旧响应漏了，
+            # 用 config 里该标的的 market 补上，避免 _is_limit_up_buy_blocked 退化成 "a"
+            # 把港股/美股误判 A 股涨停。
+            result.setdefault("market", stock.get("market", "a"))
+            result = apply_repeated_trade_guard(
+                result,
+                stock=stock,
+                current_price=price_info["price"],
+                ledger=ledger,
+                entry_exit_state=entry_exit_state_before_round,
+            )
+            # 涨停追高护栏必须在下单前：改写 verdict→HOLD，使 apply_committee_result
+            # 真正拦下影子买单（仅在 select_optimal_actionable_alerts 抑制提醒不够）。
+            result = apply_limit_up_guard(result, price_info=price_info)
             if ledger is not None:
                 try:
                     trade = ledger.apply_committee_result(result, price=price_info["price"])
@@ -591,6 +1254,12 @@ def run_monitor_round():
                         log.info(
                             f"影子账户执行 {trade.direction} {trade.symbol} "
                             f"{trade.units:.0f}股 @{trade.price:.2f}"
+                        )
+                    elif result.get("execution_blocked"):
+                        log.info(
+                            f"执行保护: {sym} {stock['name']} "
+                            f"{result.get('optimizer_verdict_before_guard')} "
+                            f"alloc=¥{result.get('optimizer_alloc_cny_before_guard', 0):,.0f} -> HOLD"
                         )
                 except Exception as e:
                     log.warning(f"影子账户执行委员会建议失败 {sym}: {e}")
@@ -608,17 +1277,33 @@ def run_monitor_round():
         # 避免过快连续请求
         time.sleep(1)
 
-    # 3. 筛选需要操作的标的
-    actionable = [
-        r for r in results
-        if r.get("success")
-        and r.get("verdict") not in ("HOLD", "REDUCE", "UNCLEAR")
-        and abs(r.get("suggested_alloc_cny", 0) or 0) > 0
-        and r.get("confidence", 0) >= 0.55
-    ]
+    # 3. 组合级提醒优化：现金预算 + 交易约束 + LLM/点位质量
+    actionable, suppressed_alerts = select_optimal_actionable_alerts(
+        results=results,
+        prices=prices,
+        cash=cash,
+        stocks=all_stocks,
+        entry_exit_state=entry_exit_state_before_round,
+        max_alerts=int(config.get("max_action_alerts", 4) or 4),
+    )
+
+    entry_exit_alerts, entry_exit_watch = update_entry_exit_alert_state(
+        results=results,
+        prices=prices,
+        holding_symbols={str(h.get("symbol", "")).upper() for h in holdings if h.get("symbol")},
+    )
 
     # 4. 写报告
-    write_report(round_time, results, actionable, prices, news_items)
+    write_report(
+        round_time,
+        results,
+        actionable,
+        prices,
+        news_items,
+        entry_exit_watch=entry_exit_watch,
+        entry_exit_alerts=entry_exit_alerts,
+        suppressed_alerts=suppressed_alerts,
+    )
     if ledger is not None:
         try:
             from db.account_ledger import prices_from_sina_result
@@ -669,16 +1354,28 @@ def run_monitor_round():
             rl = _re.search(r"ONE_LINE:\s*(.+)", review) if _re else None
             comment = rl.group(1)[:60] if rl else ""
 
-            # 手数
+            # 手数（买卖都按最小交易单位估算）
             alloc = a.get("suggested_alloc_cny", 0)
-            price = prices.get(a.get("symbol", ""), {}).get("price", 1)
-            hands = int(alloc / (price * 100)) if price > 0 and alloc > 0 else 0
+            sym = a.get("symbol", "")
+            price = prices.get(sym, {}).get("price", 1)
+            stock_cfg = next((s for s in all_stocks if s.get("symbol") == sym), {})
+            lot = int(stock_cfg.get("min_lot_size") or 100)
+            hands = int(abs(alloc) / (price * lot)) if price > 0 and abs(alloc) > 0 and lot > 0 else 0
             hands_str = f" {hands}手" if hands > 0 else ""
+
+            current_shares = 0
+            if price > 0:
+                current_shares = int(
+                    stock_cfg.get("position_pct", 0) / 100 * config["total_assets"] / price
+                )
+            current_hands = int(current_shares / lot) if lot > 0 else 0
+            remain_hands = max(0, current_hands - hands) if alloc < 0 else current_hands
+            remain_str = f" ->剩{remain_hands}手" if alloc < 0 and current_hands > 0 else ""
 
             v_map = {"ACCUMULATE": "🟢↑买", "BUY": "🟢↑买", "TRIM": "🔴↓卖", "SELL": "🔴↓卖"}
             v_icon = v_map.get(a['verdict'], a['verdict'])
 
-            parts = [f"  {v_icon} {a['name']}{hands_str} ¥{alloc:,.0f}"]
+            parts = [f"  {v_icon} {a['name']}{hands_str}{remain_str} ¥{alloc:,.0f}"]
             if buy: parts.append(f"买¥{buy:.2f}")
             if sl_p: parts.append(f"损¥{sl_p:.2f}")
             if tp_p: parts.append(f"盈¥{tp_p:.2f}")
@@ -696,6 +1393,12 @@ def run_monitor_round():
         f"📊 {round_time} 监控 ({len(actionable)}只需操作)",
         toast_body
     )
+    if entry_exit_alerts:
+        send_windows_toast(
+            f"🚨 买卖点连续触发 ({len(entry_exit_alerts)}只)",
+            format_entry_exit_alert_body(entry_exit_alerts),
+        )
+        log.info(f"🚨 买卖点连续触发: {len(entry_exit_alerts)} 只标的")
     if actionable:
         log.info(f"⚠️ 需要操作: {len(actionable)} 只标的")
     else:
@@ -734,7 +1437,7 @@ def main():
                     time.sleep(60)
                 continue
 
-            # 交易时段：等待到下一个30分钟节点
+            # 交易时段：等待到下一个监控间隔节点
             wait_until_next_round()
             run_monitor_round()
 

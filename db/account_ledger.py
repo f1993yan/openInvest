@@ -6,7 +6,9 @@ Two accounts are tracked:
   available holdings, and board-lot rules.
 
 The initial positions are derived from jobs/market_monitor_config.json:
-units ~= total_assets * position_pct / avg_cost.
+units ~= total_assets * position_pct / avg_cost. The baseline equity
+(initial_equity_cny) is the actually-seeded day-0 value (cash + holdings at
+cost), NOT total_assets — see _seed_equity.
 """
 from __future__ import annotations
 
@@ -132,6 +134,12 @@ class AccountLedger:
 
             cash = float(config.get("cash", 0) or 0)
             total_assets = float(config.get("total_assets", 0) or 0)
+            # 基线权益 = 实际播种的 day-0 总值（现金 + 持仓成本市值），
+            # 不是 total_assets。total_assets 是"目标可投资规模"，而播种持仓
+            # 往往只占其中一部分，剩余未投资部分并不等于 cash。若用 total_assets
+            # 当基线，零交易首日就会算出 total_pnl = 播种值 - total_assets 的
+            # 巨额假亏（example config：30000 - 100000 = -70%）。
+            initial_equity = _seed_equity(config)
             now = _now()
             source = "jobs/market_monitor_config.json"
             for account in (REAL_ACCOUNT, COMMITTEE_ACCOUNT):
@@ -139,14 +147,11 @@ class AccountLedger:
                     """INSERT INTO accounts
                        (account, cash_cny, initial_equity_cny, initialized_from, created_at, updated_at)
                        VALUES (?, ?, ?, ?, ?, ?)""",
-                    (account, cash, total_assets, source, now, now),
+                    (account, cash, initial_equity, source, now, now),
                 )
                 for stock in list(config.get("holdings", []) or []) + list(config.get("watchlist", []) or []):
-                    position_pct = float(stock.get("position_pct", 0) or 0)
                     avg_cost = float(stock.get("cost", 0) or 0)
-                    units = 0.0
-                    if position_pct > 0 and avg_cost > 0 and total_assets > 0:
-                        units = (total_assets * position_pct / 100.0) / avg_cost
+                    units = _seed_units(stock, total_assets)
                     cur.execute(
                         """INSERT INTO holdings
                            (account, symbol, name, market, sector, industry, units, avg_cost,
@@ -169,6 +174,75 @@ class AccountLedger:
 
     def ensure_initialized(self, config: Dict[str, Any]) -> None:
         self.initialize_from_monitor_config(config, reset=False)
+        if _sync_real_from_config_enabled(config):
+            self.sync_real_from_monitor_config(config)
+
+    def sync_real_from_monitor_config(self, config: Dict[str, Any]) -> None:
+        """Refresh real-account **metadata** from the monitor config.
+
+        Real account 的可信源是用户真实成交（apply_user_trade，source=user_explicit），
+        **不是 config**。所以本函数只同步元数据（name/market/sector/industry/min_lot_size）
+        并为 config 新增、real 账户里尚不存在的标的做首次播种；对**已存在**的持仓，
+        units/avg_cost 一律保留（由成交决定），cash 也不再每轮覆盖。
+
+        旧实现每轮用 config 反推值整体覆盖 units/avg_cost/cash，会把用户刚记的真实
+        成交在下一轮监控里抹平 —— holdings/cash 与 trades 历史自相矛盾，且 day_pnl
+        把这种纯账务覆盖当成当日盈亏。docstring 担心的"已建仓位被 optimizer 当成
+        underweight 机械补仓"本质是元数据/新标的缺失，靠"新标的首次播种 + 元数据
+        刷新"即可解决，不需要覆盖已有持仓状态。
+        """
+        total_assets = float(config.get("total_assets", 0) or 0)
+        now = _now()
+        stocks = list(config.get("holdings", []) or []) + list(config.get("watchlist", []) or [])
+        with self._lock:
+            existing = {
+                row["symbol"]
+                for row in self.conn.execute(
+                    "SELECT symbol FROM holdings WHERE account = ?", (REAL_ACCOUNT,)
+                ).fetchall()
+            }
+            for stock in stocks:
+                symbol = str(stock.get("symbol", "")).strip()
+                if not symbol:
+                    continue
+                if symbol in existing:
+                    # 已存在：只刷新元数据，保留成交驱动的 units / avg_cost。
+                    self.conn.execute(
+                        """UPDATE holdings SET name = ?, market = ?, sector = ?,
+                             industry = ?, min_lot_size = ?
+                           WHERE account = ? AND symbol = ?""",
+                        (
+                            stock.get("name", symbol),
+                            stock.get("market", "a"),
+                            stock.get("sector", ""),
+                            stock.get("industry", ""),
+                            _min_lot_size(stock),
+                            REAL_ACCOUNT,
+                            symbol,
+                        ),
+                    )
+                    continue
+                # 新标的：按 config 首次播种（此后由成交接管）。
+                avg_cost = float(stock.get("cost", 0) or 0)
+                units = _seed_units(stock, total_assets)
+                self.conn.execute(
+                    """INSERT INTO holdings
+                       (account, symbol, name, market, sector, industry, units, avg_cost,
+                        cost_currency, min_lot_size)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'CNY', ?)""",
+                    (
+                        REAL_ACCOUNT,
+                        symbol,
+                        stock.get("name", symbol),
+                        stock.get("market", "a"),
+                        stock.get("sector", ""),
+                        stock.get("industry", ""),
+                        units,
+                        avg_cost,
+                        _min_lot_size(stock),
+                    ),
+                )
+            self.conn.commit()
 
     def list_holdings(self, account: str) -> List[Dict[str, Any]]:
         _validate_account(account)
@@ -189,18 +263,25 @@ class AccountLedger:
         """Merge account units with config metadata for committee analysis."""
         _validate_account(account)
         holdings = {h["symbol"]: h for h in self.list_holdings(account)}
+        # position_pct 的分母必须用 total_assets（总可投资规模），不能用
+        # initial_equity_cny（= seed equity = cash + 持仓成本）。config 里用户写的
+        # position_pct、以及 _seed_units 反推 units 用的都是 total_assets，三者同基准
+        # 才能往返一致：_seed_units(pct=20%) → units，再 units*cost/total_assets → 20%。
+        # 若用 initial_equity_cny（如 30000 vs total_assets 100000）会把集中度放大
+        # 3.3×，委员会 Risk Officer 误判仓位爆表。fallback 到 seed equity 仅兜底。
         summary = self.account_summary(account)
-        total_equity = float(summary.get("initial_equity_cny") or config.get("total_assets") or 0)
+        total_equity = float(config.get("total_assets") or summary.get("initial_equity_cny") or 0)
         out: List[Dict[str, Any]] = []
         for stock in list(config.get("holdings", []) or []) + list(config.get("watchlist", []) or []):
             h = holdings.get(stock.get("symbol", ""))
             merged = dict(stock)
             units = float((h or {}).get("units", 0) or 0)
             avg_cost = float((h or {}).get("avg_cost", stock.get("cost", 0)) or 0)
-            market_value = units * avg_cost
+            # 按成本口径算占比（与 total_assets 的成本口径一致），非现价市值。
+            cost_value = units * avg_cost
             merged["units"] = units
             merged["cost"] = avg_cost
-            merged["position_pct"] = (market_value / total_equity * 100.0) if total_equity > 0 else 0.0
+            merged["position_pct"] = (cost_value / total_equity * 100.0) if total_equity > 0 else 0.0
             out.append(merged)
         return out
 
@@ -490,6 +571,53 @@ def _min_lot_size(stock: Dict[str, Any]) -> int:
     if int(stock.get("min_lot_size") or 0) > 0:
         return int(stock["min_lot_size"])
     return 100
+
+
+def _seed_units(stock: Dict[str, Any], total_assets: float) -> float:
+    """从 config 的单条持仓推算播种股数（单一可信源）。
+
+    两种来源，优先级 explicit units > position_pct：
+    - 若 config 显式给了 ``units``，直接用（用户精确录入）。
+    - 否则按 ``position_pct`` 反推：units = total_assets * pct% / avg_cost。
+
+    返回 0 表示该条不构成实际持仓（缺 cost / pct=0 / 无 total_assets，
+    典型是 watchlist 观察标的）。
+
+    抽成 helper 是因为这个公式原本在 initialize_from_monitor_config 和
+    sync_real_from_monitor_config 各写了一份，是跨入口漂移的典型隐患
+    （见 CLAUDE.md 分层契约）。基线 initial_equity 也依赖它，必须单点可信。
+    """
+    if "units" in stock:
+        return float(stock.get("units", 0) or 0)
+    position_pct = float(stock.get("position_pct", 0) or 0)
+    avg_cost = float(stock.get("cost", 0) or 0)
+    if position_pct > 0 and avg_cost > 0 and total_assets > 0:
+        return (total_assets * position_pct / 100.0) / avg_cost
+    return 0.0
+
+
+def _seed_equity(config: Dict[str, Any]) -> float:
+    """播种时刻的真实账户权益 = 现金 + Σ(播种股数 × 成本价)。
+
+    这是 day-0 的 total_value，必须作为 initial_equity_cny 的基线，
+    否则零交易首日就会算出虚假盈亏（详见下方调用点注释）。
+    """
+    cash = float(config.get("cash", 0) or 0)
+    total_assets = float(config.get("total_assets", 0) or 0)
+    stocks = list(config.get("holdings", []) or []) + list(config.get("watchlist", []) or [])
+    holdings_cost = 0.0
+    for stock in stocks:
+        units = _seed_units(stock, total_assets)
+        avg_cost = float(stock.get("cost", 0) or 0)
+        holdings_cost += units * avg_cost
+    return cash + holdings_cost
+
+
+def _sync_real_from_config_enabled(config: Dict[str, Any]) -> bool:
+    env = os.getenv("INVEST_SYNC_REAL_FROM_CONFIG")
+    if env is not None:
+        return env.strip().lower() not in {"0", "false", "no", "off"}
+    return bool(config.get("sync_real_account_from_config", True))
 
 
 def _round_down_to_lot(units: float, lot: int) -> float:

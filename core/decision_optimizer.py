@@ -199,11 +199,18 @@ def _estimate_expected_return_pct(
 
 
 def _sigma_30d_pct(metrics: Dict[str, Any]) -> float:
+    # 30 个日历日的前瞻窗口 ≈ 21 个交易日。波动按 sqrt(交易日数) 缩放。
+    # 用 21 而非 30：年化波动率本身以 252 个交易日为基，sqrt(21/252) 才是
+    # 同一时间轴上的 30 日历日窗口；用 sqrt(30/252) 混了日历日/交易日，高估约 19%。
+    horizon_td = 21.0
     vol_ann = metrics.get("volatility_annualized")
     if vol_ann is not None:
-        return max(2.0, _safe_float(vol_ann) * math.sqrt(30.0 / 252.0) * 100.0)
+        return max(2.0, _safe_float(vol_ann) * math.sqrt(horizon_td / 252.0) * 100.0)
+    # ATR-14 是**日度**真实波幅（%），把它缩放到 21 交易日应乘 sqrt(21)，
+    # 而非 sqrt(30/14)。后者把 ATR 误当成 14 日累计波动，低估 ~sqrt(14)≈3.7 倍，
+    # 进而低估 tail_sigma、放大仓位。仅在缺 volatility_annualized 时走此 fallback。
     atr_pct = _safe_float(metrics.get("atr_pct"), 2.0)
-    return max(2.0, atr_pct * math.sqrt(30.0 / 14.0))
+    return max(2.0, atr_pct * math.sqrt(horizon_td))
 
 
 def _directional_probability(

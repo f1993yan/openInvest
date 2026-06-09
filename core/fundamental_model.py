@@ -89,7 +89,14 @@ def _safe_float(x: Any) -> Optional[float]:
 
 
 def _as_pct(x: float) -> float:
-    """Accept either 0.12 or 12 for percentage-like metrics."""
+    """Accept either 0.12 or 12 for percentage-like metrics.
+
+    本 codebase 既定惯例是**小数**形式（revenue_growth=0.28 表示 28%、
+    fcf_yield=0.04 表示 4%、NIM=0.013 表示 1.3%；见 tests/test_fundamental_model.py），
+    所以 |x|<=1.5 的输入按小数 ×100 归一到整数百分比域。阈值 1.5 是因为真实
+    百分比指标的小数形式几乎都 <=1.5（150%），而少数天然 >100% 的指标
+    （如 provision_coverage 280%）按整数惯例传入、落在 else 分支原样返回。
+    """
     return x * 100.0 if abs(x) <= 1.5 else x
 
 

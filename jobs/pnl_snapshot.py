@@ -127,7 +127,10 @@ def _compute_snapshot(store: MemoryStore) -> Optional[Snapshot]:
         gold_grams = float(portfolio.get("gold_grams", 0) or 0)
         gold_avg = float(portfolio.get("gold_avg_cost_cny_per_gram", 0) or 0)
 
-    audcny = _safe_close("AUDCNY=X") or 4.7
+    # AUDCNY 获取失败时返回 None，而非硬编码 4.7。NDQ 是 AUD 计价资产，
+    # total_pnl_pct 把 NDQ 成本/市值都折成 CNY 后与黄金混合，一旦塞入固定 4.7，
+    # 会按错误权重扭曲混合总浮盈。失败时下游据此跳过 NDQ 的 CNY 折算（见下）。
+    audcny = _safe_close("AUDCNY=X")
     ndq_price = _safe_close("NDQ.AX")
     # 用 strategy.target_assets[gold].price_offset_pct 让 gold_now（"现在按浙商克价
     # 算的估值价"）与用户实际买入价同口径，避免 spot vs bank 不一致导致系统性
@@ -146,9 +149,19 @@ def _compute_snapshot(store: MemoryStore) -> Optional[Snapshot]:
         if (gold_now and gold_avg > 0 and gold_grams > 0) else None
     )
 
-    # 总浮盈 % = (现市值 - 总成本) / 总成本，现金不算成本/收益
-    ndq_cost_cny = ndq_avg * ndq_shares * audcny if ndq_avg > 0 else 0
-    ndq_value_cny = (ndq_price or 0) * ndq_shares * audcny if ndq_price else ndq_cost_cny
+    # 总浮盈 % = (现市值 - 总成本) / 总成本，现金不算成本/收益。
+    # 已知简化：NDQ 成本基用**当日** audcny 折算，而非买入时汇率（portfolio
+    # 只存 AUD 均价、未存历史汇率）。对 NDQ 单资产 ndq_pnl_pct 无影响（price/avg
+    # 同币种、汇率约掉），但会让混合 total_pnl_pct 随 AUDCNY 波动而漂移。
+    # 彻底修需在 portfolio 增"买入时加权平均汇率"字段，超出当前范围。
+    # 若 audcny 缺失：成本与市值同时归零，等价于把 NDQ 从混合 total 中剔除，
+    # 而不是塞入假汇率污染权重（此时 ndq_pnl_pct 仍可独立计算，不受影响）。
+    if audcny and ndq_avg > 0:
+        ndq_cost_cny = ndq_avg * ndq_shares * audcny
+        ndq_value_cny = (ndq_price or ndq_avg) * ndq_shares * audcny
+    else:
+        ndq_cost_cny = 0.0
+        ndq_value_cny = 0.0
     gold_cost_cny = gold_avg * gold_grams if gold_avg > 0 else 0
     gold_value_cny = (gold_now or 0) * gold_grams if gold_now else gold_cost_cny
     total_cost = ndq_cost_cny + gold_cost_cny
