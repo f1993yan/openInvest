@@ -1,181 +1,209 @@
-<div align="center">
-
-<img src="docs/logo.svg" alt="openInvest logo" width="120" height="120"/>
-
 # openInvest
 
+自部署的 AI 投资委员会与盘中监控工具。
 
-**自部署的 AI 投资委员会工具。4 个独立 LLM 角色互相 challenge，给出投资建议——决策权归你。**
+openInvest 的目标不是替你下单，而是把投资决策过程变得可追踪、可复盘、可验证：多个 LLM 角色独立讨论标的，确定性模型负责约束仓位、风控和执行条件，本地账本记录真实账户与委员会影子账户的差异。
 
-[![Python](https://img.shields.io/badge/Python-3.13+-3776AB?logo=python&logoColor=white)](https://www.python.org/)
-[![Claude Code](https://img.shields.io/badge/Skill-Claude%20Code-D97757?logo=anthropic&logoColor=white)](https://claude.com/claude-code)
-[![License](https://img.shields.io/badge/License-MIT-green.svg)](#)
-[![Stars](https://img.shields.io/github/stars/longsizhuo/openInvest?style=social)](https://github.com/longsizhuo/openInvest)
+本项目仅用于研究、复盘和个人决策辅助，不构成投资建议。
 
-[⚡ 示例 memo](examples/sample_memo.md) · [🪄 装上](#装上) · [📚 完整文档](docs/wiki/README.md) · [🤝 贡献](CONTRIBUTING.md)
+## 当前能力
 
-</div>
+- 多角色投资委员会：Macro Strategist、Quant Analyst、Risk Officer、CIO 输出 BUY / ACCUMULATE / HOLD / TRIM / SELL。
+- 国内热点新闻发现：抓取国内新闻源和热榜，不限于股票新闻，提炼事件、A 股板块、主题和候选龙头股。
+- 危险新闻量化：对地缘冲突、制裁、供应链、政策、宏观冲击等明显危险信息，输出可解释的 A 股影响估计。
+- 双账户账本：`real` 只记录用户明确告知的真实成交，`committee` 按委员会建议做影子执行。
+- 盘中监控：拉取行情，跑持仓和自选标的委员会，过滤不可执行提醒，拦截涨停追买和重复同向影子交易。
+- 买卖点模型：计算回调买点、突破买点、止损、止盈、减仓、再入场、CVaR、ATR、收益风险比。
+- SMC 回测：支持 swing、BOS/CHOCH、FVG、流动性 sweep、ATR 止损、RR 止盈；A 股默认只做多。
+- PnL 快照：按日记录真实账户和委员会账户的收盘后盈亏，并生成基准对比图。
+- Web/API：提供委员会、账户、PnL、SMC 回测、系统规则、历史决策等接口。
 
----
+## 目录结构
 
-## ⚠️ Beta 状态须知
-
-- **Web GUI 是 beta**——主面板 / 决策回放 / 实时同步可能不工作。
-  推荐入口：通过 Claude Code / Cursor / Cline 等 AI agent 跑 `invest` skill，
-  让 AI 带你看持仓、跑委员会、查决策。GUI 只做辅助调试。
-- **代码更新频繁**：每次使用前请 `cd ~/openInvest && git pull` 拉最新。
-  GUI bug / oracle 修复经常发版没有 release tag。
-- **fork 用户已知问题**：[GitHub Issues](https://github.com/longsizhuo/openInvest/issues)
-
----
-
-## 它在做什么
-
-每天早上，4 个独立 LLM 各自看不同维度，互相 challenge 后给出建议：
-
-- **Macro Strategist** 看宏观（VIX / 利率 / 汇率）
-- **Quant Analyst** 看技术面（RSI / 多周期分位 / 趋势），不知道你的持仓
-- **Risk Officer** 看风控（集中度 / 浮盈缓冲 / 尾部损失），不知道技术信号
-- **Round 2**：Quant 和 Risk 互看对方报告，调整观点
-- **CIO** 综合所有人发言，输出 BUY / ACCUMULATE / HOLD / TRIM / SELL + 置信度
-
-新增的国内新闻层会从综合热点新闻源提取事件，不限于股票类新闻；系统会归纳事件涉及的 A 股板块、主题和候选龙头，并在出现明显危险信息时输出可解释的量化影响估计。
-
-新增的双账户账本会同时记录真实账户和委员会影子账户：真实账户只在用户明确说明交易后更新，委员会账户按委员会建议模拟执行，用日度收盘盈亏对比指标可靠性。
-
-输出一份 Markdown memo。系统不会自动下单——决策仍归你。
-
----
-
-## 装上
-
-最简单的方式：装成 Claude Code 的 skill，让 Claude 帮你 onboard。
-
-```bash
-git clone https://github.com/longsizhuo/openInvest.git ~/openInvest
-bash ~/openInvest/skill/install.sh
+```text
+agents/       LLM 角色 prompt 和 SDK agent 封装
+backend/      盘中监控使用的直接委员会 API
+connectors/   GUI/API 桥、NapCat bot、浏览器侧接口
+core/         委员会编排、优化器、买卖点、SMC 回测
+db/           SQLite 账本：账户、交易、insights、events
+jobs/         盘中监控、周末新闻、PnL 快照等任务
+services/     新闻源、国内热榜增强、通知服务
+scripts/      CLI、回测、诊断、验证工具
+docs/         Wiki、ADR、API 和基准说明
+tests/        单元测试和回归测试
 ```
 
-回 Claude Code 对话里说："帮我初始化 invest"。Claude 会：
+## 快速开始
 
-1. 检测 memory / .env 缺失
-2. 用 5 个问题问你的情况（姓名 / 风险偏好 / 月收入 / 当前持仓 / 可选 API key）
-3. 写入配置 + 跑数据迁移
-4. 直接验证持仓
+要求：
 
-之后任何时候说"看看我的持仓" / "分析一下黄金" / "该不该加仓 X"，Claude 会调委员会给你 memo。
+- Python `3.13+`
+- `uv`
+- 建议安装 Playwright Chromium，用于国内新闻源抓取
 
-> 💡 **DeepSeek API key 是可选的**。Skill 模式下委员会用 Claude 跑，不需要 DeepSeek。
-> 想后台自动跑（cron 日报 / 任意非 Claude agent 调用）才需要注册。
+安装：
 
-**其他装法**（Docker / 手动 Python / 自带 GUI）：见 [QUICK_START.md](docs/QUICK_START.md)。
+```powershell
+git clone https://github.com/longsizhuo/openInvest.git
+cd openInvest
+uv sync
+uv run playwright install chromium
+Copy-Item .env.example .env
+```
 
----
-
-## 配置其他 LLM Provider
-
-默认用 DeepSeek。要换千问 / 智谱 / Kimi 等任何 OpenAI 兼容接口，改 `.env`：
+编辑 `.env`，至少配置一个 OpenAI 兼容 LLM：
 
 ```env
-# === DeepSeek（默认） ===
-LLM_API_KEY=<your-llm-api-key>
+LLM_API_KEY=
 LLM_BASE_URL=https://api.deepseek.com
 LLM_MODEL=deepseek-v4-flash
-
-# === 千问（Aliyun DashScope） ===
-LLM_API_KEY=<your-llm-api-key>
-LLM_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode
-LLM_MODEL=qwen-max
-
-# === 智谱 AI ===
-LLM_API_KEY=<your-llm-api-key>
-LLM_BASE_URL=https://open.bigmodel.cn/api/paas
-LLM_MODEL=glm-4-flash
 ```
 
-注意：**model name 必须改**（不是只改 API key + base_url），否则会 400
-"model not found"。每家 provider 的 model 名都不一样（`qwen-max` / `glm-4-flash` /
-`moonshot-v1-8k` 等），上对应官网查。
+旧的 `DEEPSEEK_*` 变量仍然兼容，但推荐使用新的 `LLM_*`。
 
-`LLM_*` 系列变量是新的通用配置（推荐）；老的 `DEEPSEEK_*` 保留向后兼容，
-现存 `.env` 不需要迁移。两组都没设时 `LLM_API_KEY` 会自动回落到 `DEEPSEEK_API_KEY`。
+## 本地敏感文件
 
----
+不要提交这些文件或目录：
 
-## 实盘 PnL（live）
-
-<div align="center">
-  <img src="https://raw.githubusercontent.com/longsizhuo/openInvest/pnl-data/docs/pnl_chart.svg" alt="PnL chart" width="100%"/>
-  <sub>每 2h 自动更新到 <a href="https://github.com/longsizhuo/openInvest/tree/pnl-data">pnl-data 分支</a> · 上半 = 30 天趋势 · 下半 = vs 8 个基准的累计涨幅</sub>
-  <br/>
-  <sub>📌 图中数据仅作方法论展示。你跑起来后看到的是<b>你自己的</b>持仓曲线。</sub>
-</div>
-
-<!-- OUTPERFORM_FEED_START — jobs/pnl_snapshot 每 2h 追加 -->
-<!-- OUTPERFORM_FEED_END -->
-
-**对比的基准**：AI 投顾 / 公募基金 / 储蓄理财 / 大盘指数 4 类共 8 条。完整对比方法论 + 数据源说明见 [docs/wiki/03-benchmarks.md](docs/wiki/README.md)。
-
-**实盘命中率公开**（自我披露不利数字）：方向性 verdict 历史命中率 25%，HOLD 占 84%——见 [docs/verdict_accuracy.md](docs/verdict_accuracy.md)。这工具不会让你致富，它只是把决策过程透明化。
-
----
-
-## 设计理念
-
-三个核心选择，每个都有具体技术后果。详见 [docs/wiki/01-architecture.md](docs/wiki/README.md)：
-
-1. **Coordinator-Worker，不是 prompt 塞 4 个人格** — 4 个独立 LLM session，按 DAG 跑，信息隔离在 `core/committee.py` 显式控制
-2. **Markdown 就是数据库** — frontmatter + body，Python 和 LLM 看到的永远一致；fcntl + atomic write 双保险
-3. **OpenClaw 风格 Dreaming Memory** — 三阶段记忆整合，把跨日交易模式凝固成 insight 注入下次决策
-
----
-
-## 架构与扩展
-
-```
-agents/    4 个角色的 prompt
-core/      Coordinator-Worker 编排 + memory store
-jobs/      APScheduler cron tasks（含 event_watch 事件感知层）
-connectors/web_api.py + skill/ 两条调用入口
-services/  news_sources / event_normalizer / event_notifier / notifier
-db/        SQLite WAL（trades / insights / market data / events）
-docs/wiki/ 完整架构文档 + ADR
+```text
+.env
+jobs/market_monitor_config.json
+data/
+logs/
+backend.log
+backend_err.log
+*.db
 ```
 
-**事件层（第一层）**（实现中，默认关）：盘中每 30 分钟扫多源新闻（DDGS + RSS + yfinance），flash 归一化成结构化事件落 `db/events.db`，命中用户持仓 / target_assets 则邮件通知 + 触发委员会重跑。开关：`jobs/event_watch.yml` 的 `enabled: true` + env `DEEPSEEK_API_KEY` + `EMAIL_SENDER`。详见 [ADR-006](docs/wiki/adr/006-event-layer.md)。
+`jobs/market_monitor_config.example.json` 是盘中监控配置模板。真实的 `jobs/market_monitor_config.json` 会包含现金、持仓、自选股和账户同步设置，必须留在本地。
 
-**国内热点新闻层**：周末或非交易时段可抓取国内综合热点新闻，提炼事件、关联板块和候选龙头股；危险事件会通过风险模型输出方向、置信度、暴露板块和可能影响区间。
+## 运行入口
 
-**双账户复盘层**：`real` 账户记录用户明确执行的交易，`committee` 账户记录委员会建议的影子执行；两者从同一初始持仓出发，按交易日沉淀收盘后盈亏快照。
+启动 GUI/API 桥，默认端口 `8765`：
 
-详见：
-- [架构总览](docs/wiki/01-architecture.md) | [4 角色 prompt 解析](docs/wiki/02-agents.md) | [Dreaming](docs/wiki/03-dreaming.md)
-- [双执行路径 — Coordinator vs Direct](docs/wiki/04-execution-paths.md)
-- [数据模型 v2](docs/wiki/05-data-model.md) | [Web API](docs/wiki/06-api.md)
-- [扩展指南](docs/wiki/07-extending.md) | [故障排查](docs/wiki/09-troubleshooting.md)
-- [ADR — 关键决策记录](docs/wiki/adr/)
+```powershell
+uv run uvicorn connectors.web_api:app --host 127.0.0.1 --port 8765
+```
 
----
+启动盘中监控使用的直接委员会后端，默认端口 `8766`：
 
-## 免责
+```powershell
+uv run uvicorn backend.server:app --host 127.0.0.1 --port 8766
+```
 
-LLM-driven 决策辅助工具。**不构成投资建议**。LLM 会出错、会过度自信、会漏看东西。
+运行盘中监控：
 
-系统不会自动下单。建议先用 `what_if` 在小金额上跑两周再上真仓。
+```powershell
+uv run python -m jobs.market_monitor
+```
 
-公开命中率数据 / PnL 曲线 / 跑赢事件仅用于展示方法论和系统行为，**过去表现不预示未来收益**。
+运行周末或非交易时段国内新闻机会发现：
 
-**回测局限**：`scripts/backtest_runner.py` 跑的 paper-trading walk-forward 默认拒绝
-decision_date > 2024-06-30 的回测（强制跑加 `--allow-lookahead`）。原因：
-DeepSeek-Chat 训练数据估算截止约 2024-06-30，模型已经"见过"那段时间的市场，
-对 2024 下半年的 backtest verdict 含 **LLM 训练数据 lookahead bias**——结果
-**仅作上限估计**，训练 / 调参信号请用 2024-06-30 之前的日期范围。
+```powershell
+uv run python -m jobs.weekend_news_crawl
+```
 
----
+生成或刷新 PnL 快照：
 
-## 致谢
+```powershell
+uv run python -m jobs.pnl_snapshot
+```
 
-- [OpenClaw Dreaming Guide](https://dev.to/czmilo/openclaw-dreaming-guide-2026-background-memory-consolidation-for-ai-agents-585e) — 三阶段记忆架构
-- [Claude Code](https://claude.com/claude-code) — Skill 模式 Coordinator 实现
+## 关键接口
 
-PR / Issue 欢迎。
+直接后端，默认 `http://127.0.0.1:8766`：
+
+- `POST /api/committee`：对单个标的运行投资委员会。
+- `GET /api/accounts`：查看真实账户和委员会账户。
+- `GET /api/accounts/trades`：查看账户交易流水。
+- `POST /api/accounts/real/trades`：记录用户明确执行的真实成交。
+- `POST /api/accounts/snapshot`：写入日度收盘 PnL 快照。
+- `GET /api/accounts/pnl`：查看账户 PnL 历史。
+
+GUI/API 桥，默认 `http://127.0.0.1:8765`：
+
+- `POST /api/committee/run`：运行 GUI 使用的委员会任务。
+- `GET /api/committee/{task_id}`：轮询委员会任务状态。
+- `GET /api/committee_sessions`：查看历史委员会记录。
+- `POST /api/backtest/smc`：运行 SMC 策略回测。
+- `GET /api/accounts`、`GET /api/accounts/pnl`：账户与 PnL 视图。
+- `GET /api/regime_rules`：查看硬规则、角色 prompt 和系统工具元数据。
+
+## CLI 示例
+
+SMC 回测：
+
+```powershell
+uv run python -m scripts.backtest_smc 300001 --period 2y
+uv run python -m scripts.backtest_smc 600150 --period 1y --risk 0.5 --json
+```
+
+SMC 默认 `allow_short=False`，符合普通 A 股交易约束。只有研究可做空市场时才使用 `--allow-short`。
+
+常用测试：
+
+```powershell
+uv run pytest tests/test_smc_backtest.py -q
+uv run pytest tests/test_account_ledger.py tests/test_market_monitor_entry_exit_alerts.py -q
+uv run pytest tests/test_news_sources.py -q
+```
+
+## 决策流程
+
+1. 收集行情、基本面、宏观环境、国内新闻和组合状态。
+2. 委员会角色独立输出观点，CIO 生成 memo。
+3. 确定性优化器根据现金、手数、regime、概率、基本面和风控约束修正仓位。
+4. 买卖点模型附加回调买点、突破买点、止损、止盈、减仓和再入场价格。
+5. 可选的 LLM 审核只评价优化器结果，不重新编造价格和仓位。
+6. 执行护栏拦截涨停追买、重复同向影子交易、低质量或不可执行提醒。
+7. 委员会账户记录系统会怎么做，真实账户只在用户明确录入成交后变化。
+
+## 双账户账本
+
+`db/account_ledger.py` 维护两个账户：
+
+| 账户 | 可信来源 | 更新方式 |
+| --- | --- | --- |
+| `real` | 用户明确告知的真实成交 | `apply_user_trade` 和 `/api/accounts/real/trades` |
+| `committee` | 委员会影子执行 | `apply_committee_result` |
+
+`sync_real_account_from_config` 只用于初始化和刷新元数据，不会覆盖已有真实账户的股数、均价或现金。这样可以长期比较：委员会指标是否真的优于用户真实执行。
+
+## 新闻机会发现
+
+`jobs.weekend_news_crawl` 的目标是寻找下一个可能的热门股票，而不是只评估当前持仓。它会：
+
+- 读取 `data/weekend_news/` 下的新闻缓存；
+- 合并国内热榜、新闻源和 RSS；
+- 调用 LLM 提炼 A 股板块、主题、催化和候选龙头；
+- 输出机会列表和需要委员会复核的标的；
+- 运行结束后弹出本地摘要。
+
+危险新闻量化是辅助判断模型，不是收益承诺。
+
+## 回测和研究边界
+
+回测只能说明某组规则在历史 OHLCV 上会如何运行，不能证明未来盈利。
+
+已知限制：
+
+- LLM 委员会回测可能受到模型训练数据截止日影响，存在知识层面的 lookahead。
+- SMC 回测避免同 K 线前视偏差，但仍是对 SMC 概念的简化实现。
+- 盘中提醒依赖行情可用性和本地配置质量。
+- A 股真实执行还受手数、T+1、涨跌停、停牌和流动性约束，需要人工复核。
+
+## 文档
+
+- 架构：`docs/wiki/01-architecture.md`
+- 角色：`docs/wiki/02-agents.md`
+- 执行路径：`docs/wiki/04-execution-paths.md`
+- 数据模型：`docs/wiki/05-data-model.md`
+- API：`docs/wiki/06-api.md`
+- 故障排查：`docs/wiki/09-troubleshooting.md`
+- ADR：`docs/wiki/adr/`
+
+## 免责声明
+
+openInvest 是 LLM 驱动的研究和决策辅助工具。它可能出错、过期、过度自信或遗漏信息。它不提供金融、法律或税务建议。
+
+所有投资决策和交易指令都由你负责。历史表现、回测结果、模型评分和 PnL 曲线都不代表未来收益。
