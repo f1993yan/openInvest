@@ -236,6 +236,23 @@ def send_windows_toast(title: str, body: str):
     threading.Thread(target=_show, daemon=True).start()
 
 
+def is_scheduled_monitor_popup_time(now: Optional[datetime] = None) -> bool:
+    """Only scheduled summary times may popup for news/no-action updates."""
+    now = now or datetime.now()
+    if now.hour == TRADING_END.hour and now.minute == TRADING_END.minute:
+        return True
+    return now.minute in (0, 30)
+
+
+def should_send_monitor_summary_popup(
+    *,
+    now: Optional[datetime] = None,
+    actionable: Optional[List[Dict[str, Any]]] = None,
+) -> bool:
+    """Send a summary popup on scheduled times or when trade action is needed."""
+    return is_scheduled_monitor_popup_time(now) or bool(actionable)
+
+
 def _safe_num(value: Any, default: float = 0.0) -> float:
     try:
         if value is None:
@@ -690,6 +707,85 @@ def _action_score(
     return score
 
 
+def _stock_sector(stock: Dict[str, Any]) -> str:
+    return str(stock.get("sector") or stock.get("industry") or "UNKNOWN")
+
+
+def _existing_sector_exposure(stocks: List[Dict[str, Any]]) -> Dict[str, float]:
+    exposure: Dict[str, float] = {}
+    for stock in stocks:
+        sector = _stock_sector(stock)
+        exposure[sector] = exposure.get(sector, 0.0) + _safe_num(stock.get("position_pct"))
+    return exposure
+
+
+def _option_risk_penalty(
+    *,
+    result: Dict[str, Any],
+    stock: Dict[str, Any],
+    price: float,
+    cost: float,
+    portfolio_value: float,
+    max_single_position_pct: float,
+) -> Tuple[float, Dict[str, float]]:
+    """Return a deterministic risk penalty and metrics for one buy option."""
+    ee = result.get("entry_exit_points") or {}
+    add_pct = cost / max(portfolio_value, 1.0) * 100.0
+    current_pct = _safe_num(stock.get("position_pct"))
+    post_position_pct = current_pct + add_pct
+    target_pct = _safe_num(stock.get("target_position_pct") or stock.get("target_pct"), max_single_position_pct)
+
+    stop_loss = _safe_num(ee.get("stop_loss_price"))
+    stop_loss_pct = 0.0
+    if price > 0 and stop_loss > 0 and stop_loss < price:
+        stop_loss_pct = (price - stop_loss) / price * 100.0
+    else:
+        stop_loss_pct = max(_safe_num(ee.get("atr_pct")), 2.0)
+
+    rr = _safe_num(ee.get("reward_risk_ratio"))
+    penalty = 0.0
+    penalty += max(0.0, stop_loss_pct - 5.0) * 1.8
+    penalty += max(0.0, post_position_pct - target_pct) * 1.2
+    penalty += max(0.0, post_position_pct - max_single_position_pct) * 5.0
+    if rr > 0 and rr < 1.5:
+        penalty += (1.5 - rr) * 12.0
+
+    return penalty, {
+        "add_position_pct": round(add_pct, 4),
+        "post_position_pct": round(post_position_pct, 4),
+        "stop_loss_pct": round(stop_loss_pct, 4),
+        "reward_risk_ratio": round(rr, 4),
+    }
+
+
+def _distribution_penalty(
+    option: Dict[str, Any],
+    chosen: List[Dict[str, Any]],
+    *,
+    existing_sector_pct: Dict[str, float],
+    max_sector_position_pct: float,
+) -> float:
+    """Penalize sector crowding across the selected alert basket."""
+    sector = str(option.get("alert_sector") or "UNKNOWN")
+    selected_sector_pct = sum(
+        _safe_num(item.get("alert_add_position_pct"))
+        for item in chosen
+        if str(item.get("alert_sector") or "UNKNOWN") == sector
+    )
+    after_sector_pct = existing_sector_pct.get(sector, 0.0) + selected_sector_pct + _safe_num(option.get("alert_add_position_pct"))
+    sector_penalty = max(0.0, after_sector_pct - max_sector_position_pct) * 4.0
+
+    symbol = str(option.get("symbol", "")).upper()
+    repeated_symbol_penalty = 0.0
+    if any(str(item.get("symbol", "")).upper() == symbol for item in chosen):
+        repeated_symbol_penalty = 999.0
+
+    diversification_bonus = 0.0
+    if sector != "UNKNOWN" and not any(str(item.get("alert_sector") or "UNKNOWN") == sector for item in chosen):
+        diversification_bonus = 4.0
+    return sector_penalty + repeated_symbol_penalty - diversification_bonus
+
+
 def select_optimal_actionable_alerts(
     *,
     results: List[Dict[str, Any]],
@@ -698,13 +794,25 @@ def select_optimal_actionable_alerts(
     stocks: List[Dict[str, Any]],
     entry_exit_state: Dict[str, Any],
     max_alerts: int = 4,
+    portfolio_value: Optional[float] = None,
+    max_single_position_pct: float = 25.0,
+    max_sector_position_pct: float = 35.0,
 ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
-    """Pick executable alerts under a portfolio-level cash budget.
+    """Pick executable alerts under cash and risk-distribution budgets.
 
     This is a multiple-choice knapsack over board-lot buy options, with sells
     admitted separately because they release risk/cash instead of consuming it.
+    Buy candidates are scored by signal quality minus stop-loss, position, and
+    sector-concentration penalties, so the selected basket is diversified rather
+    than merely the highest raw score that fits the cash budget.
     """
     stock_by_symbol = {str(s.get("symbol", "")).upper(): s for s in stocks}
+    existing_sector_pct = _existing_sector_exposure(stocks)
+    # If the caller does not provide total assets, treat available cash as
+    # roughly a 20% cash sleeve. This keeps legacy tests/callers from being
+    # over-penalized as if every buy consumed nearly the whole portfolio.
+    inferred_portfolio_value = max(_safe_num(cash) * 5.0, _safe_num(cash), 1.0)
+    base_portfolio_value = max(_safe_num(portfolio_value), inferred_portfolio_value)
     suppressed: List[Dict[str, Any]] = []
     sell_alerts: List[Dict[str, Any]] = []
     buy_groups: List[List[Dict[str, Any]]] = []
@@ -773,30 +881,57 @@ def select_optimal_actionable_alerts(
         group: List[Dict[str, Any]] = []
         for lots in range(1, max_lots + 1):
             cost = lots * lot_cost
+            risk_penalty, risk_metrics = _option_risk_penalty(
+                result=result,
+                stock=stock,
+                price=price,
+                cost=cost,
+                portfolio_value=base_portfolio_value,
+                max_single_position_pct=max_single_position_pct,
+            )
+            base_value = score * (lots ** 0.5)
             option = dict(result)
             option["suggested_alloc_cny"] = round(cost)
             option["alert_selected_lots"] = lots
             option["alert_score"] = round(score, 2)
-            option["alert_value"] = score * (lots ** 0.5)
+            option["alert_raw_value"] = round(base_value, 4)
+            option["alert_risk_penalty"] = round(risk_penalty, 4)
+            option["alert_value"] = round(base_value - risk_penalty, 4)
             option["alert_cost_cny"] = cost
             option["alert_triggers"] = triggers
+            option["alert_sector"] = _stock_sector(stock)
+            option["alert_add_position_pct"] = risk_metrics["add_position_pct"]
+            option["alert_post_position_pct"] = risk_metrics["post_position_pct"]
+            option["alert_stop_loss_pct"] = risk_metrics["stop_loss_pct"]
             group.append(option)
         buy_groups.append(group)
 
+    buy_limit = max(0, max_alerts - len(sell_alerts))
     budget_unit = 10.0
     budget = int(max(cash, 0.0) // budget_unit)
     dp: Dict[int, Tuple[float, List[Dict[str, Any]]]] = {0: (0.0, [])}
     for group in buy_groups:
         next_dp = dict(dp)
         for used, (value, chosen) in dp.items():
+            if len(chosen) >= buy_limit:
+                continue
             for option in group:
                 cost_units = int(_safe_num(option.get("alert_cost_cny")) // budget_unit)
                 new_used = used + cost_units
                 if new_used > budget:
                     continue
-                new_value = value + _safe_num(option.get("alert_value"))
+                dist_penalty = _distribution_penalty(
+                    option,
+                    chosen,
+                    existing_sector_pct=existing_sector_pct,
+                    max_sector_position_pct=max_sector_position_pct,
+                )
+                new_value = value + _safe_num(option.get("alert_value")) - dist_penalty
                 if new_value > next_dp.get(new_used, (-1.0, []))[0]:
-                    next_dp[new_used] = (new_value, chosen + [option])
+                    selected_option = dict(option)
+                    selected_option["alert_distribution_penalty"] = round(dist_penalty, 4)
+                    selected_option["alert_portfolio_value"] = round(new_value, 4)
+                    next_dp[new_used] = (new_value, chosen + [selected_option])
         dp = next_dp
     selected_buys = max(dp.values(), key=lambda item: item[0])[1] if dp else []
     selected_buy_symbols = {str(r.get("symbol", "")).upper() for r in selected_buys}
@@ -1139,7 +1274,8 @@ def _sync_config_account_fields(config: Dict, account_stocks: List[Dict]) -> Dic
 
 def run_monitor_round():
     """执行一轮监控"""
-    round_time = datetime.now().strftime("%H:%M")
+    round_dt = datetime.now()
+    round_time = round_dt.strftime("%H:%M")
     log.info(f"=== 开始监控轮次 {round_time} ===")
 
     config = load_config()
@@ -1285,6 +1421,9 @@ def run_monitor_round():
         stocks=all_stocks,
         entry_exit_state=entry_exit_state_before_round,
         max_alerts=int(config.get("max_action_alerts", 4) or 4),
+        portfolio_value=total_assets,
+        max_single_position_pct=float(config.get("max_single_position_pct", 25.0) or 25.0),
+        max_sector_position_pct=float(config.get("max_sector_position_pct", 35.0) or 35.0),
     )
 
     entry_exit_alerts, entry_exit_watch = update_entry_exit_alert_state(
@@ -1316,83 +1455,89 @@ def run_monitor_round():
         except Exception as e:
             log.warning(f"双账户收盘/PnL快照失败: {e}")
 
-    # 5. 通知 — 始终弹窗，包含完整监控摘要
+    # 5. 通知
+    # - 整点/半点/尾盘：允许综合摘要（可含新闻）
+    # - 其他交易时间：只有真正需要操作时才弹综合摘要；新闻刷新本身不弹窗
+    # - 买卖点连续触发：始终单独弹窗
     import re as _re
-    toast_lines = []
+    scheduled_summary = is_scheduled_monitor_popup_time(round_dt)
+    if should_send_monitor_summary_popup(now=round_dt, actionable=actionable):
+        toast_lines = []
 
-    # 新闻源摘要（前3条）
-    if news_items:
-        toast_lines.append("── 📰 新闻 ──")
-        for item in news_items[:3]:
-            title = item.title[:60] if item.title else ""
-            if title:
-                toast_lines.append(f"  [{item.src_name}] {title}")
-                sectors = (item.raw_meta or {}).get("sectors", [])
-                if sectors:
-                    leaders = sectors[0].get("leaders", [])
-                    leader = leaders[0] if leaders else {}
-                    if leader.get("name"):
-                        toast_lines.append(
-                            f"    {sectors[0].get('sector')} → {leader.get('name')}({leader.get('symbol')})"
-                        )
+        # 新闻源摘要只在整点/半点/尾盘综合摘要中展示，交易日新闻刷新本身不触发弹窗。
+        if scheduled_summary and news_items:
+            toast_lines.append("── 📰 新闻 ──")
+            for item in news_items[:3]:
+                title = item.title[:60] if item.title else ""
+                if title:
+                    toast_lines.append(f"  [{item.src_name}] {title}")
+                    sectors = (item.raw_meta or {}).get("sectors", [])
+                    if sectors:
+                        leaders = sectors[0].get("leaders", [])
+                        leader = leaders[0] if leaders else {}
+                        if leader.get("name"):
+                            toast_lines.append(
+                                f"    {sectors[0].get('sector')} → {leader.get('name')}({leader.get('symbol')})"
+                            )
 
-    # actionable 标的
-    if actionable:
-        toast_lines.append("── ⚠️ 需操作 ──")
-        for a in actionable[:4]:
-            # 入场出场点
-            ee = a.get("entry_exit_points", {}) or {}
-            buy = ee.get("buy_pullback_price") or ee.get("buy_breakout_price")
-            sl_p = ee.get("stop_loss_price")
-            tp_p = ee.get("take_profit_price")
-            exit_p = ee.get("trim_price")
-            reentry = ee.get("reentry_price")
-            rr = ee.get("reward_risk_ratio", 0)
+        # actionable 标的
+        if actionable:
+            toast_lines.append("── ⚠️ 需操作 ──")
+            for a in actionable[:4]:
+                # 入场出场点
+                ee = a.get("entry_exit_points", {}) or {}
+                buy = ee.get("buy_pullback_price") or ee.get("buy_breakout_price")
+                sl_p = ee.get("stop_loss_price")
+                tp_p = ee.get("take_profit_price")
+                exit_p = ee.get("trim_price")
+                rr = ee.get("reward_risk_ratio", 0)
 
-            # LLM审核
-            review = a.get("optimizer_review", "") or ""
-            rl = _re.search(r"ONE_LINE:\s*(.+)", review) if _re else None
-            comment = rl.group(1)[:60] if rl else ""
+                # LLM审核
+                review = a.get("optimizer_review", "") or ""
+                rl = _re.search(r"ONE_LINE:\s*(.+)", review) if _re else None
+                comment = rl.group(1)[:60] if rl else ""
 
-            # 手数（买卖都按最小交易单位估算）
-            alloc = a.get("suggested_alloc_cny", 0)
-            sym = a.get("symbol", "")
-            price = prices.get(sym, {}).get("price", 1)
-            stock_cfg = next((s for s in all_stocks if s.get("symbol") == sym), {})
-            lot = int(stock_cfg.get("min_lot_size") or 100)
-            hands = int(abs(alloc) / (price * lot)) if price > 0 and abs(alloc) > 0 and lot > 0 else 0
-            hands_str = f" {hands}手" if hands > 0 else ""
+                # 手数（买卖都按最小交易单位估算）
+                alloc = a.get("suggested_alloc_cny", 0)
+                sym = a.get("symbol", "")
+                price = prices.get(sym, {}).get("price", 1)
+                stock_cfg = next((s for s in all_stocks if s.get("symbol") == sym), {})
+                lot = int(stock_cfg.get("min_lot_size") or 100)
+                hands = int(abs(alloc) / (price * lot)) if price > 0 and abs(alloc) > 0 and lot > 0 else 0
+                hands_str = f" {hands}手" if hands > 0 else ""
 
-            current_shares = 0
-            if price > 0:
-                current_shares = int(
-                    stock_cfg.get("position_pct", 0) / 100 * config["total_assets"] / price
-                )
-            current_hands = int(current_shares / lot) if lot > 0 else 0
-            remain_hands = max(0, current_hands - hands) if alloc < 0 else current_hands
-            remain_str = f" ->剩{remain_hands}手" if alloc < 0 and current_hands > 0 else ""
+                current_shares = 0
+                if price > 0:
+                    current_shares = int(
+                        stock_cfg.get("position_pct", 0) / 100 * config["total_assets"] / price
+                    )
+                current_hands = int(current_shares / lot) if lot > 0 else 0
+                remain_hands = max(0, current_hands - hands) if alloc < 0 else current_hands
+                remain_str = f" ->剩{remain_hands}手" if alloc < 0 and current_hands > 0 else ""
 
-            v_map = {"ACCUMULATE": "🟢↑买", "BUY": "🟢↑买", "TRIM": "🔴↓卖", "SELL": "🔴↓卖"}
-            v_icon = v_map.get(a['verdict'], a['verdict'])
+                v_map = {"ACCUMULATE": "🟢↑买", "BUY": "🟢↑买", "TRIM": "🔴↓卖", "SELL": "🔴↓卖"}
+                v_icon = v_map.get(a['verdict'], a['verdict'])
 
-            parts = [f"  {v_icon} {a['name']}{hands_str}{remain_str} ¥{alloc:,.0f}"]
-            if buy: parts.append(f"买¥{buy:.2f}")
-            if sl_p: parts.append(f"损¥{sl_p:.2f}")
-            if tp_p: parts.append(f"盈¥{tp_p:.2f}")
-            if exit_p: parts.append(f"出¥{exit_p:.2f}")
-            if rr: parts.append(f"R{rr:.1f}")
-            parts.append(f"(c={a['confidence']:.2f})")
-            toast_lines.append(" ".join(parts))
-            if comment:
-                toast_lines.append(f"    💬 {comment}")
+                parts = [f"  {v_icon} {a['name']}{hands_str}{remain_str} ¥{alloc:,.0f}"]
+                if buy: parts.append(f"买¥{buy:.2f}")
+                if sl_p: parts.append(f"损¥{sl_p:.2f}")
+                if tp_p: parts.append(f"盈¥{tp_p:.2f}")
+                if exit_p: parts.append(f"出¥{exit_p:.2f}")
+                if rr: parts.append(f"R{rr:.1f}")
+                parts.append(f"(c={a['confidence']:.2f})")
+                toast_lines.append(" ".join(parts))
+                if comment:
+                    toast_lines.append(f"    💬 {comment}")
+        else:
+            toast_lines.append("── ✅ 无需操作 ──")
+
+        toast_body = "\n".join(toast_lines[:25])  # 最多25行
+        send_windows_toast(
+            f"📊 {round_time} 监控 ({len(actionable)}只需操作)",
+            toast_body
+        )
     else:
-        toast_lines.append("── ✅ 无需操作 ──")
-
-    toast_body = "\n".join(toast_lines[:25])  # 最多25行
-    send_windows_toast(
-        f"📊 {round_time} 监控 ({len(actionable)}只需操作)",
-        toast_body
-    )
+        log.info("跳过综合弹窗：非整点/半点/尾盘，且无交易操作提醒")
     if entry_exit_alerts:
         send_windows_toast(
             f"🚨 买卖点连续触发 ({len(entry_exit_alerts)}只)",
