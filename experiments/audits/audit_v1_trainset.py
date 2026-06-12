@@ -19,11 +19,12 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 import pandas as pd
-import yfinance as yf
 
 ROOT = Path(__file__).resolve().parent.parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
+
+from utils.exchange_fee import get_history_data  # noqa: E402
 
 # 复用 production 的 compute_metrics，确保比较公平
 from utils.market_metrics import compute_metrics  # noqa: E402
@@ -117,12 +118,15 @@ def audit_bug4_oracle(samples: List[Dict[str, Any]]) -> Dict[str, Any]:
 
 
 def fetch_history(symbol: str, start: str, end: str) -> pd.DataFrame:
-    """yfinance 拉一段 close 历史，tz-naive。失败返空 df。"""
+    """Market provider 拉一段 close 历史，tz-naive。失败返空 df。"""
     for attempt in range(3):
         try:
-            df = yf.Ticker(symbol).history(start=start, end=end, auto_adjust=True)
+            df = get_history_data(symbol, "10y")
             if df is not None and not df.empty:
                 df.index = pd.to_datetime(df.index).tz_localize(None)
+                start_ts = pd.Timestamp(start)
+                end_ts = pd.Timestamp(end)
+                df = df[(df.index >= start_ts) & (df.index <= end_ts)]
                 return df
         except Exception as e:
             print(f"  ⚠ {symbol} attempt {attempt+1}: {e}")

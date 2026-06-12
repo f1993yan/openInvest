@@ -6,7 +6,6 @@ akshare>=1.14.0
 pandas>=2.0
 numpy>=1.26
 openai>=1.0
-yfinance>=0.2
 python-frontmatter>=1.0
 portalocker>=3.0
 requests>=2.31

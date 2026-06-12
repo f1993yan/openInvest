@@ -721,7 +721,7 @@ async def delete_holding(symbol: str) -> Dict[str, Any]:
 # 注：v2 通用 cash CRUD（/api/cash/{currency}/deposit|withdraw）放在文件末尾，
 # 因为它依赖 WriteResponse 定义（在 PR 2 区域）
 
-# ============ yfinance Search 端点 ============
+# ============ A-share symbol search 端点 ============
 
 class SymbolSearchResult(BaseModel):
     """单个搜索命中"""
@@ -742,27 +742,33 @@ async def search_symbols(
     q: str = Query(..., min_length=1, max_length=64, description="搜索关键词"),
     limit: int = Query(8, ge=1, le=20),
 ) -> SymbolSearchResponse:
-    """通过 yfinance Search 搜索 symbol（零 token 配置）。
-    用户输入 'apple' / '腾讯' / 'TSLA' 都能用"""
+    """通过 akshare A 股代码名称表搜索 symbol（零 token 配置）。"""
     try:
-        from yfinance import Search
-        s = Search(q, max_results=limit)
-        quotes_raw = list(getattr(s, "quotes", []) or [])
+        import akshare as ak
+
+        df = ak.stock_info_a_code_name()
     except Exception as e:  # noqa: BLE001
-        log.warning(f"yfinance Search '{q}' 失败: {e}")
+        log.warning(f"A 股 symbol search '{q}' 失败: {e}")
         return SymbolSearchResponse(count=0, results=[])
 
+    query = q.strip().lower()
     results = []
-    for r in quotes_raw[:limit]:
-        if not isinstance(r, dict):
+    for _, row in df.iterrows():
+        code = str(row.get("code") or row.get("证券代码") or "").strip()
+        name = str(row.get("name") or row.get("证券简称") or "").strip()
+        if not code or not name:
+            continue
+        if query not in code.lower() and query not in name.lower():
             continue
         results.append(SymbolSearchResult(
-            symbol=str(r.get("symbol", "")),
-            shortname=r.get("shortname"),
-            longname=r.get("longname"),
-            exchange=r.get("exchange"),
-            quote_type=r.get("quoteType"),
+            symbol=code,
+            shortname=name,
+            longname=name,
+            exchange="A股",
+            quote_type="EQUITY",
         ))
+        if len(results) >= limit:
+            break
     return SymbolSearchResponse(count=len(results), results=results)
 
 
@@ -2567,13 +2573,13 @@ async def get_data_sources_health() -> DataSourcesHealthResponse:
         ("^TNX", "10 年美债收益率 TNX"),
     ]
 
-    yf_symbols = user_symbols + macro_symbols
-    for symbol, desc in yf_symbols:
+    market_symbols = user_symbols + macro_symbols
+    for symbol, desc in market_symbols:
         try:
             df = get_history_data(symbol, "5d")
             if df is None or df.empty:
                 sources.append(DataSourceHealth(
-                    name=f"yfinance:{symbol}",
+                    name=f"market_provider:{symbol}",
                     description=desc,
                     is_stale=True,
                     error="empty dataframe",
@@ -2590,7 +2596,7 @@ async def get_data_sources_health() -> DataSourcesHealthResponse:
             except Exception:
                 is_stale = False
             sources.append(DataSourceHealth(
-                name=f"yfinance:{symbol}",
+                name=f"market_provider:{symbol}",
                 description=desc,
                 last_success_at=last_ts,
                 is_stale=is_stale,
@@ -2598,7 +2604,7 @@ async def get_data_sources_health() -> DataSourcesHealthResponse:
             ))
         except Exception as e:  # noqa: BLE001
             sources.append(DataSourceHealth(
-                name=f"yfinance:{symbol}",
+                name=f"market_provider:{symbol}",
                 description=desc,
                 is_stale=True,
                 error=f"{type(e).__name__}: {e}",
@@ -2674,7 +2680,7 @@ async def get_data_sources_health() -> DataSourcesHealthResponse:
         mtime = _dt.fromtimestamp(db_path.stat().st_mtime).astimezone()
         sources.append(DataSourceHealth(
             name="market_db_sqlite",
-            description="行情 DB 兜底（yfinance 挂时回落到这里）",
+            description="行情 DB 兜底（行情源不可用时回落到这里）",
             last_success_at=mtime.isoformat(timespec="seconds"),
             is_stale=False,
             sample_value=f"{db_path.stat().st_size // 1024} KB",

@@ -28,12 +28,11 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
-import yfinance as yf
-
 ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(ROOT))
 
 from core.memory_store import MemoryStore  # noqa: E402
+from utils.exchange_fee import get_history_data  # noqa: E402
 
 HISTORY_PATH = ROOT / "memory" / ".state" / "pnl_history.jsonl"
 
@@ -78,12 +77,14 @@ START_DATE = max(
 )
 
 
-def _fetch_yf(symbol: str) -> Dict[str, float]:
-    """yfinance 拉日线，返回 {YYYY-MM-DD: close}"""
-    df = yf.Ticker(symbol).history(
-        start=(START_DATE - timedelta(days=5)).isoformat(),
-        end=(END_DATE + timedelta(days=1)).isoformat(),
-    )
+def _fetch_history(symbol: str) -> Dict[str, float]:
+    """Market provider 拉日线，返回 {YYYY-MM-DD: close}"""
+    df = get_history_data(symbol, "1y")
+    if df is None or df.empty:
+        return {}
+    start = START_DATE - timedelta(days=5)
+    end = END_DATE + timedelta(days=1)
+    df = df[(df.index.date >= start) & (df.index.date <= end)]
     return {idx.strftime("%Y-%m-%d"): float(row["Close"]) for idx, row in df.iterrows()}
 
 
@@ -119,11 +120,11 @@ def main() -> None:
         print(f"   要用真实数据请把交易明细写到该路径（git ignored）")
     else:
         print(f"📋 加载真实交易明细 {len(trades)} 笔（来源: gold_trades.private.json）")
-    print(f"📡 拉取 yfinance 历史数据 ({START_DATE} → {END_DATE})...")
-    gc_prices = _fetch_yf("GC=F")
-    usdcny_prices = _fetch_yf("USDCNY=X")
-    audcny_prices = _fetch_yf("AUDCNY=X")
-    ndq_prices = _fetch_yf("NDQ.AX")
+    print(f"📡 拉取 market provider 历史数据 ({START_DATE} → {END_DATE})...")
+    gc_prices = _fetch_history("GC=F")
+    usdcny_prices = _fetch_history("USDCNY=X")
+    audcny_prices = _fetch_history("AUDCNY=X")
+    ndq_prices = _fetch_history("NDQ.AX")
     print(f"  GC=F: {len(gc_prices)} 天, USDCNY: {len(usdcny_prices)}, "
           f"AUDCNY: {len(audcny_prices)}, NDQ.AX: {len(ndq_prices)}")
 

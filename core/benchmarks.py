@@ -23,7 +23,6 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import requests
-import yfinance as yf
 
 ROOT = Path(__file__).parent.parent
 CACHE_DIR = ROOT / "memory" / ".state" / "benchmarks"
@@ -42,7 +41,7 @@ CACHE_DIR = ROOT / "memory" / ".state" / "benchmarks"
 BENCHMARKS: Dict[str, Dict[str, Any]] = {
     # === Tier 1: 不持有的市场参照（淡化）===
     "沪深300": {
-        "source": "yfinance", "symbol": "000300.SS",
+        "source": "market_provider", "symbol": "000300.SS",
         "color": "#e3b341", "group": "index", "dash": "1 0",
     },
     # === Tier 1: 常数年化（理财基线，水平虚线）===
@@ -110,11 +109,16 @@ class BenchmarkSeries:
 
 # ---------- 各 source 的取数 helper ----------
 
-def _fetch_yfinance(symbol: str, start: str, end: str) -> Dict[str, float]:
+def _fetch_market_provider(symbol: str, start: str, end: str) -> Dict[str, float]:
     """{date_str: close}。NaN 收盘价用前一个有效值兜底。"""
-    df = yf.Ticker(symbol).history(start=start, end=end)
+    from utils.exchange_fee import get_history_data
+
+    df = get_history_data(symbol, "2y")
     if df.empty:
         return {}
+    start_ts = datetime.strptime(start, "%Y-%m-%d")
+    end_ts = datetime.strptime(end, "%Y-%m-%d")
+    df = df[(df.index >= start_ts) & (df.index <= end_ts)]
     out: Dict[str, float] = {}
     last_valid: Optional[float] = None
     for idx, row in df.iterrows():
@@ -204,8 +208,8 @@ def refresh_benchmark(key: str, start: str, end: str) -> Optional[Dict[str, Any]
     config = BENCHMARKS[key]
     source = config["source"]
 
-    if source == "yfinance":
-        prices = _fetch_yfinance(config["symbol"], start, end)
+    if source == "market_provider":
+        prices = _fetch_market_provider(config["symbol"], start, end)
     elif source == "eastmoney_fund":
         prices = _fetch_eastmoney_fund(config["code"], start, end)
     elif source == "constant_apr":

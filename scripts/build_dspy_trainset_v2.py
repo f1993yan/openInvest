@@ -18,7 +18,6 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
-import yfinance as yf
 
 # 让脚本可以 from utils / core / ... import
 ROOT = Path(__file__).resolve().parent.parent
@@ -26,6 +25,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from core.regime import format_regime_brief  # noqa: E402
+from utils.exchange_fee import get_history_data  # noqa: E402
 from utils.market_metrics import compute_metrics  # noqa: E402
 
 
@@ -67,13 +67,16 @@ MACRO_FALLBACK = {
 
 
 def _safe_history(symbol: str, start: str, end: str, retries: int = 2) -> pd.DataFrame:
-    """yfinance 拉历史，带 retry + sleep。失败返空 DF。"""
+    """Market provider 拉历史，带 retry + sleep。失败返空 DF。"""
     for attempt in range(retries + 1):
         try:
-            df = yf.Ticker(symbol).history(start=start, end=end, auto_adjust=True)
+            df = get_history_data(symbol, "10y")
             if df is not None and not df.empty:
                 # tz-aware → tz-naive，统一 index
                 df.index = pd.to_datetime(df.index).tz_localize(None)
+                start_ts = pd.Timestamp(start)
+                end_ts = pd.Timestamp(end)
+                df = df[(df.index >= start_ts) & (df.index <= end_ts)]
                 return df
         except Exception as e:
             print(f"  ⚠ {symbol} attempt {attempt+1} 失败: {e}")

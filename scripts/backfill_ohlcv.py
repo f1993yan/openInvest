@@ -26,9 +26,9 @@ import sys
 import time
 
 import numpy as np
-import yfinance as yf
 
 from db.market_store import MarketStore
+from utils.exchange_fee import get_history_data
 
 
 def _nan_to_none(v):
@@ -44,12 +44,12 @@ def backfill_symbol(store: MarketStore, symbol: str, period: str = "2y") -> dict
     stats = {"symbol": symbol, "rows": 0, "updated": 0, "inserted": 0,
              "high_low_filled": 0, "volume_filled": 0, "error": None}
     try:
-        df = yf.Ticker(symbol).history(period=period)
+        df = get_history_data(symbol, period)
     except Exception as e:  # noqa: BLE001
         stats["error"] = f"{type(e).__name__}: {e}"
         return stats
     if df is None or df.empty:
-        stats["error"] = "empty yfinance response"
+        stats["error"] = "empty market-provider response"
         return stats
 
     for idx, row in df.iterrows():
@@ -110,7 +110,7 @@ def main(argv: list[str]) -> int:
         print(f"✅ {sym}: {st['rows']} 行 "
               f"(更新 {st['updated']} / 新增 {st['inserted']}) | "
               f"High/Low 填 {st['high_low_filled']} | Volume 填 {st['volume_filled']}")
-        time.sleep(0.5)  # 轻微限速，别打挂 yfinance
+        time.sleep(0.5)  # 轻微限速，别打挂国内行情源
 
     print("\n🔍 抽查（近 30 行列存在性）：")
     for sym in symbols:

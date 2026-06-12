@@ -18,8 +18,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Optional
 
-import yfinance as yf
-
 GOLD_OZ_PER_GRAM = 31.1035
 
 
@@ -65,20 +63,21 @@ def get_gold_snapshot(offset_pct: float = 0.015) -> Optional[GoldPriceSnapshot]:
                 推断值覆盖；用 /gold_offset 命令报当日实际买入克价让系统学习）
 
     数据通路（audit algo M7 加了 DB 兜底）：
-    1. 主：yfinance GC=F + USDCNY=X 实时 → 写 DB cache → 返回 fresh snapshot
-    2. 兜底：yfinance 失败时从 DB 读最近一条，返回 is_stale=True 的 snapshot
+    1. 主：国内可直连 provider 拉 GC=F + USDCNY=X 实时 → 写 DB cache → 返回 fresh snapshot
+    2. 兜底：provider 失败时从 DB 读最近一条，返回 is_stale=True 的 snapshot
     3. 都失败：返回 None
     """
     try:
-        gold_df = yf.Ticker("GC=F").history(period="1d")
-        usdcny_df = yf.Ticker("USDCNY=X").history(period="1d")
-        if gold_df.empty or usdcny_df.empty:
-            print("⚠️ 黄金数据为空，尝试 DB 兜底")
+        from utils.cn_market_provider import fetch_spot
+        gold_usd = fetch_spot("GC=F")
+        usdcny = fetch_spot("USDCNY=X")
+        if gold_usd is None or usdcny is None:
+            print("⚠️ 黄金 provider 数据为空，尝试 DB 兜底")
             return _get_db_fallback_snapshot(offset_pct)
-        gold_usd = float(gold_df["Close"].iloc[-1])
-        usdcny = float(usdcny_df["Close"].iloc[-1])
+        gold_usd = float(gold_usd)
+        usdcny = float(usdcny)
     except Exception as e:
-        print(f"⚠️ 黄金 yfinance 拉取失败 ({e})，尝试 DB 兜底")
+        print(f"⚠️ 黄金 provider 拉取失败 ({e})，尝试 DB 兜底")
         return _get_db_fallback_snapshot(offset_pct)
 
     # 写 DB cache 给下次兜底用
@@ -87,8 +86,8 @@ def get_gold_snapshot(offset_pct: float = 0.015) -> Optional[GoldPriceSnapshot]:
         from db.market_store import MarketStore
         _store = MarketStore()
         today = _dt.now().strftime("%Y-%m-%d")
-        _store.save_generic_price("GC=F", today, gold_usd, source="yfinance")
-        _store.save_generic_price("USDCNY=X", today, usdcny, source="yfinance")
+        _store.save_generic_price("GC=F", today, gold_usd, source="cn_market_provider")
+        _store.save_generic_price("USDCNY=X", today, usdcny, source="cn_market_provider")
     except Exception as e:
         print(f"⚠️ 黄金 DB 写缓存失败（不影响本次返回）: {e}")
 

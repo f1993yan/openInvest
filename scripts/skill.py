@@ -347,7 +347,7 @@ def cmd_correlate(args: argparse.Namespace) -> None:
         skill correlate --symbols AAPL,GOOGL,MSFT --period 1y --with-llm
     """
     import pandas as pd
-    import yfinance as yf
+    from utils.exchange_fee import get_history_data
 
     symbols = [s.strip() for s in args.symbols.split(",") if s.strip()]
     if len(symbols) < 2:
@@ -358,7 +358,7 @@ def cmd_correlate(args: argparse.Namespace) -> None:
     # 1. 拉每个 symbol 历史价（直接走 yfinance 拿真 period 长度数据）
     closes: Dict[str, pd.Series] = {}
     for sym in symbols:
-        df = yf.Ticker(sym).history(period=period)
+        df = get_history_data(sym, period)
         if df is None or df.empty:
             _print_json({"status": "error", "error": f"{sym} 拿不到历史数据"})
             sys.exit(1)
@@ -387,25 +387,16 @@ def cmd_correlate(args: argparse.Namespace) -> None:
         sys.exit(1)
     corr_matrix = returns_df.corr(min_periods=20).round(3)
 
-    # 3. 拉 sector / industry（yfinance .info）
-    import yfinance as yf
+    # 3. sector / industry 元数据：无 yfinance 依赖时保守降级为空元数据
     sectors: Dict[str, Dict[str, Any]] = {}
     for sym in symbols:
-        try:
-            info = yf.Ticker(sym).info
-            sectors[sym] = {
-                "sector": info.get("sector") or info.get("quoteType") or "—",
-                "industry": info.get("industry") or "—",
-                "name": info.get("longName") or info.get("shortName") or sym,
-            }
-        except Exception:
-            sectors[sym] = {"sector": "—", "industry": "—", "name": sym}
+        sectors[sym] = {"sector": "—", "industry": "—", "name": sym}
 
     # 4. 跟 macro 因子的 correlation（VIX, TNX, USDCNY）
     macro_corr: Dict[str, Dict[str, float]] = {}
     for macro_sym, label in [("^VIX", "vix"), ("^TNX", "tnx"), ("USDCNY=X", "usdcny")]:
         try:
-            macro_df = yf.Ticker(macro_sym).history(period=period)
+            macro_df = get_history_data(macro_sym, period)
             if macro_df is None or macro_df.empty:
                 continue
             macro_returns = macro_df["Close"].copy()

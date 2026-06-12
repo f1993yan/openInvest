@@ -20,9 +20,8 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-import yfinance as yf
-
 from db.market_store import MarketStore
+from utils.exchange_fee import get_history_data
 
 # 默认 backfill 全集：可投资产 + 宏观因子。period="max" = yfinance 能给的最长。
 DEFAULT_SYMBOLS = ["GC=F", "NDQ.AX", "^VIX", "^TNX"]
@@ -40,10 +39,10 @@ def _nan_to_none(v):
 
 def backfill_symbol(store: MarketStore, symbol: str) -> dict:
     symbol = symbol.upper()
-    print(f"🔄 [yfinance] {symbol} period=max ...")
-    df = yf.Ticker(symbol).history(period="max")
+    print(f"🔄 [market-provider] {symbol} period=10y ...")
+    df = get_history_data(symbol, "10y")
     if df.empty:
-        print(f"❌ {symbol}: yfinance 空")
+        print(f"❌ {symbol}: market provider 空")
         return {"symbol": symbol, "rows": 0}
     inserted = updated = 0
     for idx, row in df.iterrows():

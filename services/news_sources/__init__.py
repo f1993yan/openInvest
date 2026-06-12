@@ -3,7 +3,7 @@
 国外源（任一失败不连坐）：
 - ddgs_news.py        DuckDuckGo news（宽泛查询，覆盖 macro / sector）
 - rss_feed.py         Reuters / BBC / FT / 财新 等 RSS（高质量主流财经）
-- yfinance_news.py    yf.Ticker(sym).news（按 symbol 直接关联）
+- symbol_news.py      DDGS/web search（按 symbol 直接关联）
 
 国内源（任一失败不连坐，默认启用）：
 - eastmoney_news.py   东方财富（A股公告/研报/快讯）
@@ -29,7 +29,7 @@ log = logging.getLogger(__name__)
 @dataclass
 class RawNewsItem:
     """归一化后的原始新闻条目，给 event_normalizer 用"""
-    src_name: str                  # 'ddgs' / 'rss:reuters' / 'yfinance:NDQ.AX'
+    src_name: str                  # 'ddgs' / 'rss:reuters' / 'symbol_news:NDQ.AX'
     title: str
     url: str
     snippet: str
@@ -57,7 +57,7 @@ def fetch_all(
 
     Args:
         queries:          给 ddgs_news 的关键词列表（如 ['Fed rate', 'NDQ.AX']）
-        symbols:          给 yfinance_news 的 ticker 列表
+        symbols:          给 symbol_news 的 ticker 列表
         rss_feeds:        给 rss_feed 的 feed 列表 [{"name": "reuters", "url": "..."}]
         domestic:         是否启用国内新闻源（东方财富/财联社/新浪/雪球/华尔街见闻）
         max_per_source:   每个源最多返回多少条
@@ -66,7 +66,7 @@ def fetch_all(
     """
     from services.news_sources.ddgs_news import fetch_ddgs_news
     from services.news_sources.rss_feed import fetch_rss
-    from services.news_sources.yfinance_news import fetch_yfinance_news
+    from services.news_sources.symbol_news import fetch_symbol_news
 
     tasks: List[Dict[str, Any]] = []
     if queries:
@@ -80,9 +80,9 @@ def fetch_all(
     if symbols:
         for sym in symbols:
             tasks.append({
-                "fn": fetch_yfinance_news,
+                "fn": fetch_symbol_news,
                 "kwargs": {"symbol": sym, "max_items": max_per_source},
-                "label": f"yfinance:{sym}",
+                "label": f"symbol_news:{sym}",
             })
     if rss_feeds:
         for feed in rss_feeds:

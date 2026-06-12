@@ -1,22 +1,35 @@
 # openInvest
 
-自部署的 AI 投资委员会与盘中监控工具。
+自部署的 AI 投资委员会、新闻机会发现、盘中监控和量化回测工具。
 
-openInvest 的目标不是替你下单，而是把投资决策过程变得可追踪、可复盘、可验证：多个 LLM 角色独立讨论标的，确定性模型负责约束仓位、风控和执行条件，本地账本记录真实账户与委员会影子账户的差异。
+openInvest 的目标不是替你下单，而是把投资决策过程变得可追踪、可复盘、可验证：多角色 LLM 独立讨论标的，确定性模型负责仓位约束、风险控制和执行条件，本地账本记录真实账户与委员会影子账户的差异。
 
 本项目仅用于研究、复盘和个人决策辅助，不构成投资建议。
 
 ## 当前能力
 
 - 多角色投资委员会：Macro Strategist、Quant Analyst、Risk Officer、CIO 输出 BUY / ACCUMULATE / HOLD / TRIM / SELL。
-- 国内热点新闻发现：抓取国内新闻源和热榜，不限于股票新闻，提炼事件、A 股板块、主题和候选龙头股。
-- 危险新闻量化：对地缘冲突、制裁、供应链、政策、宏观冲击等明显危险信息，输出可解释的 A 股影响估计。
+- 国内热门新闻发现：抓取国内新闻源和热榜，不限于股票新闻，提炼事件、A 股板块、主题和候选龙头股。
+- 风险新闻量化：对地缘冲突、制裁、供应链、政策、宏观冲击等明显危险信息，输出可解释的 A 股影响估计。
 - 双账户账本：`real` 只记录用户明确告知的真实成交，`committee` 按委员会建议做影子执行。
 - 盘中监控：拉取行情，跑持仓和自选标的委员会，过滤不可执行提醒，拦截涨停追买和重复同向影子交易。
 - 买卖点模型：计算回调买点、突破买点、止损、止盈、减仓、再入场、CVaR、ATR、收益风险比。
-- SMC 回测：支持 swing、BOS/CHOCH、FVG、流动性 sweep、ATR 止损、RR 止盈；A 股默认只做多。
+- SMC 回测：支持 swing、BOS/CHOCH、FVG、流动性 sweep、ATR 止损、RR 止盈，A 股默认只做多。
 - PnL 快照：按日记录真实账户和委员会账户的收盘后盈亏，并生成基准对比图。
-- Web/API：提供委员会、账户、PnL、SMC 回测、系统规则、历史决策等接口。
+- Web/API：提供委员会、账户、PnL、SMC 回测、系统规则、历史决策、数据源健康等接口。
+
+## 数据源
+
+项目已经完全移除 `yfinance` 依赖，不再安装或导入 `yfinance`。
+
+当前行情和新闻入口：
+
+- A 股搜索：`akshare.stock_info_a_code_name()`。
+- A 股 / 港股 / 宏观 / 汇率 / 黄金代理行情：`utils.cn_market_provider` 与现有 SQLite 行情缓存兜底。
+- 新闻：国内新闻聚合、热榜、RSS、DDGS/web search。
+- symbol 相关新闻：`services.news_sources.symbol_news`，通过通用 web/news search 获取，不依赖行情包。
+
+历史配置里仍可能出现字段名 `yfinance_proxy`。这是旧 schema 的兼容字段，用于表示行情代理 symbol，例如黄金用 `GC=F` 和 `USDCNY=X` 反推人民币克价；它不是包依赖。
 
 ## 目录结构
 
@@ -25,7 +38,7 @@ agents/       LLM 角色 prompt 和 SDK agent 封装
 backend/      盘中监控使用的直接委员会 API
 connectors/   GUI/API 桥、NapCat bot、浏览器侧接口
 core/         委员会编排、优化器、买卖点、SMC 回测
-db/           SQLite 账本：账户、交易、insights、events
+db/           SQLite 账本：账户、交易、insights、events、行情缓存
 jobs/         盘中监控、周末新闻、PnL 快照等任务
 services/     新闻源、国内热榜增强、通知服务
 scripts/      CLI、回测、诊断、验证工具
@@ -75,7 +88,7 @@ backend_err.log
 *.db
 ```
 
-`jobs/market_monitor_config.example.json` 是盘中监控配置模板。真实的 `jobs/market_monitor_config.json` 会包含现金、持仓、自选股和账户同步设置，必须留在本地。
+`jobs/market_monitor_config.example.json` 是盘中监控配置模板。真实的 `jobs/market_monitor_config.json` 可能包含现金、持仓、自选股和账户同步设置，必须留在本地。
 
 ## 运行入口
 
@@ -125,8 +138,10 @@ GUI/API 桥，默认 `http://127.0.0.1:8765`：
 - `POST /api/committee/run`：运行 GUI 使用的委员会任务。
 - `GET /api/committee/{task_id}`：轮询委员会任务状态。
 - `GET /api/committee_sessions`：查看历史委员会记录。
+- `GET /api/symbols/search`：通过 akshare 搜索 A 股代码和名称。
 - `POST /api/backtest/smc`：运行 SMC 策略回测。
 - `GET /api/accounts`、`GET /api/accounts/pnl`：账户与 PnL 视图。
+- `GET /api/data_sources/health`：查看行情、黄金、邮件、PnL、SQLite 缓存等数据源状态。
 - `GET /api/regime_rules`：查看硬规则、角色 prompt 和系统工具元数据。
 
 ## CLI 示例
@@ -146,6 +161,7 @@ SMC 默认 `allow_short=False`，符合普通 A 股交易约束。只有研究�
 uv run pytest tests/test_smc_backtest.py -q
 uv run pytest tests/test_account_ledger.py tests/test_market_monitor_entry_exit_alerts.py -q
 uv run pytest tests/test_news_sources.py -q
+uv run pytest tests/test_gold_price.py tests/test_backtest_no_lookahead.py tests/test_quotes.py tests/test_fx.py tests/test_web_api.py -q
 ```
 
 ## 决策流程
@@ -179,7 +195,7 @@ uv run pytest tests/test_news_sources.py -q
 - 输出机会列表和需要委员会复核的标的；
 - 运行结束后弹出本地摘要。
 
-危险新闻量化是辅助判断模型，不是收益承诺。
+风险新闻量化是辅助判断模型，不是收益承诺。
 
 ## 回测和研究边界
 
@@ -188,7 +204,7 @@ uv run pytest tests/test_news_sources.py -q
 已知限制：
 
 - LLM 委员会回测可能受到模型训练数据截止日影响，存在知识层面的 lookahead。
-- SMC 回测避免同 K 线前视偏差，但仍是对 SMC 概念的简化实现。
+- SMC 回测避免 K 线前视偏差，但仍是对 SMC 概念的简化实现。
 - 盘中提醒依赖行情可用性和本地配置质量。
 - A 股真实执行还受手数、T+1、涨跌停、停牌和流动性约束，需要人工复核。
 

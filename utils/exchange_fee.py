@@ -5,7 +5,6 @@ from typing import Optional
 
 import numpy as np
 import pandas as pd
-import yfinance as yf
 from db.market_store import MarketStore
 
 # B6: betashares_scraper 历史上做 NDQ.AX 专用爬取，但 BetaShares 站点长期 403
@@ -158,10 +157,10 @@ def get_history_data(
     #   （即使拉到最新数据，as_of_date 过滤会截断，不会穿越；但能保证 DB 有
     #   cutoff 之前的足够数据让 RSI/ATR 等指标算得出来）
     # - backtest cutoff >= today - 30d：保守，仍 skip（防边界情况）
-    should_fetch_yf = False
+    should_fetch_provider = False
     if needs_update:
         if as_of_date is None:
-            should_fetch_yf = True
+            should_fetch_provider = True
             fetch_period = "5d"
         else:
             from datetime import datetime as _dt, timedelta as _td
@@ -170,18 +169,18 @@ def get_history_data(
                 today_dt = _dt.now().date()
                 if (today_dt - cutoff_dt) > _td(days=30):
                     # cutoff 足够老，拉 2y 历史给 backtest 用
-                    should_fetch_yf = True
+                    should_fetch_provider = True
                     fetch_period = "2y"
             except ValueError:
                 pass  # 日期格式错误就不拉
 
-    if should_fetch_yf:
+    if should_fetch_provider:
         try:
-            print(f"🔄 [yfinance] Refreshing {symbol} (period={fetch_period})...")
-            ticker = yf.Ticker(symbol)
-            df_yf = ticker.history(period=fetch_period)
-            if not df_yf.empty:
-                for idx, row in df_yf.iterrows():
+            from utils.cn_market_provider import fetch_history
+            print(f"🔄 [market-provider] Refreshing {symbol} (period={fetch_period})...")
+            df_provider = fetch_history(symbol, fetch_period)
+            if not df_provider.empty:
+                for idx, row in df_provider.iterrows():
                     # 一并落 OHLCV：High/Low 给真 TR/ATR，Volume 给 RVOL。
                     # NaN（如 FX/指数无成交量）转 None，落 NULL。
                     _STORE.save_generic_price(
@@ -189,10 +188,11 @@ def get_history_data(
                         high=_nan_to_none(row.get('High')),
                         low=_nan_to_none(row.get('Low')),
                         volume=_nan_to_none(row.get('Volume')),
+                        source="cn_market_provider",
                     )
                 df_db = _STORE.get_history_df(symbol)
         except Exception as e:
-            print(f"❌ yfinance sync failed for {symbol}: {e}")
+            print(f"❌ market provider sync failed for {symbol}: {e}")
 
     if not df_db.empty:
         return _apply_cutoff(df_db, as_of_date)

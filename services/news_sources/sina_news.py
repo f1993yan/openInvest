@@ -3,7 +3,7 @@
 为什么用：
 - 新浪财经滚动新闻是中文主流财经源，证券要闻 / 国际财经 / 市场评论 覆盖全
 - feed.mix.sina.com.cn/api/roll/get 免签名、免 auth、实测稳定可直连
-- 替代被墙/限流的 yfinance_news，且天然中文、贴 A股语境
+- 替代境外 symbol news 源，且天然中文、贴 A股语境
 
 接口（2026-05 实测）：
   GET https://feed.mix.sina.com.cn/api/roll/get?pageid=153&lid=<LID>&num=N&page=1

@@ -580,40 +580,38 @@ def test_cash_withdraw_invalid_currency(client):
 # ============ symbols search ============
 
 def test_symbols_search_mocked(client, monkeypatch):
-    """yfinance Search mock + 验证 endpoint 包装正确"""
-    class FakeSearch:
-        def __init__(self, q, max_results=5):
-            self.quotes = [
-                {"symbol": "AAPL", "shortname": "Apple Inc.", "longname": None,
-                 "exchange": "NMS", "quoteType": "EQUITY"},
-                {"symbol": "APLE", "shortname": "Apple Hospitality REIT",
-                 "exchange": "NYQ", "quoteType": "EQUITY"},
-            ][:max_results]
+    """akshare A-share search mock + endpoint wrapping."""
+    import akshare as ak
+    import pandas as pd
 
-    import yfinance
-    monkeypatch.setattr(yfinance, "Search", FakeSearch, raising=False)
+    monkeypatch.setattr(
+        ak,
+        "stock_info_a_code_name",
+        lambda: pd.DataFrame([
+            {"code": "600900", "name": "长江电力"},
+            {"code": "000001", "name": "平安银行"},
+        ]),
+    )
 
-    r = client.get("/api/symbols/search?q=apple&limit=5")
+    r = client.get("/api/symbols/search?q=电力&limit=5")
     assert r.status_code == 200
     body = r.json()
-    assert body["count"] == 2
-    assert body["results"][0]["symbol"] == "AAPL"
+    assert body["count"] == 1
+    assert body["results"][0]["symbol"] == "600900"
 
 
 def test_symbols_search_failure_returns_empty(client, monkeypatch):
-    """yfinance Search 抛异常 → 空 list（不让前端崩）"""
-    import yfinance
+    """Search source exception returns empty list."""
+    import akshare as ak
 
-    class _Boom:
-        def __init__(self, *a, **kw):
-            raise RuntimeError("yfinance API down")
+    def _boom():
+        raise RuntimeError("akshare down")
 
-    monkeypatch.setattr(yfinance, "Search", _Boom, raising=False)
+    monkeypatch.setattr(ak, "stock_info_a_code_name", _boom)
 
     r = client.get("/api/symbols/search?q=anything")
     assert r.status_code == 200
     assert r.json()["count"] == 0
-
 
 # ============ strategy 写端点 ============
 

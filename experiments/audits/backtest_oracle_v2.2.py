@@ -36,12 +36,12 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
-import yfinance as yf
 
 # 让脚本可以独立跑（不依赖项目作为 package import）
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 
+from utils.exchange_fee import get_history_data  # noqa: E402
 from core.strategy_metrics import (  # noqa: E402
     annualized_return_pct,
     max_drawdown_pct,
@@ -97,15 +97,19 @@ def load_oracle_decisions() -> dict[str, list[dict]]:
 
 
 def fetch_prices(symbol: str, start: str, end: str) -> pd.Series:
-    """拉 yfinance 历史 close。auto_adjust=True 用复权 close。"""
+    """Fetch historical close prices through the project market provider."""
     start_dt = (datetime.fromisoformat(start) - timedelta(days=10)).strftime("%Y-%m-%d")
     end_dt = (datetime.fromisoformat(end) + timedelta(days=10)).strftime("%Y-%m-%d")
-    df = yf.download(symbol, start=start_dt, end=end_dt, progress=False, auto_adjust=True)
-    if df.empty:
+    df = get_history_data(symbol, "10y")
+    if df is None or df.empty:
+        raise RuntimeError(f"no data for {symbol}")
+    df.index = pd.to_datetime(df.index).tz_localize(None)
+    start_ts = pd.Timestamp(start_dt)
+    end_ts = pd.Timestamp(end_dt)
+    df = df[(df.index >= start_ts) & (df.index <= end_ts)]
+    if df.empty or "Close" not in df.columns:
         raise RuntimeError(f"no data for {symbol}")
     close = df["Close"]
-    if isinstance(close, pd.DataFrame):
-        close = close.iloc[:, 0]
     close.index = close.index.strftime("%Y-%m-%d")
     return close
 

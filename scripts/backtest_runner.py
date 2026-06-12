@@ -143,20 +143,27 @@ def _warmup_market_data(symbols: list) -> None:
     # 用 10y：yfinance 默认 2y 只回到 today-2y，无法 backtest 早于此的日期。
     # 10y 给所有 symbol 都覆盖回 2016+，配合 _apply_cutoff 安全过滤。
     print("🔥 预热 market_data：拉 10y 历史给 backtest 用...")
-    import yfinance as yf
     from db.market_store import MarketStore
+    from utils.exchange_fee import get_history_data
     store = MarketStore()
     macro_symbols = ["^VIX", "^TNX", "USDCNY=X", "AUDCNY=X"]
     all_syms = list(set(symbols + macro_symbols))
     for sym in all_syms:
         try:
-            ticker = yf.Ticker(sym)
-            df = ticker.history(period="10y")
+            df = get_history_data(sym, "10y")
             if df.empty:
-                print(f"  ⚠ {sym}: yfinance 返回空")
+                print(f"  ⚠ {sym}: market provider 返回空")
                 continue
             for idx, row in df.iterrows():
-                store.save_generic_price(sym, idx.strftime("%Y-%m-%d"), row["Close"])
+                store.save_generic_price(
+                    sym,
+                    idx.strftime("%Y-%m-%d"),
+                    row["Close"],
+                    source="market_provider_warmup",
+                    high=row.get("High"),
+                    low=row.get("Low"),
+                    volume=row.get("Volume"),
+                )
             print(f"  ✓ {sym}: {len(df)} 行入库")
         except Exception as e:
             print(f"  ❌ {sym}: {e}")
