@@ -25,6 +25,13 @@ _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
+# 加载 .env（让本地 LLM 凭据等环境变量生效）
+try:
+    from dotenv import load_dotenv
+    load_dotenv(_PROJECT_ROOT / ".env")
+except Exception:
+    pass
+
 REPORT_DIR = _PROJECT_ROOT / "data" / "market_monitor"
 REPORT_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -42,7 +49,6 @@ logging.basicConfig(
 # 配置
 # ==========================================
 
-BACKEND_URL = os.getenv("INVEST_BACKEND_URL", "http://127.0.0.1:8766")
 CONFIG_PATH = Path(__file__).with_name("market_monitor_config.json")
 
 # 交易时间（北京时间）
@@ -179,38 +185,42 @@ def call_committee(symbol: str, name: str, market: str,
                    industry: str = "",
                    fundamentals: Optional[Dict[str, Any]] = None,
                    optimizer_review_enabled: bool = True) -> Optional[Dict]:
-    """调用后端委员会 API"""
-    payload = {
-        "symbol": symbol,
-        "name": name,
-        "market": market,
-        "sector": sector,
-        "industry": industry,
-        "position_pct": position_pct,
-        "target_position_pct": target_position_pct,
-        "cost": cost,
-        "current_price": current_price,
-        "total_assets": total_assets,
-        "cash": cash,
-        "holdings": all_holdings,
-        "min_lot_size": 100 if market == "a" else 100,
-        "t_plus_1": market == "a",
-        "available_cash": cash,
-        "t2_pending_cash": t2_pending,
-        "news_brief": news_brief,
-        "fundamentals": fundamentals or {},
-        "optimizer_review_enabled": optimizer_review_enabled,
-        "max_debate_rounds": 2,  # 监控模式减半辩论轮数，加速
-    }
+    """调用委员会分析（直接 Python 调用，不需要后端端口）"""
+    from backend.server import run_committee_direct, CommitteeRequest, Holding as BackendHolding
+
+    req = CommitteeRequest(
+        symbol=symbol,
+        name=name,
+        market=market,
+        sector=sector,
+        industry=industry,
+        position_pct=position_pct,
+        target_position_pct=target_position_pct,
+        cost=cost,
+        current_price=current_price,
+        total_assets=total_assets,
+        cash=cash,
+        holdings=[BackendHolding(
+            symbol=h["symbol"],
+            name=h.get("name", ""),
+            weight_pct=h.get("weight_pct", h.get("position_pct", 0)),
+            cost=h.get("cost", 0),
+            current_price=h.get("current_price"),
+        ) for h in all_holdings],
+        min_lot_size=100 if market == "a" else 100,
+        t_plus_1=market == "a",
+        available_cash=cash,
+        t2_pending_cash=t2_pending,
+        news_brief=news_brief,
+        fundamentals=fundamentals or {},
+        optimizer_review_enabled=optimizer_review_enabled,
+        max_debate_rounds=2,  # 监控模式减半辩论轮数，加速
+    )
     try:
-        resp = requests.post(
-            f"{BACKEND_URL}/api/committee",
-            json=payload,
-            timeout=120,
-        )
-        return resp.json()
+        response = run_committee_direct(req)
+        return response.model_dump()
     except Exception as e:
-        log.error(f"委员会 API {symbol} 失败: {e}")
+        log.error(f"委员会 {symbol} 失败: {e}")
         return {"success": False, "symbol": symbol, "error": str(e)}
 
 
@@ -1554,7 +1564,7 @@ def main():
     """主入口：循环执行监控"""
     log.info("=== OpenInvest 盘中监控启动 ===")
     log.info(f"交易时间: {TRADING_START}-{LUNCH_START}, {LUNCH_END}-{TRADING_END}, 间隔: {INTERVAL_MINUTES}分钟")
-    log.info(f"后端: {BACKEND_URL}")
+    log.info("委员会分析: 直接 Python 调用（无需后端端口）")
 
     # 立即执行第一轮
     if is_trading_time():

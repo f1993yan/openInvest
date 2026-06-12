@@ -1,7 +1,10 @@
+import sys
+import types
 from datetime import datetime
 
 from jobs.market_monitor import (
     apply_repeated_trade_guard,
+    call_committee,
     evaluate_entry_exit_triggers,
     is_scheduled_monitor_popup_time,
     select_optimal_actionable_alerts,
@@ -314,3 +317,53 @@ def test_alert_optimizer_prefers_risk_distributed_basket():
     assert len(selected) == 2
     assert {r["alert_sector"] for r in selected} == {"AI", "电力"}
     assert any(r["symbol"] == "000063" for r in selected)
+
+
+def test_call_committee_uses_direct_backend_call(monkeypatch):
+    captured = {}
+
+    class _FakeHolding:
+        def __init__(self, **kwargs):
+            self.__dict__.update(kwargs)
+
+    class _FakeRequest:
+        def __init__(self, **kwargs):
+            self.__dict__.update(kwargs)
+
+    class _FakeResponse:
+        def model_dump(self):
+            return {
+                "success": True,
+                "symbol": "600900",
+                "verdict": "HOLD",
+            }
+
+    def _fake_direct(req):
+        captured["req"] = req
+        return _FakeResponse()
+
+    def _fail_http(*args, **kwargs):
+        raise AssertionError("call_committee should not use HTTP")
+
+    fake_backend = types.ModuleType("backend.server")
+    fake_backend.CommitteeRequest = _FakeRequest
+    fake_backend.Holding = _FakeHolding
+    fake_backend.run_committee_direct = _fake_direct
+    monkeypatch.setitem(sys.modules, "backend.server", fake_backend)
+    monkeypatch.setattr("jobs.market_monitor.requests.post", _fail_http)
+
+    result = call_committee(
+        symbol="600900",
+        name="test",
+        market="a",
+        position_pct=5.0,
+        cost=10.0,
+        current_price=11.0,
+        total_assets=100000.0,
+        cash=10000.0,
+        all_holdings=[{"symbol": "600900", "name": "test", "position_pct": 5.0, "cost": 10.0}],
+    )
+
+    assert result == {"success": True, "symbol": "600900", "verdict": "HOLD"}
+    assert captured["req"].symbol == "600900"
+    assert captured["req"].holdings[0].weight_pct == 5.0

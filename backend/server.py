@@ -38,6 +38,13 @@ _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
+# 加载 .env（直接调用 run_committee_direct 时需要）
+try:
+    from dotenv import load_dotenv
+    load_dotenv(_PROJECT_ROOT / ".env")
+except Exception:
+    pass
+
 from fastapi import Body, FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
@@ -395,9 +402,12 @@ async def run_committee_get(
     return await run_committee_api(req)
 
 
-@app.post("/api/committee", response_model=CommitteeResponse)
-async def run_committee_api(req: CommitteeRequest):
-    """跑投资委员会分析"""
+def run_committee_direct(req: CommitteeRequest) -> CommitteeResponse:
+    """无 HTTP 调用的委员会分析入口——供 market_monitor / weekend_news 直接 Python 调用。
+
+    逻辑与 POST /api/committee 完全相同（同一份代码），
+    只是不经过 FastAPI / uvicorn，不监听端口。
+    """
     t0 = datetime.now()
 
     try:
@@ -686,6 +696,12 @@ async def run_committee_api(req: CommitteeRequest):
             error=f"{type(e).__name__}: {str(e)[:300]}",
             elapsed_sec=round(elapsed, 1),
         )
+
+
+@app.post("/api/committee", response_model=CommitteeResponse)
+async def run_committee_api(req: CommitteeRequest):
+    """跑投资委员会分析（HTTP 端点，委托给 run_committee_direct）"""
+    return run_committee_direct(req)
 
 
 # ==========================================
