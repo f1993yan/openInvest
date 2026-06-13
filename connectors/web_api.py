@@ -2953,6 +2953,41 @@ class SmcBacktestResponse(BaseModel):
     result: Dict[str, Any]
 
 
+class DailyStockSelectionRequest(BaseModel):
+    trade_date: Optional[str] = Field(None, description="交易日 YYYY-MM-DD；不填则使用最新行情日")
+    max_news: int = Field(30, ge=1, le=100)
+    max_stocks: int = Field(20, ge=1, le=100)
+    write_file: bool = Field(False, description="是否写入 data/daily_stock_selection/")
+    available_cash_cny: Optional[float] = Field(None, ge=0, description="覆盖可用于 A 股选股的一手资金约束")
+    use_portfolio_cash: bool = Field(True, description="未显式传现金时，是否默认读取真实账户 CNY 现金")
+
+
+class DailyStockSelectionResponse(BaseModel):
+    result: Dict[str, Any]
+
+
+@app.post("/api/stock_selection/daily", response_model=DailyStockSelectionResponse, tags=["system"])
+async def run_daily_stock_selection_endpoint(
+    body: DailyStockSelectionRequest = Body(...),
+) -> DailyStockSelectionResponse:
+    """Build a daily A-share sector/stock selection list.
+
+    The model is deterministic: domestic news decides hot sectors and likely
+    leaders, while OHLCV explains each candidate's daily tape.
+    """
+    from scripts.daily_stock_selection import run_daily_stock_selection
+
+    result = run_daily_stock_selection(
+        trade_date=body.trade_date,
+        max_news=body.max_news,
+        max_stocks=body.max_stocks,
+        write_file=body.write_file,
+        available_cash_cny=body.available_cash_cny,
+        use_portfolio_cash=body.use_portfolio_cash,
+    )
+    return DailyStockSelectionResponse(result=result)
+
+
 @app.post("/api/backtest/smc", response_model=SmcBacktestResponse, tags=["system"])
 async def run_smc_backtest(body: SmcBacktestRequest = Body(...)) -> SmcBacktestResponse:
     """Run a deterministic SMC concept backtest for a symbol.
