@@ -58,6 +58,8 @@ LUNCH_END = dt_time(13, 0)
 TRADING_END = dt_time(14, 50)  # 14:50 末轮盯盘，不等到15:00
 INTERVAL_MINUTES = max(1, int(os.getenv("INVEST_MONITOR_INTERVAL_MINUTES", "10")))
 ENTRY_EXIT_ALERT_STATE_PATH = REPORT_DIR / "entry_exit_alert_state.json"
+LATEST_WINDOW_PATH = REPORT_DIR / "latest_window.json"
+MONITOR_POPUPS_ENABLED = os.getenv("INVEST_MONITOR_POPUPS", "0") == "1"
 AUTO_TRADE_REPEAT_COOLDOWN_MINUTES = max(
     0,
     int(os.getenv("INVEST_AUTO_TRADE_REPEAT_COOLDOWN_MINUTES", "60")),
@@ -959,6 +961,182 @@ def select_optimal_actionable_alerts(
     return selected[:max_alerts], suppressed
 
 
+def _first_prefixed_line(text: str, prefixes: Tuple[str, ...]) -> str:
+    for line in (text or "").splitlines():
+        stripped = line.strip()
+        upper = stripped.upper()
+        for prefix in prefixes:
+            if upper.startswith(prefix):
+                return stripped.split(":", 1)[1].strip() if ":" in stripped else stripped
+    return ""
+
+
+def _operation_detail(result: Dict[str, Any], row: Dict[str, Any], actionable: Dict[str, Dict[str, Any]]) -> Dict[str, Any]:
+    symbol = str(result.get("symbol") or row.get("symbol") or "").upper()
+    action_row = actionable.get(symbol)
+    verdict = str(result.get("verdict") or "UNKNOWN").upper()
+    alloc = _safe_num(result.get("suggested_alloc_cny"))
+    triggers = row.get("triggers") or []
+    if action_row:
+        status = "action_required"
+        reason = "selected_by_cash_risk_optimizer"
+    elif row.get("confirmed"):
+        status = "trigger_confirmed"
+        reason = "entry_exit_price_confirmed_two_rounds"
+    elif triggers:
+        status = "watch_trigger"
+        reason = "price_touched_one_round_trigger"
+    elif verdict in {"BUY", "ACCUMULATE", "TRIM", "SELL"} and abs(alloc) > 0:
+        status = "candidate"
+        reason = "committee_has_direction_but_not_selected"
+    elif result.get("execution_blocked"):
+        status = "blocked"
+        reason = str(result.get("execution_block_reason") or "execution_guard")
+    elif result.get("success"):
+        status = "monitoring"
+        reason = "no_action_now"
+    else:
+        status = "error"
+        reason = str(result.get("error") or "analysis_failed")
+    return {
+        "status": status,
+        "reason": reason,
+        "verdict": verdict,
+        "confidence": round(_safe_num(result.get("confidence")), 4),
+        "suggested_alloc_cny": round(alloc, 2),
+        "alert_score": None if not action_row else round(_safe_num(action_row.get("alert_score")), 2),
+        "triggers": triggers,
+        "confirmed": bool(row.get("confirmed")),
+        "llm_conflict": _has_llm_hold_conflict(result),
+        "execution_blocked": bool(result.get("execution_blocked")),
+    }
+
+
+def _llm_operation_review(result: Dict[str, Any]) -> Dict[str, str]:
+    review = result.get("optimizer_review") or ""
+    memo = result.get("cio_memo") or ""
+    return {
+        "conclusion": _first_prefixed_line(review, ("CONCLUSION:",)),
+        "one_line": _first_prefixed_line(review, ("ONE_LINE:",)),
+        "risk_note": _first_prefixed_line(memo, ("RISK_PLAN:", "RISK:",)),
+        "execution_plan": _first_prefixed_line(memo, ("EXECUTION_PLAN:",)),
+        "raw_excerpt": (review or memo)[:1200],
+    }
+
+
+def build_monitor_window_snapshot(
+    *,
+    round_time: str,
+    results: List[Dict[str, Any]],
+    actionable: List[Dict[str, Any]],
+    prices: Dict[str, Dict[str, Any]],
+    stocks: List[Dict[str, Any]],
+    entry_exit_watch: List[Dict[str, Any]],
+    entry_exit_alerts: List[Dict[str, Any]],
+    suppressed_alerts: List[Dict[str, Any]],
+    cash: float,
+    total_assets: float,
+) -> Dict[str, Any]:
+    """Build the stable monitor-window payload consumed by the desktop UI."""
+    result_by_symbol = {str(r.get("symbol") or "").upper(): r for r in results if r}
+    stock_by_symbol = {str(s.get("symbol") or "").upper(): s for s in stocks if s.get("symbol")}
+    price_by_symbol = {str(k).upper(): v for k, v in prices.items()}
+    watch_by_symbol = {str(row.get("symbol") or "").upper(): row for row in entry_exit_watch}
+    actionable_by_symbol = {str(row.get("symbol") or "").upper(): row for row in actionable}
+    suppressed_by_symbol: Dict[str, List[str]] = {}
+    for item in suppressed_alerts:
+        symbol = str(item.get("symbol") or "").upper()
+        if symbol:
+            suppressed_by_symbol.setdefault(symbol, []).append(str(item.get("reason") or "suppressed"))
+
+    symbols = sorted(set(stock_by_symbol) | set(result_by_symbol) | set(price_by_symbol) | set(watch_by_symbol))
+    rows: List[Dict[str, Any]] = []
+    for symbol in symbols:
+        stock = stock_by_symbol.get(symbol, {})
+        result = result_by_symbol.get(symbol, {"success": False, "symbol": symbol, "name": stock.get("name", symbol)})
+        price_info = price_by_symbol.get(symbol, {})
+        row = watch_by_symbol.get(symbol, {})
+        ee = result.get("entry_exit_points") or row.get("entry_exit_points") or {}
+        operation = _operation_detail(result, row, actionable_by_symbol)
+        rows.append({
+            "symbol": symbol,
+            "name": result.get("name") or stock.get("name") or price_info.get("name") or symbol,
+            "market": result.get("market") or stock.get("market", "a"),
+            "sector": stock.get("sector", ""),
+            "industry": stock.get("industry", ""),
+            "min_lot_size": int(_safe_num(stock.get("min_lot_size"), 100) or 100),
+            "is_holding": _safe_num(stock.get("position_pct")) > 0,
+            "position_pct": round(_safe_num(stock.get("position_pct")), 4),
+            "target_position_pct": stock.get("target_position_pct", stock.get("target_pct")),
+            "cost": _safe_num(stock.get("cost")),
+            "price": {
+                "current": _safe_num(price_info.get("price"), _safe_num(ee.get("current_price"))),
+                "prev_close": _safe_num(price_info.get("prev_close")),
+                "change_pct": _safe_num(price_info.get("change_pct")),
+                "name": price_info.get("name", ""),
+            },
+            "state": operation["status"],
+            "buy_criteria": {
+                "pullback_price": _safe_num(ee.get("buy_pullback_price")),
+                "breakout_price": _safe_num(ee.get("buy_breakout_price")),
+                "reentry_price": _safe_num(ee.get("reentry_price")),
+                "reward_risk_ratio": _safe_num(ee.get("reward_risk_ratio")),
+                "reason": ee.get("reason", ""),
+            },
+            "exit_points": {
+                "stop_loss_price": _safe_num(ee.get("stop_loss_price")),
+                "take_profit_price": _safe_num(ee.get("take_profit_price")),
+                "trim_price": _safe_num(ee.get("trim_price")),
+            },
+            "fundamental": {
+                "model": result.get("fundamental_model", ""),
+                "score": _safe_num(result.get("fundamental_score"), 50.0),
+                "coverage": _safe_num(result.get("fundamental_coverage")),
+                "anchor_multiplier": _safe_num(result.get("fundamental_anchor_multiplier"), 1.0),
+            },
+            "technical": {
+                "regime": result.get("regime", ""),
+                "quant_view": result.get("quant_view", ""),
+                "market_data_excerpt": result.get("market_data", "")[:1200],
+                "entry_exit_model": ee.get("model_name", ""),
+                "low_confidence": bool(ee.get("low_confidence")),
+                "atr_pct": _safe_num(ee.get("atr_pct")),
+                "expected_return_pct": _safe_num(ee.get("expected_return_pct")),
+            },
+            "operation": operation,
+            "llm_review": _llm_operation_review(result),
+            "suppressed_reasons": suppressed_by_symbol.get(symbol, []),
+            "error": result.get("error", ""),
+            "success": bool(result.get("success")),
+        })
+
+    return {
+        "version": 1,
+        "generated_at": datetime.now().isoformat(timespec="seconds"),
+        "round_time": round_time,
+        "cash_cny": round(_safe_num(cash), 2),
+        "total_assets_cny": round(_safe_num(total_assets), 2),
+        "counts": {
+            "symbols": len(rows),
+            "action_required": sum(1 for row in rows if row["state"] == "action_required"),
+            "entry_exit_alerts": len(entry_exit_alerts),
+            "suppressed": len(suppressed_alerts),
+            "errors": sum(1 for row in rows if not row["success"]),
+        },
+        "rows": rows,
+        "actionable": actionable,
+        "entry_exit_alerts": entry_exit_alerts,
+        "suppressed_alerts": suppressed_alerts,
+    }
+
+
+def write_monitor_window_snapshot(snapshot: Dict[str, Any], path: Path = LATEST_WINDOW_PATH) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text(json.dumps(snapshot, ensure_ascii=False, indent=2), encoding="utf-8")
+    tmp.replace(path)
+
+
 def write_report(round_time: str, results: List[Dict],
                  actionable: List[Dict], prices: Dict,
                  news_items: List = None,
@@ -1442,6 +1620,20 @@ def run_monitor_round():
         holding_symbols={str(h.get("symbol", "")).upper() for h in holdings if h.get("symbol")},
     )
 
+    window_snapshot = build_monitor_window_snapshot(
+        round_time=round_time,
+        results=results,
+        actionable=actionable,
+        prices=prices,
+        stocks=all_stocks,
+        entry_exit_watch=entry_exit_watch,
+        entry_exit_alerts=entry_exit_alerts,
+        suppressed_alerts=suppressed_alerts,
+        cash=cash,
+        total_assets=total_assets,
+    )
+    write_monitor_window_snapshot(window_snapshot)
+
     # 4. 写报告
     write_report(
         round_time,
@@ -1466,6 +1658,12 @@ def run_monitor_round():
             log.warning(f"双账户收盘/PnL快照失败: {e}")
 
     # 5. 通知
+    if not MONITOR_POPUPS_ENABLED:
+        log.info("稳定监控窗口模式：跳过弹框。设置 INVEST_MONITOR_POPUPS=1 可恢复弹框。")
+        if actionable:
+            log.info(f"需要操作 {len(actionable)} 只标的，已写入 {LATEST_WINDOW_PATH}")
+        return
+
     # - 整点/半点/尾盘：允许综合摘要（可含新闻）
     # - 其他交易时间：只有真正需要操作时才弹综合摘要；新闻刷新本身不弹窗
     # - 买卖点连续触发：始终单独弹窗

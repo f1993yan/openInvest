@@ -4,6 +4,7 @@ from datetime import datetime
 
 from jobs.market_monitor import (
     apply_repeated_trade_guard,
+    build_monitor_window_snapshot,
     call_committee,
     evaluate_entry_exit_triggers,
     is_scheduled_monitor_popup_time,
@@ -93,6 +94,66 @@ def test_entry_exit_alert_requires_two_consecutive_triggers(tmp_path):
     assert len(alerts) == 1
     assert rows[0]["confirmed"] is True
     assert alerts[0]["matched_sides"] == ["buy"]
+
+
+def test_monitor_window_snapshot_contains_stable_status_fields():
+    result = {
+        "success": True,
+        "symbol": "600900",
+        "name": "长江电力",
+        "market": "a",
+        "verdict": "ACCUMULATE",
+        "confidence": 0.72,
+        "suggested_alloc_cny": 3000,
+        "fundamental_model": "utility",
+        "fundamental_score": 78,
+        "quant_view": "trend improving",
+        "regime": "REGIME: uptrend",
+        "optimizer_review": "CONCLUSION: KEEP\nONE_LINE: 买点质量可以，但需要遵守止损。",
+        "entry_exit_points": {
+            "model_name": "atr_regime_fallback",
+            "current_price": 10.0,
+            "buy_pullback_price": 9.5,
+            "buy_breakout_price": 10.5,
+            "stop_loss_price": 9.0,
+            "take_profit_price": 12.0,
+            "trim_price": 11.5,
+            "reentry_price": 9.4,
+            "reward_risk_ratio": 2.0,
+            "atr_pct": 2.5,
+            "expected_return_pct": 3.0,
+        },
+    }
+
+    snapshot = build_monitor_window_snapshot(
+        round_time="10:30",
+        results=[result],
+        actionable=[{**result, "alert_score": 80}],
+        prices={"600900": {"price": 10.6, "prev_close": 10.0, "change_pct": 6.0}},
+        stocks=[{"symbol": "600900", "name": "长江电力", "sector": "电力", "position_pct": 0}],
+        entry_exit_watch=[
+            {
+                "symbol": "600900",
+                "name": "长江电力",
+                "entry_exit_points": result["entry_exit_points"],
+                "triggers": [{"side": "buy", "kind": "buy_breakout", "level": 10.5, "price": 10.6}],
+                "confirmed": True,
+            }
+        ],
+        entry_exit_alerts=[],
+        suppressed_alerts=[],
+        cash=10000,
+        total_assets=100000,
+    )
+
+    row = snapshot["rows"][0]
+    assert snapshot["counts"]["action_required"] == 1
+    assert row["state"] == "action_required"
+    assert row["buy_criteria"]["breakout_price"] == 10.5
+    assert row["exit_points"]["stop_loss_price"] == 9.0
+    assert row["fundamental"]["score"] == 78
+    assert row["technical"]["entry_exit_model"] == "atr_regime_fallback"
+    assert row["llm_review"]["one_line"].startswith("买点质量")
 
 
 class _DummyLedger:
