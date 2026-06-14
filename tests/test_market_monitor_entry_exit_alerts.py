@@ -130,7 +130,7 @@ def test_monitor_window_snapshot_contains_stable_status_fields():
         results=[result],
         actionable=[{**result, "alert_score": 80}],
         prices={"600900": {"price": 10.6, "prev_close": 10.0, "change_pct": 6.0}},
-        stocks=[{"symbol": "600900", "name": "长江电力", "sector": "电力", "position_pct": 0}],
+        stocks=[{"symbol": "600900", "name": "长江电力", "sector": "电力", "position_pct": 0, "units": 200}],
         entry_exit_watch=[
             {
                 "symbol": "600900",
@@ -154,6 +154,8 @@ def test_monitor_window_snapshot_contains_stable_status_fields():
     assert row["fundamental"]["score"] == 78
     assert row["technical"]["entry_exit_model"] == "atr_regime_fallback"
     assert row["llm_review"]["one_line"].startswith("买点质量")
+    assert row["units"] == 200
+    assert row["is_holding"] is True
 
 
 class _DummyLedger:

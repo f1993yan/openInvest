@@ -35,7 +35,6 @@ if str(_PROJECT_ROOT) not in sys.path:
 CACHE_DIR = _PROJECT_ROOT / "data" / "weekend_news"
 CACHE_DIR.mkdir(parents=True, exist_ok=True)
 CONFIG_PATH = _PROJECT_ROOT / "jobs" / "market_monitor_config.json"
-BACKEND_URL = os.getenv("INVEST_BACKEND_URL", "http://127.0.0.1:8766")
 # 历史兼容：持仓 ≥ 此百分比的才进入旧的委员会重评流程。
 # 新的周末新闻总结不再默认评估持仓，而是从新闻中寻找 A 股热门题材和候选龙头。
 LEADING_PCT_THRESHOLD = float(os.getenv("INVEST_WEEKEND_LEADING_PCT", "5.0"))
@@ -627,14 +626,12 @@ def run_committee_on_leaders(symbols: List[str],
         }
 
         try:
-            resp = requests.post(
-                f"{BACKEND_URL}/api/committee",
-                json=payload,
-                timeout=180,
-            )
-            data = resp.json()
+            from backend.server import CommitteeRequest, run_committee_direct
+
+            response = run_committee_direct(CommitteeRequest(**payload))
+            data = response.model_dump()
         except Exception as e:
-            log.error(f"委员会 API {sym} 失败: {e}")
+            log.error(f"委员会直接调用 {sym} 失败: {e}")
             data = {"success": False, "symbol": sym, "error": str(e)}
 
         entry = {

@@ -14,6 +14,7 @@ import queue
 import sys
 import threading
 import tkinter as tk
+from datetime import datetime
 from pathlib import Path
 from tkinter import ttk
 from typing import Any, Dict, List, Optional
@@ -21,6 +22,8 @@ from typing import Any, Dict, List, Optional
 
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_SNAPSHOT = ROOT / "data" / "market_monitor" / "latest_window.json"
+WEEKEND_NEWS_DIR = ROOT / "data" / "weekend_news"
+DAILY_SELECTION_LATEST = ROOT / "data" / "daily_stock_selection" / "latest.json"
 BOARD_BG = "#f3f6fb"
 PANEL_BG = "#ffffff"
 HEADER_BG = "#2f80ed"
@@ -38,6 +41,8 @@ TRIGGER_BG = "#fff8e8"
 TRIGGER_FG = "#b54708"
 UP_FG = "#067647"
 DOWN_FG = "#b42318"
+STOCK_CARD_STAGE_HEIGHT = 144
+NEWS_CARD_STAGE_HEIGHT = 250
 
 STATE_LABELS = {
     "action_required": "需要操作",
@@ -68,6 +73,25 @@ VERDICT_ARROWS = {
     "SELL": "↓",
 }
 
+STATE_PRIORITY = {
+    "action_required": 0,
+    "trigger_confirmed": 1,
+    "watch_trigger": 2,
+    "candidate": 3,
+    "monitoring": 4,
+    "blocked": 5,
+    "error": 6,
+}
+
+VERDICT_PRIORITY = {
+    "SELL": 0,
+    "TRIM": 1,
+    "BUY": 2,
+    "ACCUMULATE": 3,
+    "HOLD": 4,
+    "WAIT": 5,
+}
+
 
 def _safe_num(value: Any, default: float = 0.0) -> float:
     try:
@@ -88,10 +112,47 @@ def _fmt_money(value: Any) -> str:
     return f"{value:,.0f}" if abs(value) >= 1 else "-"
 
 
+def _fmt_cash_line(cash: Any, total_assets: Any) -> str:
+    cash_value = _safe_num(cash)
+    total_value = _safe_num(total_assets)
+    pct = cash_value / total_value * 100.0 if total_value > 0 else 0.0
+    return f"现金 {_fmt_money(cash_value)} / {pct:.1f}%"
+
+
+def _cash_ratio(cash: Any, total_assets: Any) -> float:
+    cash_value = max(_safe_num(cash), 0.0)
+    total_value = max(_safe_num(total_assets), 0.0)
+    if total_value <= 0:
+        return 0.0
+    return max(0.0, min(cash_value / total_value, 1.0))
+
+
+def _fmt_update_time(value: Any) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return "更新 -"
+    try:
+        dt = datetime.fromisoformat(text)
+        return f"更新 {dt.strftime('%H:%M:%S')}"
+    except Exception:
+        return f"更新 {text}"
+
+
 def _fmt_lots(value: float) -> str:
     if abs(value) >= 1:
         return f"{math.floor(abs(value))}手"
     return "-"
+
+
+def _fmt_holding_lots(row: Dict[str, Any]) -> str:
+    units = _safe_num(row.get("units"))
+    lot_size = _lot_size(row)
+    if units <= 0 or lot_size <= 0:
+        return "0手"
+    lots = units / lot_size
+    if abs(lots - round(lots)) < 1e-6:
+        return f"{int(round(lots))}手"
+    return f"{lots:.1f}手"
 
 
 def _max_executable_lots(row: Dict[str, Any]) -> int:
@@ -167,24 +228,334 @@ def _short(text: Any, limit: int = 100) -> str:
 
 
 def _load_snapshot(path: Path) -> Dict[str, Any]:
+    fallback = _load_config_snapshot(f"暂无监控快照: {path}", source_path=path)
     if not path.exists():
-        return {
-            "generated_at": None,
-            "round_time": "",
-            "counts": {"symbols": 0, "action_required": 0, "entry_exit_alerts": 0, "errors": 0},
-            "rows": [],
-            "message": f"暂无监控快照: {path}",
-        }
+        return fallback
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        if _looks_like_sample_snapshot(payload):
+            return _load_config_snapshot("忽略旧示例快照，已改用本地持仓配置", source_path=path)
+        return payload
+    except Exception as exc:  # noqa: BLE001
+        return _load_config_snapshot(f"读取监控快照失败: {type(exc).__name__}: {exc}", source_path=path)
+
+
+def _looks_like_sample_snapshot(payload: Dict[str, Any]) -> bool:
+    rows = payload.get("rows") or []
+    return (
+        len(rows) == 1
+        and str(rows[0].get("symbol") or "") == "600900"
+        and "示例" in str(rows[0].get("name") or "")
+    )
+
+
+def _load_config_snapshot(message: str = "", *, source_path: Optional[Path] = None) -> Dict[str, Any]:
+    try:
+        from jobs.market_monitor import fetch_sina_prices, load_config
+        from jobs.market_monitor import CONFIG_PATH
+
+        config = load_config()
+        timestamp_path = source_path if source_path and source_path.exists() else CONFIG_PATH
+        stocks = list(config.get("holdings") or []) + list(config.get("watchlist") or [])
+        symbols = [str(stock.get("symbol") or "").strip() for stock in stocks if stock.get("symbol")]
+        prices = fetch_sina_prices(symbols) if symbols else {}
+    except SystemExit:
+        config = {}
+        stocks = []
+        prices = {}
+        timestamp_path = source_path
+    except Exception:
+        config = {}
+        stocks = []
+        prices = {}
+        timestamp_path = source_path
+
+    rows = [_config_stock_row(stock, prices.get(str(stock.get("symbol") or "").strip()) or {}) for stock in stocks]
+    return {
+        "version": 1,
+        "generated_at": _file_timestamp(timestamp_path),
+        "round_time": "config",
+        "cash_cny": round(_safe_num(config.get("cash")), 2),
+        "total_assets_cny": round(_safe_num(config.get("total_assets")), 2),
+        "counts": {
+            "symbols": len(rows),
+            "action_required": 0,
+            "entry_exit_alerts": 0,
+            "suppressed": 0,
+            "errors": 0 if rows else 1,
+        },
+        "rows": rows,
+        "actionable": [],
+        "entry_exit_alerts": [],
+        "suppressed_alerts": [],
+        "message": message,
+        "source": "market_monitor_config",
+    }
+
+
+def _file_timestamp(path: Optional[Path]) -> Optional[str]:
+    if path is None:
+        return None
+    try:
+        return datetime.fromtimestamp(path.stat().st_mtime).isoformat(timespec="seconds")
+    except Exception:
+        return None
+
+
+def _path_mtime(path: Path) -> Optional[float]:
+    try:
+        return path.stat().st_mtime
+    except OSError:
+        return None
+
+
+def _config_stock_row(stock: Dict[str, Any], price_info: Dict[str, Any]) -> Dict[str, Any]:
+    symbol = str(stock.get("symbol") or "").strip()
+    position_pct = _safe_num(stock.get("position_pct"))
+    return {
+        "symbol": symbol,
+        "name": stock.get("name") or price_info.get("name") or symbol,
+        "market": stock.get("market", "a"),
+        "sector": stock.get("sector", ""),
+        "industry": stock.get("industry", ""),
+        "min_lot_size": int(_safe_num(stock.get("min_lot_size"), 100) or 100),
+        "units": round(_safe_num(stock.get("units")), 4),
+        "is_holding": position_pct > 0 or _safe_num(stock.get("units")) > 0,
+        "position_pct": round(position_pct, 4),
+        "target_position_pct": stock.get("target_position_pct", stock.get("target_pct")),
+        "cost": _safe_num(stock.get("cost")),
+        "price": {
+            "current": _safe_num(price_info.get("price")),
+            "prev_close": _safe_num(price_info.get("prev_close")),
+            "change_pct": _safe_num(price_info.get("change_pct")),
+            "name": price_info.get("name", ""),
+        },
+        "state": "monitoring" if position_pct > 0 else "candidate",
+        "buy_criteria": {"pullback_price": 0.0, "breakout_price": 0.0, "reentry_price": 0.0, "reward_risk_ratio": 0.0, "reason": ""},
+        "exit_points": {"stop_loss_price": 0.0, "take_profit_price": 0.0, "trim_price": 0.0},
+        "fundamental": {"model": "", "score": 50.0, "coverage": 0.0, "anchor_multiplier": 1.0},
+        "technical": {
+            "regime": "等待交易时段监控刷新",
+            "quant_view": "当前显示本地持仓配置",
+            "market_data_excerpt": "",
+            "entry_exit_model": "",
+            "low_confidence": True,
+            "atr_pct": 0.0,
+            "expected_return_pct": 0.0,
+        },
+        "operation": {
+            "status": "monitoring" if position_pct > 0 else "candidate",
+            "reason": "local_config_snapshot",
+            "verdict": "HOLD" if position_pct > 0 else "WAIT",
+            "confidence": 0.0,
+            "suggested_alloc_cny": 0.0,
+            "alert_score": 0.0,
+            "triggers": [],
+            "confirmed": False,
+            "llm_conflict": False,
+            "execution_blocked": False,
+        },
+        "llm_review": {"conclusion": "", "one_line": "等待下一次交易时段监控刷新", "risk_note": "", "execution_plan": "", "raw_excerpt": ""},
+        "suppressed_reasons": [],
+        "error": "",
+        "success": True,
+    }
+
+
+def _load_weekend_news_cards(news_dir: Path = WEEKEND_NEWS_DIR) -> tuple[List[Dict[str, Any]], str]:
+    candidates = sorted(
+        [*news_dir.glob("summary_*.json"), *news_dir.glob("report_*.json")],
+        key=lambda path: path.stat().st_mtime,
+        reverse=True,
+    )
+    for path in candidates:
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        summary = payload.get("summary") if isinstance(payload.get("summary"), dict) else payload
+        sectors = summary.get("sector_opportunities") or []
+        hot_stocks = summary.get("hot_stock_opportunities") or []
+        cards: List[Dict[str, Any]] = []
+        for sector in sectors:
+            leaders = sector.get("leaders") or []
+            cards.append(
+                {
+                    "title": sector.get("theme") or sector.get("sector") or "周末机会",
+                    "sector": sector.get("sector") or "-",
+                    "logic": sector.get("logic") or summary.get("summary_one_liner") or "-",
+                    "heat_score": _safe_num(sector.get("heat_score")),
+                    "freshness_score": _safe_num(sector.get("freshness_score")),
+                    "leaders": leaders,
+                    "risk_note": "；".join(
+                        str(leader.get("risk_note") or "").strip()
+                        for leader in leaders
+                        if leader.get("risk_note")
+                    ),
+                }
+            )
+        if not cards:
+            for stock in hot_stocks:
+                cards.append(
+                    {
+                        "title": stock.get("theme") or stock.get("sector") or "周末机会",
+                        "sector": stock.get("sector") or "-",
+                        "logic": stock.get("reason") or summary.get("summary_one_liner") or "-",
+                        "heat_score": _safe_num(stock.get("score")),
+                        "freshness_score": 0.0,
+                        "leaders": [stock],
+                        "risk_note": stock.get("risk_note") or "",
+                    }
+                )
+        if cards:
+            return _sort_news_cards(cards), path.name
+    return [], "暂无包含板块与龙头股的周末新闻总结"
+
+
+def _load_daily_selection(path: Path = DAILY_SELECTION_LATEST) -> Dict[str, Any]:
+    if not path.exists():
+        return {"stocks": [], "message": "暂无日度选股快照"}
     try:
         return json.loads(path.read_text(encoding="utf-8"))
     except Exception as exc:  # noqa: BLE001
-        return {
-            "generated_at": None,
-            "round_time": "",
-            "counts": {"symbols": 0, "action_required": 0, "entry_exit_alerts": 0, "errors": 1},
-            "rows": [],
-            "message": f"读取监控快照失败: {type(exc).__name__}: {exc}",
-        }
+        return {"stocks": [], "message": f"读取日度选股失败: {type(exc).__name__}: {exc}"}
+
+
+def _stock_priority_key(row: Dict[str, Any]) -> tuple[Any, ...]:
+    state = str(row.get("state") or "")
+    operation = row.get("operation") or {}
+    verdict = str(operation.get("verdict") or "").upper()
+    allocation = abs(_safe_num(operation.get("suggested_alloc_cny")))
+    change = abs(_safe_num((row.get("price") or {}).get("change_pct")))
+    return (
+        STATE_PRIORITY.get(state, 99),
+        VERDICT_PRIORITY.get(verdict, 99),
+        -allocation,
+        -change,
+        str(row.get("symbol") or ""),
+    )
+
+
+def _sort_stock_rows(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    return sorted(rows, key=_stock_priority_key)
+
+
+def _news_impact_score(card: Dict[str, Any]) -> float:
+    leaders = card.get("leaders") or []
+    leader_confidence = max(
+        (_safe_num(leader.get("confidence")) for leader in leaders),
+        default=0.0,
+    )
+    breadth = min(len(leaders), 4) / 4
+    heat = _safe_num(card.get("heat_score"))
+    freshness = _safe_num(card.get("freshness_score"))
+    return heat * 0.55 + freshness * 0.25 + leader_confidence * 0.15 + breadth * 0.05
+
+
+def _sort_news_cards(cards: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    return sorted(
+        cards,
+        key=lambda card: (
+            -_news_impact_score(card),
+            -_safe_num(card.get("heat_score")),
+            str(card.get("title") or ""),
+        ),
+    )
+
+
+def _demo_rows() -> List[Dict[str, Any]]:
+    return [
+        {
+            "symbol": "600519",
+            "name": "贵州茅台",
+            "sector": "白酒",
+            "state": "monitoring",
+            "price": {"current": 1418.20, "change_pct": 1.26},
+            "fundamental": {"score": 91},
+            "technical": {"regime": "日线企稳，周线震荡"},
+            "buy_criteria": {"pullback_price": 1380, "breakout_price": 1435, "reward_risk_ratio": 2.1},
+            "exit_points": {"stop_loss_price": 1348, "take_profit_price": 1508},
+            "operation": {"verdict": "WAIT", "status": "monitoring", "suggested_alloc_cny": 0},
+            "min_lot_size": 100,
+            "units": 0,
+            "_demo": True,
+        },
+        {
+            "symbol": "603308",
+            "name": "应流股份",
+            "sector": "商业航天",
+            "state": "action_required",
+            "price": {"current": 28.64, "change_pct": 4.82},
+            "fundamental": {"score": 76},
+            "technical": {"regime": "日线突破，周线转强"},
+            "buy_criteria": {"pullback_price": 27.90, "breakout_price": 28.50, "reward_risk_ratio": 2.8},
+            "exit_points": {"stop_loss_price": 26.80, "take_profit_price": 32.20},
+            "operation": {"verdict": "BUY", "status": "action_required", "suggested_alloc_cny": 5728},
+            "min_lot_size": 100,
+            "units": 200,
+            "_demo": True,
+        },
+    ]
+
+
+def _demo_news_cards() -> List[Dict[str, Any]]:
+    return [
+        {
+            "title": "商业航天融资升温",
+            "sector": "商业航天",
+            "logic": "海外商业航天融资与上市预期升温，卫星制造、航天材料和高端铸件可能获得主题催化。",
+            "heat_score": 0.86,
+            "freshness_score": 0.91,
+            "leaders": [{"symbol": "603308", "name": "应流股份"}, {"symbol": "300455", "name": "航天智装"}],
+            "risk_note": "海外事件到A股映射存在兑现风险，避免高开追涨。",
+        },
+        {
+            "title": "算电协同政策催化",
+            "sector": "算力基础设施",
+            "logic": "算力与电力协同政策推动数据中心能源效率升级，电网设备及算力基础设施值得跟踪。",
+            "heat_score": 0.78,
+            "freshness_score": 0.84,
+            "leaders": [{"symbol": "300001", "name": "特锐德"}, {"symbol": "600406", "name": "国电南瑞"}],
+            "risk_note": "政策落地节奏与订单兑现仍需验证。",
+        },
+    ]
+
+
+def _demo_selection_payload() -> Dict[str, Any]:
+    return {
+        "trade_date": "2026-06-13",
+        "generated_at": "演示数据",
+        "stocks": [
+            {
+                "symbol": "603308",
+                "name": "应流股份",
+                "sector": "商业航天",
+                "score": 86.2,
+                "attention": "priority_watch",
+                "reasons": ["商业航天热度提升，高端铸件供应链映射清晰", "日线突破，周线转强"],
+                "money_flow_score": 88,
+                "fundamental_score": 76,
+                "evidence_titles": ["商业航天融资升温"],
+                "tape": {"interpretation": "放量突破 20 日高点，收盘位置强", "change_pct": 4.82, "tape_score": 82.0},
+                "trend": {"interpretation": "日线、周线偏强，月线修复中", "alignment": "partial_bullish"},
+                "entry_plan": {"action": "buy_breakout", "trigger_price": 28.5, "stop_loss_price": 26.8, "note": "突破价上方缩量回踩不破可关注"},
+            },
+            {
+                "symbol": "300001",
+                "name": "特锐德",
+                "sector": "算力基础设施",
+                "score": 78.4,
+                "attention": "watch",
+                "reasons": ["算电协同政策催化，充电网和能源基础设施映射", "日线强于板块但追高风险中等"],
+                "money_flow_score": 72,
+                "fundamental_score": 68,
+                "evidence_titles": ["算电协同政策催化"],
+                "tape": {"interpretation": "温和放量上行，未出现明显破位", "change_pct": 2.31, "tape_score": 71.0},
+                "trend": {"interpretation": "日线向上，周线震荡，月线未完全确认", "alignment": "mixed"},
+                "entry_plan": {"action": "wait_pullback", "trigger_price": 21.2, "stop_loss_price": 19.6, "note": "等待回踩均线区间企稳，不追高"},
+            },
+        ],
+    }
 
 
 def _label_state(state: Any) -> str:
@@ -567,13 +938,78 @@ class CircleButton(tk.Canvas):
         )
 
 
+class CashRatioBar(tk.Canvas):
+    def __init__(self, master: tk.Misc, *, width: int = 176, height: int = 18) -> None:
+        super().__init__(
+            master,
+            width=width,
+            height=height,
+            bg=BOARD_BG,
+            highlightthickness=0,
+            bd=0,
+        )
+        self.cash_text = "现金 -"
+        self.ratio = 0.0
+        self.bind("<Configure>", lambda _event: self._draw())
+        self._draw()
+
+    def set_values(self, cash: Any, total_assets: Any) -> None:
+        self.cash_text = _fmt_cash_line(cash, total_assets)
+        self.ratio = 1.0 - _cash_ratio(cash, total_assets)
+        self._draw()
+
+    def _rounded_rect(self, x1: float, y1: float, x2: float, y2: float, radius: float, *, fill: str, outline: str = "") -> None:
+        radius = min(radius, (x2 - x1) / 2, (y2 - y1) / 2)
+        points = [
+            x1 + radius, y1, x2 - radius, y1,
+            x2, y1, x2, y1 + radius,
+            x2, y2 - radius, x2 - radius, y2,
+            x1 + radius, y2, x1, y2,
+            x1, y2 - radius, x1, y1 + radius,
+            x1, y1,
+        ]
+        self.create_polygon(points, smooth=True, splinesteps=18, fill=fill, outline=outline)
+
+    def _draw(self) -> None:
+        self.delete("all")
+        width = max(self.winfo_width(), 2)
+        height = max(self.winfo_height(), 2)
+        pad = 1
+        inner_w = width - pad * 2
+        fill_w = max(0, int(inner_w * self.ratio))
+        self._rounded_rect(pad, pad, width - pad, height - pad, 7, fill="#e8eef7", outline=LINE)
+        if fill_w > 0:
+            if fill_w >= inner_w - 2:
+                self._rounded_rect(pad + 1, pad + 1, width - pad - 1, height - pad - 1, 6, fill="#9ec5ff")
+            else:
+                self.create_rectangle(pad + 1, pad + 1, pad + fill_w, height - pad - 1, fill="#9ec5ff", outline="")
+        self.create_text(
+            width - 9,
+            height / 2,
+            text=self.cash_text,
+            anchor="e",
+            fill=TEXT,
+            font=("Microsoft YaHei UI", 8, "bold"),
+        )
+
+
 class MonitorWindow:
-    def __init__(self, snapshot_path: Path, refresh_ms: int, *, shake_enabled: bool = True) -> None:
+    def __init__(
+        self,
+        snapshot_path: Path,
+        *,
+        poll_ms: int = 1000,
+        shake_enabled: bool = True,
+        weekend_news_dir: Path = WEEKEND_NEWS_DIR,
+        demo: bool = False,
+    ) -> None:
         self.snapshot_path = snapshot_path
-        self.refresh_ms = max(1000, refresh_ms)
+        self.weekend_news_dir = weekend_news_dir
+        self.poll_ms = max(250, poll_ms)
         self.shake_enabled = shake_enabled
+        self.demo = demo
         self.root = tk.Tk()
-        self.root.title("OpenInvest 监控窗口")
+        self.root.title("OpenInvest 监控窗口 - 演示" if demo else "OpenInvest 监控窗口")
         self.root.overrideredirect(True)
         self._set_initial_geometry()
         self.root.configure(bg=BOARD_BG)
@@ -581,8 +1017,23 @@ class MonitorWindow:
         self.pinned = False
         self.previous_action_symbols: set[str] = set()
         self.current_rows: List[Dict[str, Any]] = []
+        self.stock_page_index = 0
+        self.last_payload_signature: tuple[Any, ...] = ()
+        self.watched_mtime_signature: tuple[Any, ...] = ()
+        self.news_page_index = 0
+        self.stock_content_signature: tuple[Any, ...] = ()
+        self.news_content_signature: tuple[Any, ...] = ()
+        self.selection_content_signature: tuple[Any, ...] = ()
+        self.hover_stack: Optional[str] = None
+        self.news_popover: Optional[tk.Frame] = None
+        self.news_popover_body: Optional[tk.Frame] = None
+        self.news_cards: List[Dict[str, Any]] = []
+        self.news_source: str = ""
+        self.selection_popover: Optional[tk.Frame] = None
+        self.selection_popover_symbol: Optional[str] = None
         self.filter_text = tk.StringVar(value="")
         self.status_text = tk.StringVar(value="等待监控快照")
+        self.last_update_text = tk.StringVar(value="更新 -")
         self.card_widgets: Dict[str, tk.Frame] = {}
         self.dialogs: Dict[str, tk.Toplevel] = {}
         self.analysis_queue: queue.Queue[tuple[str, str, Optional[Dict[str, Any]]]] = queue.Queue()
@@ -591,7 +1042,7 @@ class MonitorWindow:
     def _set_initial_geometry(self) -> None:
         screen_w = self.root.winfo_screenwidth()
         width = min(max(330, screen_w // 4), 420)
-        height = 360
+        height = 332
         self.root.geometry(f"{width}x{height}+24+32")
         self.root.minsize(320, 260)
 
@@ -607,7 +1058,7 @@ class MonitorWindow:
         style.configure("HeaderMeta.TLabel", background=BOARD_BG, foreground=MUTED, font=("Microsoft YaHei UI", 9))
         style.configure("Hint.TLabel", background=BOARD_BG, foreground=MUTED, font=("Microsoft YaHei UI", 9))
 
-        titlebar = tk.Frame(self.root, bg=PANEL_BG, height=36)
+        titlebar = tk.Frame(self.root, bg=PANEL_BG, height=34)
         titlebar.pack(fill=tk.X)
         titlebar.pack_propagate(False)
         brand = tk.Label(
@@ -621,7 +1072,7 @@ class MonitorWindow:
         brand.pack(side=tk.LEFT, fill=tk.Y)
         title_hint = tk.Label(
             titlebar,
-            text="实时监控",
+            text="演示模式" if self.demo else "实时监控",
             bg=PANEL_BG,
             fg=MUTED,
             font=("Microsoft YaHei UI", 9),
@@ -673,11 +1124,20 @@ class MonitorWindow:
         separator = tk.Frame(self.root, bg=LINE, height=1)
         separator.pack(fill=tk.X)
 
-        top = tk.Frame(self.root, bg=BOARD_BG, padx=14, pady=10)
-        top.pack(fill=tk.X, pady=(2, 0))
+        top = tk.Frame(self.root, bg=BOARD_BG, padx=12, pady=6)
+        top.pack(fill=tk.X, pady=(1, 0))
+        tk.Label(
+            top,
+            textvariable=self.last_update_text,
+            bg=BOARD_BG,
+            fg=MUTED,
+            font=("Microsoft YaHei UI", 8, "bold"),
+        ).pack(side=tk.LEFT)
+        self.cash_bar = CashRatioBar(top, width=226, height=18)
+        self.cash_bar.pack(side=tk.RIGHT)
 
-        search_wrap = tk.Frame(self.root, bg="#eef2f7", padx=12, pady=8)
-        search_wrap.pack(fill=tk.X, padx=14, pady=(4, 10))
+        search_wrap = tk.Frame(self.root, bg="#eef2f7", padx=10, pady=5)
+        search_wrap.pack(fill=tk.X, padx=12, pady=(2, 7))
         tk.Label(search_wrap, text="⌕", bg="#eef2f7", fg="#98a2b3", font=("Microsoft YaHei UI", 11)).pack(side=tk.LEFT)
         search = tk.Entry(
             search_wrap,
@@ -690,14 +1150,40 @@ class MonitorWindow:
         )
         search.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(8, 0))
 
-        section = tk.Frame(self.root, bg=BOARD_BG, padx=16)
+        section = tk.Frame(self.root, bg=BOARD_BG, padx=14)
         section.pack(fill=tk.X)
         tk.Label(section, text="标的监控", bg=BOARD_BG, fg=MUTED, font=("Microsoft YaHei UI", 9, "bold")).pack(side=tk.LEFT)
+        news_btn = tk.Label(
+            section,
+            text="周末新闻",
+            bg=BLUE,
+            fg="#ffffff",
+            font=("Microsoft YaHei UI", 8, "bold"),
+            padx=12,
+            pady=4,
+            cursor="hand2",
+        )
+        news_btn.pack(side=tk.RIGHT, padx=(8, 0))
+        news_btn.bind("<Button-1>", lambda _event: self._open_weekend_news())
+        news_btn.bind("<Enter>", lambda _event: news_btn.configure(bg="#2473df"))
+        news_btn.bind("<Leave>", lambda _event: news_btn.configure(bg=BLUE))
         tk.Label(section, textvariable=self.status_text, bg=BOARD_BG, fg=MUTED, font=("Microsoft YaHei UI", 8)).pack(side=tk.RIGHT)
-        self.filter_text.trace_add("write", lambda *_: self._render_rows())
+        self.filter_text.trace_add("write", lambda *_: self._reset_stock_page())
+
+        self.selection_bar = tk.Frame(self.root, bg=BOARD_BG, padx=12)
+        self.selection_bar.pack(side=tk.BOTTOM, fill=tk.X, pady=(0, 7))
+        tk.Label(
+            self.selection_bar,
+            text="选股",
+            bg=BOARD_BG,
+            fg=MUTED,
+            font=("Microsoft YaHei UI", 8, "bold"),
+        ).pack(side=tk.LEFT, padx=(0, 8))
+        self.selection_buttons_frame = tk.Frame(self.selection_bar, bg=BOARD_BG)
+        self.selection_buttons_frame.pack(side=tk.LEFT, fill=tk.X, expand=True)
 
         self.canvas = tk.Canvas(self.root, bg=BOARD_BG, highlightthickness=0, bd=0)
-        self.canvas.pack(fill=tk.BOTH, expand=True, padx=14, pady=(8, 18))
+        self.canvas.pack(fill=tk.BOTH, expand=True, padx=12, pady=(6, 6))
         self.cards_frame = tk.Frame(self.canvas, bg=BOARD_BG)
         self.cards_window = self.canvas.create_window((0, 0), window=self.cards_frame, anchor="nw")
         self.canvas.bind("<Configure>", self._on_canvas_configure)
@@ -737,29 +1223,88 @@ class MonitorWindow:
 
     def start(self) -> None:
         self.refresh()
+        self._watch_snapshot_changes()
         self._poll_analysis_queue()
         self.root.mainloop()
 
+    def _watch_snapshot_changes(self) -> None:
+        signature = self._watched_file_signature()
+        if self.watched_mtime_signature and signature != self.watched_mtime_signature:
+            self.refresh()
+        self.watched_mtime_signature = signature
+        self.root.after(self.poll_ms, self._watch_snapshot_changes)
+
+    def _watched_file_signature(self) -> tuple[Any, ...]:
+        return (
+            _path_mtime(self.snapshot_path),
+            _path_mtime(ROOT / "jobs" / "market_monitor_config.json"),
+            _path_mtime(DAILY_SELECTION_LATEST),
+        )
+
     def refresh(self) -> None:
-        payload = _load_snapshot(self.snapshot_path)
-        rows = list(payload.get("rows") or [])
-        self.current_rows = rows
+        payload = (
+            {
+                "rows": _demo_rows(),
+                "counts": {"symbols": 2, "action_required": 1},
+                "generated_at": datetime.now().isoformat(timespec="seconds"),
+                "cash_cny": 28600,
+                "total_assets_cny": 100000,
+            }
+            if self.demo
+            else _load_snapshot(self.snapshot_path)
+        )
+        rows = _sort_stock_rows(list(payload.get("rows") or []))
+        stock_signature = tuple(
+            (
+                row.get("symbol"),
+                row.get("name"),
+                row.get("state"),
+                (row.get("operation") or {}).get("verdict"),
+                _safe_num((row.get("operation") or {}).get("suggested_alloc_cny")),
+                _safe_num((row.get("price") or {}).get("current")),
+                _safe_num((row.get("price") or {}).get("change_pct")),
+                _safe_num(row.get("position_pct")),
+                _safe_num(row.get("units")),
+            )
+            for row in rows
+        )
         counts = payload.get("counts") or {}
+        payload_signature = (
+            payload.get("generated_at"),
+            payload.get("round_time"),
+            _safe_num(payload.get("cash_cny")),
+            _safe_num(payload.get("total_assets_cny")),
+            counts.get("symbols", len(rows)),
+            counts.get("action_required", 0),
+            stock_signature,
+        )
+        if payload_signature == self.last_payload_signature:
+            self._place_refresh_fab()
+            self._refresh_open_news_popover()
+            self._render_selection_buttons()
+            return
+
+        if self.stock_content_signature and stock_signature != self.stock_content_signature:
+            self.stock_page_index = 0
+        self.stock_content_signature = stock_signature
+        self.last_payload_signature = payload_signature
+        self.current_rows = rows
         self.status_text.set(
             f"{counts.get('symbols', len(rows))} 标的 / {counts.get('action_required', 0)} 操作"
         )
+        self.last_update_text.set(_fmt_update_time(payload.get("generated_at")))
+        self.cash_bar.set_values(payload.get("cash_cny"), payload.get("total_assets_cny"))
         self._render_rows()
         self._resize_to_rows(len(self._filtered_rows()))
         self._place_refresh_fab()
         self._maybe_alert(rows)
-        self.root.after(self.refresh_ms, self.refresh)
+        self._refresh_open_news_popover()
+        self._render_selection_buttons()
 
     def _resize_to_rows(self, row_count: int) -> None:
         screen_h = self.root.winfo_screenheight()
         screen_w = self.root.winfo_screenwidth()
-        visible_rows = min(max(row_count, 1), 5)
-        height = 214 + visible_rows * 112
-        height = min(max(height, 260), max(300, screen_h - 120))
+        height = min(420 if row_count > 1 else 390, max(306, screen_h - 120))
         width = min(max(330, screen_w // 4), 420)
         x = self.root.winfo_x() if self.root.winfo_x() >= 0 else 24
         y = self.root.winfo_y() if self.root.winfo_y() >= 0 else 32
@@ -780,9 +1325,14 @@ class MonitorWindow:
         self.canvas.configure(scrollregion=self.canvas.bbox("all"))
 
     def _on_mousewheel(self, event: tk.Event) -> None:
-        if self.root.focus_get() is None:
+        if self.hover_stack == "news":
+            self._change_news_page(-1 if event.delta > 0 else 1)
             return
-        self.canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+        if self.hover_stack != "stocks":
+            return
+        rows = self._filtered_rows()
+        if len(rows) > 1:
+            self._change_stock_page(-1 if event.delta > 0 else 1)
 
     def _filtered_rows(self) -> List[Dict[str, Any]]:
         query = self.filter_text.get().strip().lower()
@@ -798,13 +1348,26 @@ class MonitorWindow:
             out.append(row)
         return out
 
-    def _render_rows(self) -> None:
+    def _render_rows(self, slide_step: int = 0) -> None:
         for child in self.cards_frame.winfo_children():
             child.destroy()
         self.card_widgets.clear()
-        for row in self._filtered_rows():
-            self._create_card(row)
-        if not self.cards_frame.winfo_children():
+        rows = self._filtered_rows()
+        if rows:
+            self.stock_page_index %= len(rows)
+            self._create_stack_layers(self.cards_frame, len(rows))
+            stage = self._create_card_stage(self.cards_frame, STOCK_CARD_STAGE_HEIGHT, pady=(0, 6))
+            card = self._create_card(rows[self.stock_page_index], parent=stage, managed=False)
+            self._place_card(stage, card, slide_step)
+            if len(rows) > 1:
+                self._create_pager(
+                    self.cards_frame,
+                    self.stock_page_index,
+                    len(rows),
+                    lambda: self._change_stock_page(-1),
+                    lambda: self._change_stock_page(1),
+                )
+        else:
             empty = tk.Label(
                 self.cards_frame,
                 text="没有匹配的标的",
@@ -817,7 +1380,92 @@ class MonitorWindow:
         self.cards_frame.update_idletasks()
         self.canvas.configure(scrollregion=self.canvas.bbox("all"))
 
-    def _create_card(self, row: Dict[str, Any]) -> None:
+    def _reset_stock_page(self) -> None:
+        self.stock_page_index = 0
+        self._render_rows()
+
+    def _change_stock_page(self, step: int) -> None:
+        rows = self._filtered_rows()
+        if len(rows) <= 1:
+            return
+        self.stock_page_index = (self.stock_page_index + step) % len(rows)
+        self._render_rows(slide_step=step)
+
+    def _create_card_stage(
+        self,
+        parent: tk.Misc,
+        height: int,
+        *,
+        pady: tuple[int, int] = (0, 0),
+        expand: bool = False,
+    ) -> tk.Frame:
+        stage = tk.Frame(parent, bg=BOARD_BG, height=height)
+        stage.pack(fill=tk.BOTH if expand else tk.X, expand=expand, pady=pady)
+        stage.pack_propagate(False)
+        return stage
+
+    def _place_card(self, stage: tk.Frame, widget: tk.Widget, direction: int = 0) -> None:
+        widget.place(x=0, y=0, relwidth=1)
+        if direction:
+            self._animate_slide(widget, direction)
+
+    def _animate_slide(self, widget: tk.Widget, direction: int) -> None:
+        offsets = [46, 31, 19, 10, 4, 0]
+
+        def step(index: int = 0) -> None:
+            if not widget.winfo_exists():
+                return
+            offset = offsets[index]
+            y = offset if direction > 0 else -offset
+            widget.place_configure(y=y)
+            if index + 1 < len(offsets):
+                widget.after(18, lambda: step(index + 1))
+            else:
+                widget.place_configure(y=0)
+
+        step()
+
+    def _create_stack_layers(self, parent: tk.Misc, count: int) -> None:
+        if count <= 1:
+            return
+        back = tk.Frame(parent, bg="#dce6f5", height=6)
+        back.pack(fill=tk.X, padx=12, pady=(3, 0))
+        back.pack_propagate(False)
+        middle = tk.Frame(parent, bg="#e7eef8", height=5)
+        middle.pack(fill=tk.X, padx=6)
+        middle.pack_propagate(False)
+
+    def _create_pager(
+        self,
+        parent: tk.Misc,
+        index: int,
+        total: int,
+        previous: Any,
+        following: Any,
+    ) -> None:
+        pager = tk.Frame(parent, bg=BOARD_BG)
+        pager.pack(fill=tk.X, pady=(0, 0))
+        prev = tk.Label(pager, text="‹", bg=BOARD_BG, fg=BLUE, font=("Segoe UI", 18, "bold"), cursor="hand2", width=3)
+        prev.pack(side=tk.LEFT)
+        tk.Label(
+            pager,
+            text=f"{index + 1} / {total}",
+            bg=BOARD_BG,
+            fg=MUTED,
+            font=("Microsoft YaHei UI", 8, "bold"),
+        ).pack(side=tk.LEFT, expand=True)
+        nxt = tk.Label(pager, text="›", bg=BOARD_BG, fg=BLUE, font=("Segoe UI", 18, "bold"), cursor="hand2", width=3)
+        nxt.pack(side=tk.RIGHT)
+        prev.bind("<Button-1>", lambda _event: previous())
+        nxt.bind("<Button-1>", lambda _event: following())
+
+    def _create_card(
+        self,
+        row: Dict[str, Any],
+        *,
+        parent: Optional[tk.Misc] = None,
+        managed: bool = True,
+    ) -> tk.Frame:
         symbol = str(row.get("symbol") or "")
         op = row.get("operation") or {}
         price = row.get("price") or {}
@@ -826,8 +1474,12 @@ class MonitorWindow:
         state_color = _state_color(row)
         change_color = _change_color(row)
 
-        card = tk.Frame(self.cards_frame, bg=bg, padx=10, pady=8, cursor="hand2")
-        card.pack(fill=tk.X, pady=(0, 8))
+        card = tk.Frame(parent or self.cards_frame, bg=bg, padx=10, pady=7, cursor="hand2")
+        if managed:
+            card.pack(fill=tk.X, pady=(0, 8))
+        card.bind("<Enter>", lambda _event: self._set_hover_stack("stocks"))
+        card.bind("<Leave>", lambda _event: self._clear_hover_stack("stocks"))
+        card.bind("<MouseWheel>", lambda event: self._wheel_stock_stack(event))
         self.card_widgets[symbol] = card
 
         top = tk.Frame(card, bg=bg)
@@ -852,7 +1504,7 @@ class MonitorWindow:
         ).pack(side=tk.RIGHT)
 
         trade_bar = tk.Frame(card, bg=bg)
-        trade_bar.pack(fill=tk.X, pady=(8, 0))
+        trade_bar.pack(fill=tk.X, pady=(6, 0))
         max_lots = _max_executable_lots(row)
         lots_var = tk.StringVar(value=str(max_lots) if max_lots > 0 else "0")
         side_text = "已执行卖出" if _operation_direction(row) == "SELL" else "已执行买入"
@@ -868,7 +1520,7 @@ class MonitorWindow:
             justify=tk.CENTER,
             font=("Microsoft YaHei UI", 9, "bold"),
         )
-        lots_entry.pack(side=tk.LEFT, padx=(4, 8), ipady=3)
+        lots_entry.pack(side=tk.LEFT, padx=(4, 8), ipady=2)
         exec_btn = tk.Label(
             trade_bar,
             text=side_text,
@@ -884,6 +1536,8 @@ class MonitorWindow:
 
         def confirm_trade(_event: Optional[tk.Event] = None, *, r: Dict[str, Any] = row) -> str:
             try:
+                if r.get("_demo"):
+                    raise ValueError("演示模式不会更新持仓")
                 raw_lots = lots_var.get().strip()
                 if not raw_lots.isdigit():
                     raise ValueError("手数必须是整数")
@@ -902,16 +1556,17 @@ class MonitorWindow:
         lots_entry.bind("<Return>", confirm_trade)
 
         mid = tk.Frame(card, bg=bg)
-        mid.pack(fill=tk.X, pady=(8, 0))
+        mid.pack(fill=tk.X, pady=(6, 0))
         tk.Label(mid, text=_fmt_price(price.get("current")), bg=bg, fg=TEXT, font=("Microsoft YaHei UI", 14, "bold")).pack(side=tk.LEFT)
         tk.Label(mid, text=_fmt_pct(price.get("change_pct")), bg=bg, fg=change_color, font=("Microsoft YaHei UI", 10, "bold")).pack(side=tk.LEFT, padx=(8, 0))
         tk.Label(mid, text=f"{_verdict_signal(op.get('verdict'))} {op.get('verdict', '-')}", bg=bg, fg=MUTED, font=("Microsoft YaHei UI", 9)).pack(side=tk.RIGHT)
 
         bottom = tk.Frame(card, bg=bg)
-        bottom.pack(fill=tk.X, pady=(6, 0))
+        bottom.pack(fill=tk.X, pady=(4, 0))
         tk.Label(bottom, text=f"买 {_buy_summary(row)}", bg=bg, fg=MUTED, font=("Microsoft YaHei UI", 8)).pack(side=tk.LEFT)
         tk.Label(bottom, text=f"卖 {_exit_summary(row)}", bg=bg, fg=MUTED, font=("Microsoft YaHei UI", 8)).pack(side=tk.LEFT, padx=(10, 0))
         tk.Label(bottom, text=f"基 {float(_safe_num(fundamental.get('score'), 50)):.0f}", bg=bg, fg=MUTED, font=("Microsoft YaHei UI", 8)).pack(side=tk.RIGHT)
+        tk.Label(bottom, text=f"持 {_fmt_holding_lots(row)}", bg=bg, fg=MUTED, font=("Microsoft YaHei UI", 8)).pack(side=tk.RIGHT, padx=(0, 10))
 
         for widget in (card, top, mid, bottom):
             widget.bind("<Button-1>", lambda _event, s=symbol: self._open_analysis_dialog(s))
@@ -921,6 +1576,349 @@ class MonitorWindow:
             widget.bind("<Button-1>", lambda _event, s=symbol: self._open_analysis_dialog(s))
             for nested in widget.winfo_children():
                 nested.bind("<Button-1>", lambda _event, s=symbol: self._open_analysis_dialog(s))
+                nested.bind("<Enter>", lambda _event: self._set_hover_stack("stocks"))
+                nested.bind("<MouseWheel>", lambda event: self._wheel_stock_stack(event))
+        return card
+
+    def _set_hover_stack(self, stack: str) -> None:
+        self.hover_stack = stack
+
+    def _clear_hover_stack(self, stack: str) -> None:
+        if self.hover_stack == stack:
+            self.hover_stack = None
+
+    def _wheel_stock_stack(self, event: tk.Event) -> str:
+        rows = self._filtered_rows()
+        if len(rows) > 1:
+            self._change_stock_page(-1 if event.delta > 0 else 1)
+        return "break"
+
+    def _wheel_news_stack(self, event: tk.Event) -> str:
+        self._change_news_page(-1 if event.delta > 0 else 1)
+        return "break"
+
+    def _open_weekend_news(self) -> None:
+        if self.news_popover and self.news_popover.winfo_exists():
+            self._close_news_popover()
+            return
+        cards, source = self._current_news_cards()
+        self.news_cards = cards
+        self.news_source = source
+        popover = tk.Frame(self.root, bg=LINE, padx=1, pady=1)
+        self.news_popover = popover
+        panel = tk.Frame(popover, bg=PANEL_BG, padx=12, pady=10)
+        panel.pack(fill=tk.BOTH, expand=True)
+        top = tk.Frame(panel, bg=PANEL_BG)
+        top.pack(fill=tk.X)
+        tk.Label(top, text="周末新闻机会", bg=PANEL_BG, fg=TEXT, font=("Microsoft YaHei UI", 10, "bold")).pack(side=tk.LEFT)
+        tk.Label(top, text=source, bg=PANEL_BG, fg=MUTED, font=("Microsoft YaHei UI", 8)).pack(side=tk.LEFT, padx=(8, 0))
+        close_btn = tk.Label(top, text="×", bg=PANEL_BG, fg=MUTED, font=("Segoe UI", 12), width=2, cursor="hand2")
+        close_btn.pack(side=tk.RIGHT)
+        close_btn.bind("<Button-1>", lambda _event: self._close_news_popover())
+        body = tk.Frame(panel, bg=BOARD_BG)
+        body.pack(fill=tk.BOTH, expand=True, pady=(8, 0))
+        self.news_popover_body = body
+        self.news_page_index = 0
+        self.news_content_signature = self._news_signature(cards, source)
+        self._render_news_page()
+        self.root.update_idletasks()
+        width = min(380, max(310, self.root.winfo_width() - 28))
+        height = 285
+        x = 14
+        y = max(92, self.selection_bar.winfo_y() - height - 38)
+        popover.place(x=x, y=y, width=width, height=height)
+        popover.lift()
+        self.root.tk.call("raise", popover._w)
+
+    def _current_news_cards(self) -> tuple[List[Dict[str, Any]], str]:
+        if self.demo:
+            return _sort_news_cards(_demo_news_cards()), "演示数据：2 条周末新闻"
+        return _load_weekend_news_cards(self.weekend_news_dir)
+
+    def _news_signature(self, cards: List[Dict[str, Any]], source: str) -> tuple[Any, ...]:
+        return (
+            source,
+            *(
+                (
+                    card.get("title"),
+                    card.get("sector"),
+                    _news_impact_score(card),
+                    tuple(leader.get("symbol") for leader in card.get("leaders") or []),
+                )
+                for card in cards
+            ),
+        )
+
+    def _refresh_open_news_popover(self) -> None:
+        if not self.news_popover or not self.news_popover.winfo_exists():
+            return
+        cards, source = self._current_news_cards()
+        signature = self._news_signature(cards, source)
+        if signature == self.news_content_signature:
+            return
+        self.news_content_signature = signature
+        self.news_page_index = 0
+        self.news_cards = cards
+        self.news_source = source
+        self._render_news_page()
+
+    def _close_news_popover(self) -> None:
+        if self.news_popover and self.news_popover.winfo_exists():
+            self.news_popover.destroy()
+        self.news_popover = None
+        self.news_popover_body = None
+        self.news_cards = []
+        self.news_source = ""
+
+    def _current_selection_payload(self) -> Dict[str, Any]:
+        return _demo_selection_payload() if self.demo else _load_daily_selection()
+
+    def _selection_stocks(self) -> List[Dict[str, Any]]:
+        payload = self._current_selection_payload()
+        return sorted(payload.get("stocks") or [], key=lambda row: (-_safe_num(row.get("score")), str(row.get("symbol") or "")))[:6]
+
+    def _render_selection_buttons(self) -> None:
+        if not hasattr(self, "selection_buttons_frame"):
+            return
+        stocks = self._selection_stocks()
+        signature = tuple((stock.get("symbol"), stock.get("score")) for stock in stocks)
+        if signature == self.selection_content_signature:
+            return
+        self.selection_content_signature = signature
+        self._close_selection_popover()
+        for child in self.selection_buttons_frame.winfo_children():
+            child.destroy()
+        if not stocks:
+            tk.Label(
+                self.selection_buttons_frame,
+                text="暂无",
+                bg=BOARD_BG,
+                fg=MUTED,
+                font=("Microsoft YaHei UI", 8),
+            ).pack(side=tk.LEFT)
+            return
+        for stock in stocks:
+            label = tk.Label(
+                self.selection_buttons_frame,
+                text=f"{stock.get('name') or stock.get('symbol')}",
+                bg="#eef3f8",
+                fg=TEXT,
+                font=("Microsoft YaHei UI", 8),
+                padx=12,
+                pady=5,
+                relief=tk.SOLID,
+                bd=1,
+                highlightthickness=1,
+                highlightbackground="#9aa9bb",
+                cursor="hand2",
+            )
+            label.pack(side=tk.LEFT, padx=(0, 6), pady=(1, 1))
+            label.bind("<Button-1>", lambda _event, s=stock, w=label: self._show_selection_popover(s, w))
+            label.bind("<Enter>", lambda _event, w=label: w.configure(bg="#e2e8f0"))
+            label.bind("<Leave>", lambda _event, w=label: w.configure(bg="#eef3f8"))
+
+    def _show_selection_popover(self, stock: Dict[str, Any], anchor: tk.Widget) -> None:
+        symbol = str(stock.get("symbol") or "")
+        if (
+            self.selection_popover
+            and self.selection_popover.winfo_exists()
+            and self.selection_popover_symbol == symbol
+        ):
+            self._close_selection_popover()
+            return
+        self._close_selection_popover()
+        popover = tk.Frame(self.root, bg=LINE, padx=1, pady=1)
+        self.selection_popover = popover
+        self.selection_popover_symbol = symbol
+
+        panel = tk.Frame(popover, bg=PANEL_BG, padx=12, pady=10)
+        panel.pack(fill=tk.BOTH, expand=True)
+        top = tk.Frame(panel, bg=PANEL_BG)
+        top.pack(fill=tk.X)
+        tk.Label(
+            top,
+            text=f"{stock.get('name') or symbol}  {symbol}",
+            bg=PANEL_BG,
+            fg=TEXT,
+            font=("Microsoft YaHei UI", 10, "bold"),
+        ).pack(side=tk.LEFT)
+        tk.Label(top, text=f"{_safe_num(stock.get('score')):.0f}", bg="#ffe5e0", fg=DOWN_FG, font=("Microsoft YaHei UI", 8, "bold"), padx=8, pady=2).pack(side=tk.LEFT, padx=(8, 0))
+        close_btn = tk.Label(top, text="×", bg=PANEL_BG, fg=MUTED, font=("Segoe UI", 12), width=2, cursor="hand2")
+        close_btn.pack(side=tk.RIGHT)
+        close_btn.bind("<Button-1>", lambda _event: self._close_selection_popover())
+
+        self._render_selection_reason(panel, stock)
+        pointer = tk.Canvas(popover, width=24, height=12, bg=BOARD_BG, highlightthickness=0, bd=0)
+        pointer.create_polygon(2, 0, 22, 0, 12, 12, fill=LINE, outline=LINE)
+        pointer.place(relx=0.5, rely=1.0, y=-1, anchor="n")
+        self.root.update_idletasks()
+        width = min(370, max(300, self.root.winfo_width() - 28))
+        height = 250
+        x = max(12, min(anchor.winfo_x(), self.root.winfo_width() - width - 12))
+        y = max(120, self.selection_bar.winfo_y() - height - 8)
+        popover.place(x=x, y=y, width=width, height=height)
+        popover.lift()
+        self.root.tk.call("raise", popover._w)
+
+    def _close_selection_popover(self) -> None:
+        if self.selection_popover and self.selection_popover.winfo_exists():
+            self.selection_popover.destroy()
+        self.selection_popover = None
+        self.selection_popover_symbol = None
+
+    def _render_selection_reason(self, body: tk.Frame, stock: Dict[str, Any]) -> None:
+        tape = stock.get("tape") or {}
+        trend = stock.get("trend") or {}
+        plan = stock.get("entry_plan") or {}
+        card = tk.Frame(body, bg=PANEL_BG)
+        card.pack(fill=tk.BOTH, expand=True, pady=(8, 0))
+        tk.Label(card, text=f"板块  {stock.get('sector', '-')}", bg=PANEL_BG, fg=MUTED, font=("Microsoft YaHei UI", 8, "bold"), anchor="w").pack(fill=tk.X)
+        reasons = "；".join(str(x) for x in (stock.get("reasons") or [])[:3])
+        tk.Label(card, text=f"原因  {_short(reasons, 120) or '-'}", bg=PANEL_BG, fg=TEXT, font=("Microsoft YaHei UI", 8), justify=tk.LEFT, anchor="w", wraplength=330).pack(fill=tk.X, pady=(6, 0))
+        tk.Label(
+            card,
+            text=f"资金/基本面  {_safe_num(stock.get('money_flow_score')):.0f} / {_safe_num(stock.get('fundamental_score'), 50):.0f}",
+            bg=PANEL_BG,
+            fg=DOWN_FG,
+            font=("Microsoft YaHei UI", 8, "bold"),
+            anchor="w",
+        ).pack(fill=tk.X, pady=(7, 0))
+        tk.Label(card, text=f"走势  {_short(tape.get('interpretation') or trend.get('interpretation'), 105)}", bg=PANEL_BG, fg=BLUE, font=("Microsoft YaHei UI", 8, "bold"), justify=tk.LEFT, anchor="w", wraplength=330).pack(fill=tk.X, pady=(7, 0))
+        trigger = _fmt_price(plan.get("trigger_price"))
+        stop = _fmt_price(plan.get("stop_loss_price"))
+        tk.Label(card, text=f"买点  {plan.get('action', '-')}  触发 {trigger}  止损 {stop}", bg=PANEL_BG, fg=UP_FG, font=("Microsoft YaHei UI", 8, "bold"), anchor="w").pack(fill=tk.X, pady=(7, 0))
+        tk.Label(card, text=f"备注  {_short(plan.get('note'), 92) or '-'}", bg=PANEL_BG, fg=MUTED, font=("Microsoft YaHei UI", 8), justify=tk.LEFT, anchor="w", wraplength=330).pack(fill=tk.X, pady=(6, 0))
+        status_var = tk.StringVar(value="")
+        action_bar = tk.Frame(body, bg=PANEL_BG)
+        action_bar.pack(fill=tk.X, pady=(8, 0))
+        add_btn = tk.Label(
+            action_bar,
+            text="加入关注列表",
+            bg="#eef3f8",
+            fg=TEXT,
+            font=("Microsoft YaHei UI", 8),
+            padx=12,
+            pady=5,
+            relief=tk.SOLID,
+            bd=1,
+            highlightthickness=1,
+            highlightbackground="#9aa9bb",
+            cursor="hand2",
+        )
+        add_btn.pack(side=tk.LEFT)
+        tk.Label(action_bar, textvariable=status_var, bg=PANEL_BG, fg=MUTED, font=("Microsoft YaHei UI", 8)).pack(side=tk.LEFT, padx=(10, 0))
+
+        def add_to_watchlist(_event: Optional[tk.Event] = None) -> str:
+            try:
+                message = self._add_selection_to_watchlist(stock)
+                status_var.set(message)
+                self.status_text.set(message)
+                return "break"
+            except Exception as exc:  # noqa: BLE001
+                status_var.set(f"失败: {exc}")
+                return "break"
+
+        add_btn.bind("<Button-1>", add_to_watchlist)
+        add_btn.bind("<Enter>", lambda _event: add_btn.configure(bg="#e2e8f0"))
+        add_btn.bind("<Leave>", lambda _event: add_btn.configure(bg="#eef3f8"))
+
+    def _add_selection_to_watchlist(self, stock: Dict[str, Any]) -> str:
+        if self.demo:
+            return "演示模式未写入关注列表"
+        symbol = str(stock.get("symbol") or "").strip()
+        if not symbol:
+            raise ValueError("缺少股票代码")
+        from jobs.market_monitor import CONFIG_PATH, load_config
+
+        config = load_config()
+        watchlist = list(config.get("watchlist") or [])
+        all_symbols = {
+            str(item.get("symbol") or "").strip()
+            for item in list(config.get("holdings") or []) + watchlist
+        }
+        if symbol in all_symbols:
+            return "已在持仓或关注列表"
+        watchlist.append(
+            {
+                "symbol": symbol,
+                "name": stock.get("name") or symbol,
+                "market": "a",
+                "sector": stock.get("sector") or "",
+                "industry": "",
+                "position_pct": 0,
+                "cost": 0,
+            }
+        )
+        config["watchlist"] = watchlist
+        CONFIG_PATH.write_text(json.dumps(config, ensure_ascii=False, indent=2), encoding="utf-8")
+        return f"已加入关注列表: {stock.get('name') or symbol}"
+
+    def _change_news_page(self, step: int) -> None:
+        if not self.news_popover or not self.news_popover.winfo_exists():
+            return
+        cards = self.news_cards
+        if len(cards) <= 1:
+            return
+        self.news_page_index = (self.news_page_index + step) % len(cards)
+        self._render_news_page(slide_step=step)
+
+    def _render_news_page(self, slide_step: int = 0) -> None:
+        if not self.news_popover or not self.news_popover.winfo_exists() or self.news_popover_body is None:
+            return
+        body = self.news_popover_body
+        cards = self.news_cards
+        for child in body.winfo_children():
+            child.destroy()
+        if not cards:
+            tk.Label(body, text="暂无包含板块与龙头股的周末新闻总结", bg=BOARD_BG, fg=MUTED, font=("Microsoft YaHei UI", 10)).pack(expand=True)
+            return
+        self.news_page_index %= len(cards)
+        self._create_stack_layers(body, len(cards))
+        stage = self._create_card_stage(body, NEWS_CARD_STAGE_HEIGHT, expand=True)
+        card = self._create_news_card(stage, cards[self.news_page_index], managed=False)
+        self._place_card(stage, card, slide_step)
+        if len(cards) > 1:
+            self._create_pager(
+                body,
+                self.news_page_index,
+                len(cards),
+                lambda: self._change_news_page(-1),
+                lambda: self._change_news_page(1),
+            )
+
+    def _create_news_card(
+        self,
+        parent: tk.Misc,
+        card_data: Dict[str, Any],
+        *,
+        managed: bool = True,
+    ) -> tk.Frame:
+        heat = _safe_num(card_data.get("heat_score"))
+        heat_color = ACTION_FG if heat >= 0.8 else TRIGGER_FG if heat >= 0.6 else BLUE
+        card = tk.Frame(parent, bg=PANEL_BG, padx=14, pady=12)
+        if managed:
+            card.pack(fill=tk.BOTH, expand=True)
+        card.bind("<Enter>", lambda _event: self._set_hover_stack("news"))
+        card.bind("<Leave>", lambda _event: self._clear_hover_stack("news"))
+        card.bind("<MouseWheel>", lambda event: self._wheel_news_stack(event))
+        top = tk.Frame(card, bg=PANEL_BG)
+        top.pack(fill=tk.X)
+        tk.Label(top, text="●", bg=PANEL_BG, fg=heat_color, font=("Microsoft YaHei UI", 9, "bold")).pack(side=tk.LEFT)
+        tk.Label(top, text=f"  {card_data.get('title', '周末机会')}", bg=PANEL_BG, fg=TEXT, font=("Microsoft YaHei UI", 11, "bold")).pack(side=tk.LEFT)
+        tk.Label(top, text=f"热度 {heat:.0%}", bg=SOFT_BLUE, fg=BLUE, font=("Microsoft YaHei UI", 8, "bold"), padx=8, pady=2).pack(side=tk.RIGHT)
+        tk.Label(card, text=f"板块  {card_data.get('sector', '-')}", bg=PANEL_BG, fg=MUTED, font=("Microsoft YaHei UI", 9, "bold"), anchor="w").pack(fill=tk.X, pady=(12, 0))
+        tk.Label(card, text=_short(card_data.get("logic"), 150), bg=PANEL_BG, fg=TEXT, font=("Microsoft YaHei UI", 9), justify=tk.LEFT, anchor="w", wraplength=430).pack(fill=tk.X, pady=(8, 0))
+        leaders = card_data.get("leaders") or []
+        leader_text = "  ".join(
+            f"{leader.get('name') or leader.get('symbol')}({leader.get('symbol', '-')})"
+            for leader in leaders[:4]
+        ) or "-"
+        tk.Label(card, text=f"龙头  {leader_text}", bg=PANEL_BG, fg=BLUE, font=("Microsoft YaHei UI", 9, "bold"), justify=tk.LEFT, anchor="w", wraplength=430).pack(fill=tk.X, pady=(12, 0))
+        tk.Label(card, text=f"风险  {_short(card_data.get('risk_note'), 130) or '-'}", bg=PANEL_BG, fg=DOWN_FG, font=("Microsoft YaHei UI", 8), justify=tk.LEFT, anchor="w", wraplength=430).pack(fill=tk.X, pady=(10, 0))
+        for widget in card.winfo_children():
+            widget.bind("<Enter>", lambda _event: self._set_hover_stack("news"))
+            widget.bind("<MouseWheel>", lambda event: self._wheel_news_stack(event))
+        return card
 
     def _open_analysis_dialog(self, symbol: str) -> None:
         row = next((item for item in self.current_rows if item.get("symbol") == symbol), None)
@@ -1131,13 +2129,17 @@ class MonitorWindow:
 def main() -> None:
     parser = argparse.ArgumentParser(description="OpenInvest standalone monitor window")
     parser.add_argument("--snapshot", type=Path, default=DEFAULT_SNAPSHOT)
-    parser.add_argument("--refresh-sec", type=float, default=5.0)
+    parser.add_argument("--weekend-news-dir", type=Path, default=WEEKEND_NEWS_DIR)
+    parser.add_argument("--poll-ms", type=int, default=1000)
     parser.add_argument("--no-shake", action="store_true")
+    parser.add_argument("--demo", action="store_true")
     args = parser.parse_args()
     MonitorWindow(
         snapshot_path=args.snapshot,
-        refresh_ms=int(args.refresh_sec * 1000),
+        poll_ms=args.poll_ms,
         shake_enabled=not args.no_shake,
+        weekend_news_dir=args.weekend_news_dir,
+        demo=args.demo,
     ).start()
 
 

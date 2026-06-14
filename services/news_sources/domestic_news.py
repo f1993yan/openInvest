@@ -73,6 +73,7 @@ def fetch_cls_news(*, max_items: int = 20) -> List[RawNewsItem]:
         with sync_playwright() as p:
             browser = p.chromium.launch(
                 headless=True,
+                timeout=300_000,
                 args=['--disable-blink-features=AutomationControlled', '--no-sandbox', '--disable-features=HostInitVerifier'],
             )
             ctx = browser.new_context(
@@ -169,6 +170,7 @@ def fetch_xueqiu_news(*, query: str = "A股", max_items: int = 20) -> List[RawNe
         with sync_playwright() as p:
             browser = p.chromium.launch(
                 headless=True,
+                timeout=300_000,
                 args=['--disable-blink-features=AutomationControlled', '--no-sandbox', '--disable-features=HostInitVerifier'],
             )
             ctx = browser.new_context(
@@ -195,7 +197,7 @@ def fetch_xueqiu_news(*, query: str = "A股", max_items: int = 20) -> List[RawNe
                         pass
 
             page.on('response', _on_response)
-            page.goto('https://xueqiu.com/', wait_until='networkidle', timeout=30000)
+            page.goto('https://xueqiu.com/', wait_until='networkidle', timeout=60000)
             page.wait_for_timeout(2000)
             browser.close()
 

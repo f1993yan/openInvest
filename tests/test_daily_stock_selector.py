@@ -209,3 +209,37 @@ def test_daily_selection_filters_unaffordable_a_share_lots():
 
     assert result.stocks == []
     assert result.news_impact_summary["affordability_filtered"] == 1
+
+
+def test_daily_selection_uses_sector_fund_flow_and_fundamentals():
+    result = build_daily_selection(
+        [],
+        {"603308": _trend_df()},
+        sector_fund_flows=[
+            {
+                "sector": "商业航天",
+                "rank": 1,
+                "main_net_inflow_cny": 520_000_000,
+                "change_pct": 2.8,
+                "leaders": [
+                    {
+                        "symbol": "603308",
+                        "name": "应流股份",
+                        "main_net_inflow_cny": 80_000_000,
+                        "reason": "板块内主力资金靠前",
+                    }
+                ],
+            }
+        ],
+        fundamentals_by_symbol={
+            "603308": {"score": 82, "model": "industrial_quality_value", "reason": "基本面质量较好"}
+        },
+        max_stocks=5,
+    )
+
+    assert result.sectors[0].sector == "商业航天"
+    assert result.sectors[0].fund_flow_score > 70
+    assert result.stocks[0].symbol == "603308"
+    assert result.stocks[0].money_flow_score > 70
+    assert result.stocks[0].fundamental_score == 82
+    assert "基本面质量较好" in result.stocks[0].reasons

@@ -1,13 +1,32 @@
 @echo off
+setlocal
 set PYTHONUTF8=1
 set PYTHONIOENCODING=utf-8
-cd /d D:\Code_for_AI\OpenInvest\openInvest
-echo openInvest backend starting on http://127.0.0.1:8766 ...
-start "openInvest Backend" /B uv run uvicorn backend.server:app --host 127.0.0.1 --port 8766 > backend.log 2>&1
-echo Backend started.
-echo Starting market monitor (9:30-15:00, every 30min)...
-start "openInvest Monitor" /B uv run python -m jobs.market_monitor > data\market_monitor\monitor_stdout.log 2>&1
-echo Monitor started.
-echo Starting job scheduler (daily_report + weekend_news + ...)...
-start "openInvest Scheduler" /B uv run python -m scheduler.runner > logs\scheduler.log 2>&1
-echo Scheduler started. You can close this window.
+
+rem Portable double-click entrypoint. The real startup logic lives in
+rem scripts\start_invest_backend.py to avoid fragile batch quoting.
+if "%OPENINVEST_ROOT%"=="" set "OPENINVEST_ROOT=%~dp0"
+for %%I in ("%OPENINVEST_ROOT%\.") do set "OPENINVEST_ROOT=%%~fI"
+cd /d "%OPENINVEST_ROOT%" || exit /b 1
+
+if not "%OPENINVEST_PYTHON%"=="" (
+    set "PYTHON_CMD=%OPENINVEST_PYTHON%"
+) else if exist ".venv\Scripts\python.exe" (
+    set "PYTHON_CMD=.venv\Scripts\python.exe"
+) else (
+    set "PYTHON_CMD="
+)
+
+if not "%PYTHON_CMD%"=="" (
+    "%PYTHON_CMD%" -m scripts.start_invest_backend %*
+) else (
+    if "%OPENINVEST_UV%"=="" set "OPENINVEST_UV=uv"
+    "%OPENINVEST_UV%" run python -m scripts.start_invest_backend %*
+)
+
+if errorlevel 1 (
+    echo.
+    echo OpenInvest startup failed. Check the message above and logs\*.err.log.
+    pause
+    exit /b 1
+)

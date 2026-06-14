@@ -1,6 +1,8 @@
 """services/news_sources 单测 —— mock 三个源的底层调用，验证统一入口 + 去重"""
 from __future__ import annotations
 
+import sys
+import types
 from unittest.mock import MagicMock, patch
 
 from services.news_sources import RawNewsItem, fetch_all
@@ -88,7 +90,7 @@ def test_domestic_hot_news_infers_sector_and_leaders():
 
 def test_fetch_all_domestic_includes_hot_news_and_enrichment():
     with patch("services.news_sources.domestic_news.fetch_eastmoney_news", return_value=[]), \
-         patch("services.news_sources.domestic_news.fetch_cls_news", return_value=[]), \
+         patch("services.news_sources.cls_news.fetch_cls_telegraph", return_value=[]), \
          patch("services.news_sources.domestic_news.fetch_sina_news", return_value=[]), \
          patch("services.news_sources.domestic_news.fetch_xueqiu_news", return_value=[]), \
          patch("services.news_sources.domestic_news.fetch_wallstreetcn_news", return_value=[]), \
@@ -195,6 +197,76 @@ def test_weekend_llm_summary_discovers_a_share_hot_opportunities(monkeypatch):
     assert out["watchlist_symbols"] == ["603308"]
     assert out["need_committee_rerun"] == []
     assert "stock_impact" not in out
+
+
+def test_weekend_committee_on_leaders_uses_direct_backend_call(monkeypatch):
+    from jobs import weekend_news_crawl as mod
+
+    captured = {}
+
+    class _FakeHolding:
+        def __init__(self, **kwargs):
+            self.__dict__.update(kwargs)
+
+    class _FakeRequest:
+        def __init__(self, **kwargs):
+            self.__dict__.update(kwargs)
+
+    class _FakeResponse:
+        def model_dump(self):
+            return {
+                "success": True,
+                "symbol": "600900",
+                "verdict": "ACCUMULATE",
+                "confidence": 0.7,
+                "suggested_alloc_cny": 3000,
+                "cio_memo": "ok",
+            }
+
+    def _fake_direct(req):
+        captured["req"] = req
+        return _FakeResponse()
+
+    def _fail_http(*args, **kwargs):
+        raise AssertionError("weekend committee rerun should not use HTTP")
+
+    fake_backend = types.ModuleType("backend.server")
+    fake_backend.CommitteeRequest = _FakeRequest
+    fake_backend.Holding = _FakeHolding
+    fake_backend.run_committee_direct = _fake_direct
+    monkeypatch.setitem(sys.modules, "backend.server", fake_backend)
+    monkeypatch.setattr(mod.requests, "post", _fail_http)
+    monkeypatch.setattr("time.sleep", lambda *_args, **_kwargs: None)
+
+    config = {
+        "total_assets": 100000,
+        "cash": 10000,
+        "holdings": [
+            {
+                "symbol": "600900",
+                "name": "Changjiang Power",
+                "market": "a",
+                "position_pct": 5.0,
+                "cost": 10.0,
+                "sector": "Power",
+                "industry": "Utility",
+            }
+        ],
+    }
+    summary = {
+        "key_themes": ["Power reform"],
+        "overall_sentiment": "positive",
+        "summary_one_liner": "Power utilities benefit.",
+        "stock_impact": {"600900": {"impact": 1, "reason": "benefit"}},
+    }
+
+    out = mod.run_committee_on_leaders(["600900"], config, summary)
+
+    assert out[0]["success"] is True
+    assert out[0]["verdict"] == "ACCUMULATE"
+    assert out[0]["news_impact"] == 1
+    assert captured["req"].symbol == "600900"
+    assert captured["req"].news_brief
 
 
 def test_obvious_danger_news_gets_quantified_a_share_impact():

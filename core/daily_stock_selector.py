@@ -5,7 +5,8 @@ layers for each trading day:
 
 1. domestic news/theme hits;
 2. sector-to-leader mapping from the news enrichment layer;
-3. each candidate stock's daily OHLCV behavior.
+3. big-money sector flow and constituent flow;
+4. each candidate stock's daily OHLCV behavior plus fundamental quality.
 
 The output is meant to answer: which A-share sectors are hot today, which
 stocks deserve attention, why, and what the day's tape is saying.
@@ -91,6 +92,9 @@ class SectorSelection:
     risk_penalty: float
     tape_confirm_score: float = 0.0
     confirmed_stock_count: int = 0
+    fund_flow_score: float = 0.0
+    main_net_inflow_cny: Optional[float] = None
+    fund_flow_rank: Optional[int] = None
     evidence_titles: List[str] = field(default_factory=list)
 
 
@@ -110,6 +114,9 @@ class StockSelection:
     trend: MultiPeriodTrend
     affordability: Affordability
     entry_plan: EntryPlan
+    fundamental_score: float = 50.0
+    fundamental_model: str = ""
+    money_flow_score: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -129,13 +136,23 @@ def build_daily_selection(
     max_stocks: int = 20,
     available_cash_cny: Optional[float] = None,
     lot_size: int = 100,
+    sector_fund_flows: Optional[List[Dict[str, Any]]] = None,
+    fundamentals_by_symbol: Optional[Dict[str, Dict[str, Any]]] = None,
 ) -> DailySelectionResult:
     """Rank hot A-share sectors and watchlist stocks for a single day."""
     news_rows = _collect_news_rows(items)
-    sector_rows = _rank_sectors(news_rows, max_sectors=max_sectors)
+    flow_rows = _normalize_sector_fund_flows(sector_fund_flows or [])
+    sector_rows = _rank_sectors(news_rows, flows=flow_rows, max_sectors=max_sectors)
 
     stock_buckets: Dict[str, Dict[str, Any]] = {}
     sector_heat = {row.sector: row.heat_score for row in sector_rows}
+    flow_by_sector = {row["sector"]: row for row in flow_rows}
+    flow_by_symbol: Dict[str, Dict[str, Any]] = {}
+    for flow in flow_rows:
+        for leader in flow.get("leaders") or []:
+            symbol = str(leader.get("symbol") or "").strip()
+            if symbol:
+                flow_by_symbol[symbol] = {**flow, "leader": leader}
     for row in news_rows:
         for leader in row["leaders"]:
             symbol = str(leader.get("symbol") or "").strip()
@@ -161,6 +178,30 @@ def build_daily_selection(
             if reason:
                 _append_unique(bucket["reasons"], reason, limit=5)
 
+    for flow in flow_rows:
+        sector = flow["sector"]
+        for leader in flow.get("leaders") or []:
+            symbol = str(leader.get("symbol") or "").strip()
+            if not _is_a_share(symbol):
+                continue
+            bucket = stock_buckets.setdefault(
+                symbol,
+                {
+                    "symbol": symbol,
+                    "name": str(leader.get("name") or symbol),
+                    "sector": sector,
+                    "news_score": 0.0,
+                    "risk_penalty": 0.0,
+                    "evidence_titles": [],
+                    "reasons": [],
+                },
+            )
+            money_score = _bounded(_safe_float(flow.get("fund_flow_score")), 0.0, 100.0)
+            leader_score = _bounded(_safe_float(leader.get("money_flow_score")), 0.0, 100.0)
+            bucket["news_score"] += money_score * 0.45 + leader_score * 0.35
+            _append_unique(bucket["evidence_titles"], f"{sector}主力资金净流入靠前", limit=5)
+            _append_unique(bucket["reasons"], f"{sector}板块大资金流入强，板块内资金排名靠前", limit=5)
+
     stocks: List[StockSelection] = []
     affordability_filtered = 0
     for symbol, bucket in stock_buckets.items():
@@ -176,14 +217,24 @@ def build_daily_selection(
             continue
         news_score = _bounded(bucket["news_score"], 0.0, 100.0)
         risk_penalty = _bounded(bucket["risk_penalty"], 0.0, 100.0)
+        fundamental = (fundamentals_by_symbol or {}).get(symbol) or {}
+        fundamental_score = _bounded(_safe_float(fundamental.get("score"), 50.0), 0.0, 100.0)
+        money_flow_score = _bounded(_safe_float((flow_by_symbol.get(symbol) or {}).get("fund_flow_score")), 0.0, 100.0)
         score = _bounded(
-            news_score * 0.45 + tape.tape_score * 0.30 + trend.alignment_score * 0.20 - risk_penalty * 0.35,
+            news_score * 0.34
+            + tape.tape_score * 0.24
+            + trend.alignment_score * 0.16
+            + fundamental_score * 0.14
+            + money_flow_score * 0.16
+            - risk_penalty * 0.35,
             0.0,
             100.0,
         )
         reasons = list(bucket["reasons"])
         reasons.append(tape.interpretation)
         reasons.append(trend.interpretation)
+        if fundamental.get("reason"):
+            reasons.append(str(fundamental.get("reason")))
         entry_plan = build_entry_plan(history_by_symbol.get(symbol), tape=tape, trade_date=trade_date)
         stocks.append(
             StockSelection(
@@ -201,11 +252,14 @@ def build_daily_selection(
                 trend=trend,
                 affordability=affordability,
                 entry_plan=entry_plan,
+                fundamental_score=round(fundamental_score, 2),
+                fundamental_model=str(fundamental.get("model") or ""),
+                money_flow_score=round(money_flow_score, 2),
             )
         )
 
     stocks.sort(key=lambda row: (-row.score, row.symbol))
-    sector_rows = _rank_sectors(news_rows, stocks=stocks, max_sectors=max_sectors)
+    sector_rows = _rank_sectors(news_rows, stocks=stocks, flows=flow_rows, max_sectors=max_sectors)
     return DailySelectionResult(
         trade_date=trade_date or _infer_latest_date(history_by_symbol),
         sectors=sector_rows,
@@ -214,6 +268,7 @@ def build_daily_selection(
             **_summarize_news_impact(news_rows),
             "affordability_filtered": affordability_filtered,
             "cash_constraint_enabled": available_cash_cny is not None,
+            "fund_flow_sector_count": len(flow_rows),
         },
     )
 
@@ -549,10 +604,12 @@ def _rank_sectors(
     *,
     max_sectors: int,
     stocks: Optional[List[StockSelection]] = None,
+    flows: Optional[List[Dict[str, Any]]] = None,
 ) -> List[SectorSelection]:
     stock_by_sector: Dict[str, List[StockSelection]] = {}
     for stock in stocks or []:
         stock_by_sector.setdefault(stock.sector, []).append(stock)
+    flow_by_sector = {row["sector"]: row for row in flows or []}
 
     buckets: Dict[str, Dict[str, Any]] = {}
     for row in rows:
@@ -566,6 +623,11 @@ def _rank_sectors(
         bucket["risk"] += max(0.0, -impact)
         bucket["relevance_sum"] += float(row.get("market_relevance") or 0.0)
         _append_unique(bucket["titles"], row["title"], limit=5)
+    for flow in flows or []:
+        buckets.setdefault(
+            flow["sector"],
+            {"sector": flow["sector"], "count": 0, "impact_sum": 0.0, "risk": 0.0, "relevance_sum": 0.0, "titles": []},
+        )
     out: List[SectorSelection] = []
     for bucket in buckets.values():
         count = bucket["count"]
@@ -577,11 +639,14 @@ def _rank_sectors(
             sum(stock.tape_score for stock in sector_stocks[:5]) / min(len(sector_stocks), 5)
             if sector_stocks else 0.0
         )
+        flow = flow_by_sector.get(bucket["sector"], {})
+        fund_flow_score = _bounded(_safe_float(flow.get("fund_flow_score")), 0.0, 100.0)
         heat = _bounded(
             count * 11.0
             + max(0.0, avg_impact) * 0.55
             + avg_relevance * 18.0
             + tape_confirm * 0.38
+            + fund_flow_score * 0.42
             + len(confirmed) * 4.0
             - bucket["risk"] * 0.35,
             0.0,
@@ -596,11 +661,53 @@ def _rank_sectors(
                 risk_penalty=round(bucket["risk"], 2),
                 tape_confirm_score=round(tape_confirm, 2),
                 confirmed_stock_count=len(confirmed),
+                fund_flow_score=round(fund_flow_score, 2),
+                main_net_inflow_cny=flow.get("main_net_inflow_cny"),
+                fund_flow_rank=flow.get("rank"),
                 evidence_titles=list(bucket["titles"]),
             )
         )
     out.sort(key=lambda row: (-row.heat_score, row.sector))
     return out[:max_sectors]
+
+
+def _normalize_sector_fund_flows(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    out: List[Dict[str, Any]] = []
+    for idx, row in enumerate(rows, start=1):
+        sector = str(row.get("sector") or row.get("name") or "").strip()
+        if not sector:
+            continue
+        amount = _safe_float(row.get("main_net_inflow_cny", row.get("net_inflow_cny")))
+        change_pct = _safe_float(row.get("change_pct"))
+        rank = int(_safe_float(row.get("rank"), idx) or idx)
+        base = _bounded(72.0 - (rank - 1) * 4.5, 0.0, 72.0)
+        amount_score = _bounded(math.log10(abs(amount) + 10.0) * 5.5, 0.0, 22.0) if amount > 0 else 0.0
+        change_score = _bounded(change_pct * 2.0, -10.0, 10.0)
+        score = _bounded(base + amount_score + change_score, 0.0, 100.0)
+        leaders = []
+        for leader in row.get("leaders") or []:
+            symbol = str(leader.get("symbol") or "").strip()
+            if not _is_a_share(symbol):
+                continue
+            leader_flow = _safe_float(leader.get("main_net_inflow_cny", leader.get("net_inflow_cny")))
+            leader_score = _bounded(
+                score * 0.7 + (math.log10(abs(leader_flow) + 10.0) * 4.0 if leader_flow > 0 else 0.0),
+                0.0,
+                100.0,
+            )
+            leaders.append({**leader, "symbol": symbol, "money_flow_score": round(leader_score, 2)})
+        out.append(
+            {
+                "sector": sector,
+                "rank": rank,
+                "main_net_inflow_cny": round(amount, 2),
+                "change_pct": round(change_pct, 4),
+                "fund_flow_score": round(score, 2),
+                "leaders": leaders,
+            }
+        )
+    out.sort(key=lambda row: (-_safe_float(row.get("fund_flow_score")), int(row.get("rank") or 999)))
+    return out
 
 
 def _news_impact_score(item: RawNewsItem) -> float:
@@ -844,7 +951,7 @@ def _attention_label(score: float, tape: TapeAnalysis, risk_penalty: float) -> s
         return "risk_watch"
     if score >= 78 and tape.tape_score >= 65:
         return "priority_watch"
-    if score >= 62:
+    if score >= 60:
         return "watch"
     return "observe"
 
@@ -861,6 +968,29 @@ def _append_unique(target: List[str], value: str, *, limit: int) -> None:
 
 def _bounded(value: float, lo: float, hi: float) -> float:
     return max(lo, min(hi, value))
+
+
+def _safe_float(value: Any, default: float = 0.0) -> float:
+    try:
+        if value is None:
+            return default
+        if isinstance(value, str):
+            text = value.strip().replace(",", "")
+            if not text or text in {"-", "--"}:
+                return default
+            multiplier = 1.0
+            if text.endswith("亿"):
+                multiplier = 100_000_000.0
+                text = text[:-1]
+            elif text.endswith("万"):
+                multiplier = 10_000.0
+                text = text[:-1]
+            if text.endswith("%"):
+                text = text[:-1]
+            return float(text) * multiplier
+        return float(value)
+    except (TypeError, ValueError):
+        return default
 
 
 def _infer_latest_date(history_by_symbol: Dict[str, pd.DataFrame]) -> str:

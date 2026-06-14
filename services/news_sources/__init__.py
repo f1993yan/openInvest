@@ -97,7 +97,7 @@ def fetch_all(
     if domestic:
         try:
             from services.news_sources.domestic_news import (
-                fetch_eastmoney_news, fetch_cls_news, fetch_sina_news,
+                fetch_eastmoney_news, fetch_sina_news,
                 fetch_xueqiu_news, fetch_wallstreetcn_news,
             )
             from services.news_sources.domestic_hot_news import fetch_baidu_hot_news
@@ -105,8 +105,14 @@ def fetch_all(
             tasks.append({"fn": fetch_sina_news, "kwargs": {"max_items": max_per_source}, "label": "sina"})
             tasks.append({"fn": fetch_wallstreetcn_news, "kwargs": {"max_items": max_per_source}, "label": "wallstreetcn"})
             tasks.append({"fn": fetch_baidu_hot_news, "kwargs": {"max_items": max_per_source}, "label": "baidu_hot"})
+            # 财联社使用直接 API，不依赖 Playwright。
+            try:
+                from services.news_sources.cls_news import fetch_cls_telegraph
+                tasks.append({"fn": fetch_cls_telegraph, "kwargs": {"max_items": max_per_source}, "label": "cls"})
+            except Exception:
+                pass
+            # 雪球是 Playwright 源，仅在显式启用浏览器源时加载。
             if os.getenv("INVEST_NEWS_BROWSER_SOURCES", "1") == "1":
-                tasks.append({"fn": fetch_cls_news, "kwargs": {"max_items": max_per_source}, "label": "cls"})
                 tasks.append({"fn": fetch_xueqiu_news, "kwargs": {"query": "A股", "max_items": max_per_source}, "label": "xueqiu"})
         except Exception as e:
             log.warning(f"国内新闻源加载失败: {e}")
