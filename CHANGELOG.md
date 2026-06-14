@@ -15,6 +15,11 @@
 * **daily-selection:** 增强板块大资金流向兜底数据源，并过滤资金不足以买入一手的候选股票。
 * **weekend-news:** 周末新闻抓取流程改为直接调用 Python 逻辑，减少对本地 HTTP 后端端口的依赖。
 
+### Bug Fixes
+
+* **monitor-window:** 关闭桌面主窗口时同步停止本项目后台监控、调度、周末新闻和日度选股任务，避免窗口关闭后继续抓新闻。
+* **weekend-news:** 旧版 Windows 消息框默认关闭，周末新闻结果只写入本地文件并由主窗口悬浮卡片展示；需要恢复时可设置 `INVEST_WEEKEND_NEWS_POPUP=1`。
+
 ### Security
 
 * **repo:** 保持 API key、持仓配置、账户数据库、生成数据和日志文件在 git 忽略范围内，本次提交不包含这些敏感/本地数据文件。

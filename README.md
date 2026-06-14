@@ -107,6 +107,8 @@ backend_err.log
 - 打开独立桌面监控窗口，不再默认打开网页预览。
 - 跳过可选 HTTP 后端，窗口通过本地快照文件和 Python 直接调用通信。
 
+关闭桌面主窗口时，会同步停止同一项目目录下由启动脚本拉起的 `jobs.market_monitor`、`scheduler.runner`、周末新闻和日度选股后台任务，避免窗口关闭后继续抓新闻或跑选股。
+
 可移植环境变量：
 
 ```powershell
@@ -227,6 +229,7 @@ uv run pytest tests/test_gold_price.py tests/test_backtest_no_lookahead.py tests
 - 点击“我已遵循买入/卖出”会即时拉取最新价格记账，不使用窗口缓存价格。
 - 底部展示日度选股结果；点击候选标的会弹出悬浮详情，说明入选原因，并可加入关注列表。
 - 周末新闻通过主窗口按钮打开，以相同风格的悬浮卡片展示，按影响力排序。
+- 周末新闻旧版 Windows 弹框默认关闭；只有显式设置 `INVEST_WEEKEND_NEWS_POPUP=1` 才会恢复。
 
 窗口状态字段尽量使用通俗中文：收益路径表示“1/5/20 日可能涨跌范围”，风险提示表示“ATR 波动、下行风险和防守惩罚”，校准信息表示“历史相似样本命中率和样本数量”。
 
@@ -250,6 +253,8 @@ uv run pytest tests/test_gold_price.py tests/test_backtest_no_lookahead.py tests
 - 调用 LLM 提炼 A 股板块、主题、催化和候选龙头；
 - 输出机会列表和需要委员会复核的标的；
 - 运行结束后写入本地结果，由桌面窗口的周末新闻悬浮卡片展示。
+
+默认不会再弹出独立 Windows 消息框，避免和主窗口的稳定展示重复。
 
 ## 日度选股
 

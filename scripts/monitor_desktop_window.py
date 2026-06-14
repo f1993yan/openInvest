@@ -10,7 +10,9 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import os
 import queue
+import subprocess
 import sys
 import threading
 import tkinter as tk
@@ -24,6 +26,13 @@ ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_SNAPSHOT = ROOT / "data" / "market_monitor" / "latest_window.json"
 WEEKEND_NEWS_DIR = ROOT / "data" / "weekend_news"
 DAILY_SELECTION_LATEST = ROOT / "data" / "daily_stock_selection" / "latest.json"
+BACKGROUND_PROCESS_PATTERNS = (
+    "jobs.market_monitor",
+    "scheduler.runner",
+    "jobs.weekend_news_crawl",
+    "jobs.daily_stock_selection",
+    "scripts.daily_stock_selection",
+)
 BOARD_BG = "#f3f6fb"
 PANEL_BG = "#ffffff"
 HEADER_BG = "#2f80ed"
@@ -100,6 +109,42 @@ def _safe_num(value: Any, default: float = 0.0) -> float:
         return float(value)
     except (TypeError, ValueError):
         return default
+
+
+def _stop_background_services() -> None:
+    """Stop OpenInvest background workers started for the desktop window."""
+    if os.name != "nt":
+        return
+    root = str(ROOT).replace("'", "''").lower()
+    patterns = ",".join(f"'{pattern}'" for pattern in BACKGROUND_PROCESS_PATTERNS)
+    script = f"""
+$root = '{root}'
+$patterns = @({patterns})
+$all = @(Get-CimInstance Win32_Process)
+$targets = @($all | Where-Object {{
+  $cmd = ($_.CommandLine + '').ToLowerInvariant()
+  $exe = ($_.ExecutablePath + '').ToLowerInvariant()
+  $name = ($_.Name + '').ToLowerInvariant()
+  ($name -match '^(cmd|uv|uvicorn|python|pythonw)\\.exe$') -and
+  ($cmd.Contains($root) -or $exe.Contains($root)) -and
+  ($patterns | Where-Object {{ $cmd.Contains($_) }})
+}})
+foreach ($target in $targets) {{
+  Stop-Process -Id $target.ProcessId -Force -ErrorAction SilentlyContinue
+}}
+foreach ($target in $targets) {{
+  Wait-Process -Id $target.ProcessId -Timeout 5 -ErrorAction SilentlyContinue
+}}
+"""
+    subprocess.run(
+        ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", script],
+        cwd=ROOT,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        check=False,
+        creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
+    )
 
 
 def _fmt_price(value: Any) -> str:
@@ -1055,6 +1100,7 @@ class MonitorWindow:
         self.root = tk.Tk()
         self.root.title("OpenInvest 监控窗口 - 演示" if demo else "OpenInvest 监控窗口")
         self.root.overrideredirect(True)
+        self.closing = False
         self._set_initial_geometry()
         self.root.configure(bg=BOARD_BG)
         self.drag_origin: Optional[tuple[int, int]] = None
@@ -1152,7 +1198,7 @@ class MonitorWindow:
             cursor="hand2",
         )
         self.pin_btn.pack(side=tk.RIGHT, fill=tk.Y)
-        close_btn.bind("<Button-1>", lambda _event: self.root.destroy())
+        close_btn.bind("<Button-1>", lambda _event: self._on_close())
         min_btn.bind("<Button-1>", lambda _event: self._minimize())
         self.pin_btn.bind("<Button-1>", lambda _event: self._toggle_pin())
         close_btn.bind("<Enter>", lambda _event: close_btn.configure(bg="#e5484d", fg="#ffffff"))
@@ -1266,12 +1312,32 @@ class MonitorWindow:
         self.pin_btn.configure(fg=BLUE if self.pinned else MUTED)
 
     def start(self) -> None:
+        self.root.protocol("WM_DELETE_WINDOW", self._on_close)
         self.refresh()
         self._watch_snapshot_changes()
         self._poll_analysis_queue()
         self.root.mainloop()
 
+    def _on_close(self) -> None:
+        if self.closing:
+            return
+        self.closing = True
+        self.status_text.set("正在停止后台任务...")
+        if not self.demo:
+            threading.Thread(target=self._shutdown_and_destroy, daemon=True).start()
+        else:
+            self.root.destroy()
+
+    def _shutdown_and_destroy(self) -> None:
+        _stop_background_services()
+        try:
+            self.root.after(0, self.root.destroy)
+        except Exception:
+            pass
+
     def _watch_snapshot_changes(self) -> None:
+        if self.closing:
+            return
         signature = self._watched_file_signature()
         if self.watched_mtime_signature and signature != self.watched_mtime_signature:
             self.refresh()
@@ -2133,6 +2199,8 @@ class MonitorWindow:
             self.analysis_queue.put((symbol, "error", {"success": False, "symbol": symbol, "error": str(exc)}))
 
     def _poll_analysis_queue(self) -> None:
+        if self.closing:
+            return
         while True:
             try:
                 symbol, _status, result = self.analysis_queue.get_nowait()

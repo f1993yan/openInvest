@@ -750,8 +750,10 @@ def run() -> Dict[str, Any]:
     report_file.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
     log.info(f"最终报告: {report_file}")
 
-    if os.getenv("INVEST_WEEKEND_NEWS_POPUP", "1") != "0":
+    if os.getenv("INVEST_WEEKEND_NEWS_POPUP", "0") == "1":
         send_weekend_news_popup(report)
+    else:
+        log.info("周末新闻弹框已关闭；报告已写入本地文件，等待桌面窗口读取展示。")
 
     # 简要日志
     action_count = sum(

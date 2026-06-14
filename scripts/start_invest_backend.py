@@ -20,6 +20,9 @@ PROCESS_PATTERNS = (
     "backend.server:app",
     "jobs.market_monitor",
     "scheduler.runner",
+    "jobs.weekend_news_crawl",
+    "jobs.daily_stock_selection",
+    "scripts.daily_stock_selection",
     "scripts.monitor_desktop_window",
 )
 
