@@ -2,8 +2,8 @@
 
 The market monitor writes ``data/market_monitor/latest_window.json`` after each
 round. This Tkinter window reads that snapshot, refreshes in place, and shakes
-when a new action-required state appears. Clicking a row opens a dialog and runs
-the latest committee analysis for that symbol in a background thread.
+when a new action-required state appears. Double-clicking a row opens a dialog
+and runs the latest committee analysis for that symbol in a background thread.
 """
 from __future__ import annotations
 
@@ -1147,6 +1147,14 @@ class MonitorWindow:
         style.configure("HeaderTitle.TLabel", background=BOARD_BG, foreground=TEXT, font=("Microsoft YaHei UI", 12, "bold"))
         style.configure("HeaderMeta.TLabel", background=BOARD_BG, foreground=MUTED, font=("Microsoft YaHei UI", 9))
         style.configure("Hint.TLabel", background=BOARD_BG, foreground=MUTED, font=("Microsoft YaHei UI", 9))
+        style.configure(
+            "Analysis.Horizontal.TProgressbar",
+            troughcolor=LINE,
+            background=BLUE,
+            bordercolor=PANEL_BG,
+            lightcolor=BLUE,
+            darkcolor=BLUE,
+        )
 
         titlebar = tk.Frame(self.root, bg=PANEL_BG, height=34)
         titlebar.pack(fill=tk.X)
@@ -1679,13 +1687,13 @@ class MonitorWindow:
         tk.Label(bottom, text=f"持 {_fmt_holding_lots(row)}", bg=bg, fg=MUTED, font=("Microsoft YaHei UI", 8)).pack(side=tk.RIGHT, padx=(0, 10))
 
         for widget in (card, top, mid, bottom):
-            widget.bind("<Button-1>", lambda _event, s=symbol: self._open_analysis_dialog(s))
+            widget.bind("<Double-Button-1>", lambda _event, s=symbol: self._open_analysis_dialog(s))
         for widget in card.winfo_children():
             if widget is trade_bar:
                 continue
-            widget.bind("<Button-1>", lambda _event, s=symbol: self._open_analysis_dialog(s))
+            widget.bind("<Double-Button-1>", lambda _event, s=symbol: self._open_analysis_dialog(s))
             for nested in widget.winfo_children():
-                nested.bind("<Button-1>", lambda _event, s=symbol: self._open_analysis_dialog(s))
+                nested.bind("<Double-Button-1>", lambda _event, s=symbol: self._open_analysis_dialog(s))
                 nested.bind("<Enter>", lambda _event: self._set_hover_stack("stocks"))
                 nested.bind("<MouseWheel>", lambda event: self._wheel_stock_stack(event))
         return card
@@ -2161,6 +2169,24 @@ class MonitorWindow:
         tk.Label(summary_bottom, text=f"卖 {_exit_summary(row)}", bg=_card_bg(row), fg=MUTED, font=("Microsoft YaHei UI", 8)).pack(side=tk.LEFT, padx=(12, 0))
         tk.Label(summary_bottom, text=f"基 {float(_safe_num(fundamental.get('score'), 50)):.0f}", bg=_card_bg(row), fg=MUTED, font=("Microsoft YaHei UI", 8)).pack(side=tk.RIGHT)
 
+        progress_wrap = tk.Frame(body, bg=PANEL_BG, padx=12, pady=10)
+        progress_wrap.pack(fill=tk.X, pady=(12, 0))
+        tk.Label(
+            progress_wrap,
+            text="正在获取最新价格并运行委员会分析",
+            bg=PANEL_BG,
+            fg=BLUE,
+            font=("Microsoft YaHei UI", 9, "bold"),
+            anchor="w",
+        ).pack(fill=tk.X)
+        progress = ttk.Progressbar(
+            progress_wrap,
+            mode="indeterminate",
+            style="Analysis.Horizontal.TProgressbar",
+        )
+        progress.pack(fill=tk.X, pady=(8, 0))
+        progress.start(12)
+
         text = tk.Text(
             body,
             wrap=tk.WORD,
@@ -2176,10 +2202,11 @@ class MonitorWindow:
         )
         text.pack(fill=tk.BOTH, expand=True, pady=(12, 0))
         text.insert(tk.END, _snapshot_detail(row))
-        text.insert(tk.END, "\n\n===== 后台任务 =====\n正在获取最新价格并调用委员会，请稍候...\n")
         text.configure(state=tk.DISABLED)
         dialog._analysis_text = text  # type: ignore[attr-defined]
         dialog._analysis_status = status_label  # type: ignore[attr-defined]
+        dialog._analysis_progress = progress  # type: ignore[attr-defined]
+        dialog._analysis_progress_wrap = progress_wrap  # type: ignore[attr-defined]
 
         threading.Thread(
             target=self._analysis_worker,
@@ -2189,6 +2216,12 @@ class MonitorWindow:
 
     def _close_dialog(self, symbol: str, dialog: tk.Toplevel) -> None:
         self.dialogs.pop(symbol, None)
+        progress = getattr(dialog, "_analysis_progress", None)
+        if progress is not None:
+            try:
+                progress.stop()
+            except Exception:
+                pass
         dialog.destroy()
 
     def _analysis_worker(self, symbol: str, row: Dict[str, Any]) -> None:
@@ -2210,6 +2243,15 @@ class MonitorWindow:
             if dialog and dialog.winfo_exists() and result is not None:
                 text = getattr(dialog, "_analysis_text", None)
                 status_label = getattr(dialog, "_analysis_status", None)
+                progress = getattr(dialog, "_analysis_progress", None)
+                progress_wrap = getattr(dialog, "_analysis_progress_wrap", None)
+                if progress is not None:
+                    try:
+                        progress.stop()
+                    except Exception:
+                        pass
+                if progress_wrap is not None and progress_wrap.winfo_exists():
+                    progress_wrap.destroy()
                 if text is not None:
                     row = next((item for item in self.current_rows if item.get("symbol") == symbol), {})
                     text.configure(state=tk.NORMAL)

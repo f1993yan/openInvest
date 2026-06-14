@@ -103,7 +103,7 @@ backend_err.log
 
 - 停止同一项目目录下残留的旧 OpenInvest 进程，避免日志文件或窗口被占用。
 - 启动 `jobs.market_monitor`，由委员会任务、日度选股任务和周末新闻任务写入本地快照。
-- 启动 `scheduler.runner`，负责交易日 11:30 / 15:00 日度选股和其他定时任务。
+- 启动 `scheduler.runner`，负责交易日 11:30 和 15:00 日度选股及其他定时任务。
 - 打开独立桌面监控窗口，不再默认打开网页预览。
 - 跳过可选 HTTP 后端，窗口通过本地快照文件和 Python 直接调用通信。
 
@@ -258,7 +258,7 @@ uv run pytest tests/test_gold_price.py tests/test_backtest_no_lookahead.py tests
 
 ## 日度选股
 
-交易日选股任务在 11:30 和 15:00 运行，以天为单位寻找 A 股热门板块和候选标的。模型会综合：
+交易日选股任务在 11:30 和 15:00 运行，以天为单位寻找 A 股热门板块和候选标的。两次任务都会写入 `data/daily_stock_selection/latest.json`，主窗口会在文件更新后刷新底部选股按钮。模型会综合：
 
 - 国内新闻主题和事件催化；
 - 板块大资金流向；
