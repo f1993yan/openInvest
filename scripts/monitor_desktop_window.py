@@ -261,6 +261,37 @@ def _execute_user_trade_from_row(row: Dict[str, Any], lots: float) -> str:
     return f"已按最新价记账: {name} {trade.direction} {trade.units:.0f}股 @ {trade.price:.2f}"
 
 
+def _execute_user_trade_manual(symbol: str, direction: str, lots: int, lot_size: int = 100) -> str:
+    symbol = str(symbol or "").strip()
+    direction = str(direction or "").upper()
+    if not symbol:
+        raise ValueError("缺少标的代码")
+    if direction not in {"BUY", "SELL"}:
+        raise ValueError("方向必须是 BUY 或 SELL")
+    if lots <= 0:
+        raise ValueError("手数必须大于 0")
+    lot_size = max(1, int(_safe_num(lot_size, 100) or 100))
+    from jobs.market_monitor import fetch_sina_prices, load_config
+
+    price_info = fetch_sina_prices([symbol]).get(symbol) or {}
+    price = _safe_num(price_info.get("price"))
+    if price <= 0:
+        raise ValueError("无法获取最新现价，已取消记账")
+    from db.account_ledger import AccountLedger
+
+    ledger = AccountLedger()
+    ledger.ensure_initialized(load_config())
+    trade = ledger.apply_user_trade(
+        symbol=symbol,
+        direction=direction,
+        units=int(lots) * lot_size,
+        price=price,
+        note="monitor_window_manual_trade",
+    )
+    name = price_info.get("name") or symbol
+    return f"已按最新价记账: {name} {trade.direction} {trade.units:.0f}股 @ {trade.price:.2f}"
+
+
 def _fmt_pct(value: Any) -> str:
     return f"{_safe_num(value):+.2f}%"
 
@@ -336,6 +367,53 @@ def _load_config_snapshot(message: str = "", *, source_path: Optional[Path] = No
         "message": message,
         "source": "market_monitor_config",
     }
+
+
+def _trade_panel_rows() -> List[Dict[str, Any]]:
+    try:
+        from jobs.market_monitor import load_config
+        from db.account_ledger import AccountLedger, REAL_ACCOUNT
+
+        config = load_config()
+        ledger = AccountLedger()
+        ledger.ensure_initialized(config)
+        holding_by_symbol = {
+            str(item.get("symbol") or ""): item
+            for item in ledger.list_holdings(REAL_ACCOUNT)
+        }
+        merged: Dict[str, Dict[str, Any]] = {}
+        for source_name, items in (
+            ("持仓", config.get("holdings") or []),
+            ("关注", config.get("watchlist") or []),
+        ):
+            for item in items:
+                symbol = str(item.get("symbol") or "").strip()
+                if not symbol:
+                    continue
+                row = merged.setdefault(
+                    symbol,
+                    {
+                        "symbol": symbol,
+                        "name": item.get("name") or symbol,
+                        "source": source_name,
+                        "units": 0.0,
+                        "min_lot_size": int(_safe_num(item.get("min_lot_size"), 100) or 100),
+                    },
+                )
+                row["name"] = item.get("name") or row["name"]
+                row["source"] = "持仓" if source_name == "持仓" or row["source"] == "持仓" else "关注"
+                holding = holding_by_symbol.get(symbol) or {}
+                row["units"] = _safe_num(holding.get("units"))
+                row["min_lot_size"] = int(
+                    _safe_num(holding.get("min_lot_size"), row.get("min_lot_size") or item.get("min_lot_size") or 100)
+                    or 100
+                )
+        return sorted(
+            merged.values(),
+            key=lambda row: (0 if _safe_num(row.get("units")) > 0 else 1, str(row.get("symbol") or "")),
+        )
+    except Exception as exc:  # noqa: BLE001
+        return [{"symbol": "", "name": f"读取失败: {exc}", "source": "错误", "units": 0.0, "error": True}]
 
 
 def _file_timestamp(path: Optional[Path]) -> Optional[str]:
@@ -470,10 +548,16 @@ def _stock_priority_key(row: Dict[str, Any]) -> tuple[Any, ...]:
     state = str(row.get("state") or "")
     operation = row.get("operation") or {}
     verdict = str(operation.get("verdict") or "").upper()
+    status = str(operation.get("status") or state)
+    alert_score = _safe_num(operation.get("alert_score"))
+    confirmed = bool(operation.get("confirmed"))
     allocation = abs(_safe_num(operation.get("suggested_alloc_cny")))
     change = abs(_safe_num((row.get("price") or {}).get("change_pct")))
     return (
         STATE_PRIORITY.get(state, 99),
+        STATE_PRIORITY.get(status, 99),
+        -int(confirmed),
+        -alert_score,
         VERDICT_PRIORITY.get(verdict, 99),
         -allocation,
         -change,
@@ -657,6 +741,17 @@ def _card_bg(row: Dict[str, Any]) -> str:
     if tag == "trigger":
         return TRIGGER_BG
     return CARD_BG
+
+
+def _stack_layer_bg(row: Dict[str, Any]) -> str:
+    state = str(row.get("state") or "")
+    if state in {"action_required", "error"}:
+        return "#ffd8d2"
+    if state in {"trigger_confirmed", "watch_trigger"}:
+        return "#ffe4b5"
+    if state == "blocked":
+        return "#d7dde7"
+    return "#d7e8ff"
 
 
 def _change_color(row: Dict[str, Any]) -> str:
@@ -962,6 +1057,7 @@ class CircleButton(tk.Canvas):
         size: int = 52,
         color: str = BLUE,
         hover_color: str = "#2473df",
+        font: tuple[str, int, str] = ("Segoe UI", 18, "bold"),
     ) -> None:
         super().__init__(
             master,
@@ -977,6 +1073,7 @@ class CircleButton(tk.Canvas):
         self.size = size
         self.color = color
         self.hover_color = hover_color
+        self.font = font
         self._normal_image = self._make_image(self.color)
         self._hover_image = self._make_image(self.hover_color)
         self.bind("<Configure>", lambda _event: self._draw(self.color))
@@ -1023,7 +1120,7 @@ class CircleButton(tk.Canvas):
             height / 2,
             text=self.text,
             fill="#ffffff",
-            font=("Segoe UI", 18, "bold"),
+            font=self.font,
         )
 
 
@@ -1082,6 +1179,54 @@ class CashRatioBar(tk.Canvas):
         )
 
 
+def _scrollable_frame(parent: tk.Misc, *, bg: str = PANEL_BG) -> tuple[tk.Canvas, tk.Frame]:
+    shell = tk.Frame(parent, bg=bg)
+    shell.pack(fill=tk.BOTH, expand=True)
+    canvas = tk.Canvas(shell, bg=bg, highlightthickness=0, bd=0)
+    scrollbar = ttk.Scrollbar(
+        shell,
+        orient=tk.VERTICAL,
+        command=canvas.yview,
+        style="App.Vertical.TScrollbar",
+    )
+    content = tk.Frame(canvas, bg=bg)
+    window = canvas.create_window((0, 0), window=content, anchor="nw")
+    canvas.configure(yscrollcommand=scrollbar.set)
+    canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+    scrollbar.pack(side=tk.RIGHT, fill=tk.Y, padx=(4, 0))
+
+    def update_scrollregion(_event: Optional[tk.Event] = None) -> None:
+        canvas.configure(scrollregion=canvas.bbox("all"))
+
+    def update_width(event: tk.Event) -> None:
+        canvas.itemconfigure(window, width=event.width)
+
+    def wheel(event: tk.Event) -> str:
+        canvas.yview_scroll(-1 if event.delta > 0 else 1, "units")
+        return "break"
+
+    def bind_child_wheel(widget: tk.Misc) -> None:
+        try:
+            widget.bind("<MouseWheel>", wheel, add="+")
+            for child in widget.winfo_children():
+                bind_child_wheel(child)
+        except Exception:
+            return
+
+    def refresh_child_bindings() -> None:
+        if not canvas.winfo_exists():
+            return
+        bind_child_wheel(content)
+        canvas.after(500, refresh_child_bindings)
+
+    content.bind("<Configure>", update_scrollregion)
+    canvas.bind("<Configure>", update_width)
+    canvas.bind("<MouseWheel>", wheel)
+    content.bind("<MouseWheel>", wheel)
+    canvas.after(50, refresh_child_bindings)
+    return canvas, content
+
+
 class MonitorWindow:
     def __init__(
         self,
@@ -1119,8 +1264,11 @@ class MonitorWindow:
         self.news_popover_body: Optional[tk.Frame] = None
         self.news_cards: List[Dict[str, Any]] = []
         self.news_source: str = ""
+        self.trade_popover: Optional[tk.Frame] = None
+        self.trade_scroll_canvas: Optional[tk.Canvas] = None
         self.selection_popover: Optional[tk.Frame] = None
         self.selection_popover_symbol: Optional[str] = None
+        self.selection_scroll_canvas: Optional[tk.Canvas] = None
         self.filter_text = tk.StringVar(value="")
         self.status_text = tk.StringVar(value="等待监控快照")
         self.last_update_text = tk.StringVar(value="更新 -")
@@ -1147,6 +1295,18 @@ class MonitorWindow:
         style.configure("HeaderTitle.TLabel", background=BOARD_BG, foreground=TEXT, font=("Microsoft YaHei UI", 12, "bold"))
         style.configure("HeaderMeta.TLabel", background=BOARD_BG, foreground=MUTED, font=("Microsoft YaHei UI", 9))
         style.configure("Hint.TLabel", background=BOARD_BG, foreground=MUTED, font=("Microsoft YaHei UI", 9))
+        style.configure(
+            "App.Vertical.TScrollbar",
+            gripcount=0,
+            background="#c9d6e6",
+            darkcolor="#c9d6e6",
+            lightcolor="#c9d6e6",
+            troughcolor="#eef2f7",
+            bordercolor="#eef2f7",
+            arrowcolor="#c9d6e6",
+            width=8,
+            relief=tk.FLAT,
+        )
         style.configure(
             "Analysis.Horizontal.TProgressbar",
             troughcolor=LINE,
@@ -1292,9 +1452,20 @@ class MonitorWindow:
             self.root,
             text="↻",
             command=self.refresh,
-            size=46,
+            size=44,
+            font=("Segoe UI Symbol", 16, "bold"),
         )
         self.refresh_fab.place(relx=1.0, rely=1.0, x=-16, y=-16, anchor="se")
+        self.trade_fab = CircleButton(
+            self.root,
+            text="+",
+            command=self._toggle_trade_popover,
+            size=44,
+            color="#111827",
+            hover_color="#374151",
+            font=("Segoe UI", 17, "bold"),
+        )
+        self.trade_fab.place(relx=1.0, rely=1.0, x=-68, y=-16, anchor="se")
 
     def _start_drag(self, event: tk.Event) -> None:
         self.drag_origin = (event.x_root - self.root.winfo_x(), event.y_root - self.root.winfo_y())
@@ -1404,6 +1575,8 @@ class MonitorWindow:
 
         if self.stock_content_signature and stock_signature != self.stock_content_signature:
             self.stock_page_index = 0
+        elif payload.get("generated_at") != (self.last_payload_signature[0] if self.last_payload_signature else None):
+            self.stock_page_index = 0
         self.stock_content_signature = stock_signature
         self.last_payload_signature = payload_signature
         self.current_rows = rows
@@ -1434,6 +1607,10 @@ class MonitorWindow:
             self.refresh_fab._draw(self.refresh_fab.color)
             self.root.tk.call("raise", self.refresh_fab._w)
             self.refresh_fab.place(relx=1.0, rely=1.0, x=-16, y=-16, anchor="se")
+        if hasattr(self, "trade_fab"):
+            self.trade_fab._draw(self.trade_fab.color)
+            self.root.tk.call("raise", self.trade_fab._w)
+            self.trade_fab.place(relx=1.0, rely=1.0, x=-68, y=-16, anchor="se")
 
     def _on_canvas_configure(self, event: tk.Event) -> None:
         self.canvas.itemconfigure(self.cards_window, width=event.width)
@@ -1443,6 +1620,22 @@ class MonitorWindow:
         self.canvas.configure(scrollregion=self.canvas.bbox("all"))
 
     def _on_mousewheel(self, event: tk.Event) -> None:
+        if (
+            self.selection_popover
+            and self.selection_popover.winfo_exists()
+            and self.selection_scroll_canvas is not None
+            and self._widget_inside(event.widget, self.selection_popover)
+        ):
+            self._scroll_canvas(self.selection_scroll_canvas, event)
+            return
+        if (
+            self.trade_popover
+            and self.trade_popover.winfo_exists()
+            and self.trade_scroll_canvas is not None
+            and self._widget_inside(event.widget, self.trade_popover)
+        ):
+            self._scroll_canvas(self.trade_scroll_canvas, event)
+            return
         if self.hover_stack == "news":
             self._change_news_page(-1 if event.delta > 0 else 1)
             return
@@ -1451,6 +1644,30 @@ class MonitorWindow:
         rows = self._filtered_rows()
         if len(rows) > 1:
             self._change_stock_page(-1 if event.delta > 0 else 1)
+
+    def _widget_inside(self, widget: tk.Misc, ancestor: tk.Misc) -> bool:
+        cursor: Optional[tk.Misc] = widget
+        while cursor is not None:
+            if cursor == ancestor:
+                return True
+            try:
+                cursor = cursor.master
+            except Exception:
+                return False
+        return False
+
+    def _scroll_canvas(self, canvas: tk.Canvas, event: tk.Event) -> None:
+        if not canvas.winfo_exists():
+            return
+        bbox = canvas.bbox("all")
+        if not bbox:
+            return
+        visible_height = max(canvas.winfo_height(), 1)
+        content_height = max(bbox[3] - bbox[1], 1)
+        if content_height <= visible_height:
+            return
+        step = -1 if event.delta > 0 else 1
+        canvas.yview_scroll(step, "units")
 
     def _filtered_rows(self) -> List[Dict[str, Any]]:
         query = self.filter_text.get().strip().lower()
@@ -1473,7 +1690,7 @@ class MonitorWindow:
         rows = self._filtered_rows()
         if rows:
             self.stock_page_index %= len(rows)
-            self._create_stack_layers(self.cards_frame, len(rows))
+            self._create_stack_layers(self.cards_frame, rows, self.stock_page_index)
             stage = self._create_card_stage(self.cards_frame, STOCK_CARD_STAGE_HEIGHT, pady=(0, 6))
             card = self._create_card(rows[self.stock_page_index], parent=stage, managed=False)
             self._place_card(stage, card, slide_step)
@@ -1543,15 +1760,25 @@ class MonitorWindow:
 
         step()
 
-    def _create_stack_layers(self, parent: tk.Misc, count: int) -> None:
+    def _create_stack_layers(self, parent: tk.Misc, rows: List[Dict[str, Any]], index: int) -> None:
+        count = len(rows)
         if count <= 1:
             return
-        back = tk.Frame(parent, bg="#dce6f5", height=6)
-        back.pack(fill=tk.X, padx=12, pady=(3, 0))
-        back.pack_propagate(False)
-        middle = tk.Frame(parent, bg="#e7eef8", height=5)
-        middle.pack(fill=tk.X, padx=6)
-        middle.pack_propagate(False)
+        layer_count = min(4, count - 1)
+        for layer in range(layer_count, 0, -1):
+            row = rows[(index + layer) % count]
+            frame = tk.Frame(parent, bg=_stack_layer_bg(row), height=max(4, 8 - layer))
+            frame.pack(fill=tk.X, padx=layer * 5, pady=(1 if layer == layer_count else 0, 0))
+            frame.pack_propagate(False)
+
+    def _create_neutral_stack_layers(self, parent: tk.Misc, count: int) -> None:
+        if count <= 1:
+            return
+        for layer in range(min(4, count - 1), 0, -1):
+            color = "#dce6f5" if layer % 2 else "#e7eef8"
+            frame = tk.Frame(parent, bg=color, height=max(4, 8 - layer))
+            frame.pack(fill=tk.X, padx=layer * 5, pady=(1 if layer == min(4, count - 1) else 0, 0))
+            frame.pack_propagate(False)
 
     def _create_pager(
         self,
@@ -1865,13 +2092,16 @@ class MonitorWindow:
         close_btn.pack(side=tk.RIGHT)
         close_btn.bind("<Button-1>", lambda _event: self._close_selection_popover())
 
-        self._render_selection_reason(panel, stock)
+        action_bar = tk.Frame(panel, bg=PANEL_BG)
+        action_bar.pack(fill=tk.X, side=tk.BOTTOM, pady=(8, 0))
+        self.selection_scroll_canvas, content = _scrollable_frame(panel, bg=PANEL_BG)
+        self._render_selection_reason(content, action_bar, stock)
         pointer = tk.Canvas(popover, width=24, height=12, bg=BOARD_BG, highlightthickness=0, bd=0)
         pointer.create_polygon(2, 0, 22, 0, 12, 12, fill=LINE, outline=LINE)
         pointer.place(relx=0.5, rely=1.0, y=-1, anchor="n")
         self.root.update_idletasks()
         width = min(370, max(300, self.root.winfo_width() - 28))
-        height = 250
+        height = min(330, max(292, self.root.winfo_height() - 112))
         x = max(12, min(anchor.winfo_x(), self.root.winfo_width() - width - 12))
         y = max(120, self.selection_bar.winfo_y() - height - 8)
         popover.place(x=x, y=y, width=width, height=height)
@@ -1883,8 +2113,180 @@ class MonitorWindow:
             self.selection_popover.destroy()
         self.selection_popover = None
         self.selection_popover_symbol = None
+        self.selection_scroll_canvas = None
 
-    def _render_selection_reason(self, body: tk.Frame, stock: Dict[str, Any]) -> None:
+    def _toggle_trade_popover(self) -> None:
+        if self.trade_popover and self.trade_popover.winfo_exists():
+            self._close_trade_popover()
+            return
+        self._open_trade_popover()
+
+    def _open_trade_popover(self) -> None:
+        self._close_trade_popover()
+        popover = tk.Frame(self.root, bg=LINE, padx=1, pady=1)
+        self.trade_popover = popover
+        panel = tk.Frame(popover, bg=PANEL_BG, padx=10, pady=8)
+        panel.pack(fill=tk.BOTH, expand=True)
+        top = tk.Frame(panel, bg=PANEL_BG)
+        top.pack(fill=tk.X)
+        tk.Label(
+            top,
+            text="手动记账",
+            bg=PANEL_BG,
+            fg=TEXT,
+            font=("Microsoft YaHei UI", 10, "bold"),
+        ).pack(side=tk.LEFT)
+        close_btn = tk.Label(top, text="×", bg=PANEL_BG, fg=MUTED, font=("Segoe UI", 12), width=2, cursor="hand2")
+        close_btn.pack(side=tk.RIGHT)
+        close_btn.bind("<Button-1>", lambda _event: self._close_trade_popover())
+
+        header = tk.Frame(panel, bg=PANEL_BG)
+        header.pack(fill=tk.X, pady=(8, 2), padx=(0, 9))
+        widths = (128, 54, 82, 44, 52)
+        for idx, (text, width) in enumerate((("标的", 128), ("买/卖", 54), ("手数", 82), ("持仓", 44), ("", 52))):
+            header.grid_columnconfigure(idx, minsize=width)
+            tk.Label(
+                header,
+                text=text,
+                bg=PANEL_BG,
+                fg=MUTED,
+                font=("Microsoft YaHei UI", 8, "bold"),
+                anchor="w",
+            ).grid(row=0, column=idx, sticky="ew")
+
+        self.trade_scroll_canvas, rows_frame = _scrollable_frame(panel, bg=PANEL_BG)
+        rows = _trade_panel_rows() if not self.demo else [
+            {"symbol": "002185", "name": "华天科技", "source": "持仓", "units": 300},
+            {"symbol": "000001", "name": "示例标的2", "source": "关注", "units": 0},
+        ]
+        if not rows:
+            tk.Label(rows_frame, text="暂无持仓或关注标的", bg=PANEL_BG, fg=MUTED, font=("Microsoft YaHei UI", 9)).pack(fill=tk.X, pady=12)
+        for row in rows[:10]:
+            self._create_trade_row(rows_frame, row)
+
+        self.root.update_idletasks()
+        width = min(402, max(360, self.root.winfo_width() - 24))
+        height = min(300, max(148, 62 + max(2, min(len(rows), 8)) * 30))
+        x = max(10, self.root.winfo_width() - width - 10)
+        y = max(58, self.root.winfo_height() - height - 70)
+        popover.place(x=x, y=y, width=width, height=height)
+        popover.lift()
+        self.root.tk.call("raise", popover._w)
+
+    def _create_trade_row(self, parent: tk.Misc, row: Dict[str, Any]) -> None:
+        line = tk.Frame(parent, bg=PANEL_BG)
+        line.pack(fill=tk.X, pady=2)
+        for idx, width in enumerate((128, 54, 82, 44, 52)):
+            line.grid_columnconfigure(idx, minsize=width)
+        name = str(row.get("name") or row.get("symbol") or "-")
+        symbol = str(row.get("symbol") or "").strip()
+        lot_size = max(1, int(_safe_num(row.get("min_lot_size"), 100) or 100))
+        holding_lots = int(_safe_num(row.get("units")) // lot_size)
+        name_text = f"{name} {symbol}" if symbol else name
+        tk.Label(
+            line,
+            text=_short(name_text, 15),
+            bg=PANEL_BG,
+            fg=TEXT,
+            font=("Microsoft YaHei UI", 9),
+            anchor="w",
+        ).grid(row=0, column=0, sticky="ew", padx=(0, 4))
+        direction_var = tk.StringVar(value="买")
+        direction_btn = tk.Label(
+            line,
+            textvariable=direction_var,
+            bg="#eef3f8",
+            fg=TEXT,
+            font=("Microsoft YaHei UI", 8, "bold"),
+            width=5,
+            cursor="hand2",
+        )
+        direction_btn.grid(row=0, column=1, sticky="ew", padx=(0, 4), ipady=3)
+
+        def toggle_direction(_event: Optional[tk.Event] = None) -> str:
+            direction_var.set("卖" if direction_var.get() == "买" else "买")
+            direction_btn.configure(bg="#fff3f0" if direction_var.get() == "卖" else "#eef3f8")
+            return "break"
+
+        direction_btn.bind("<Button-1>", toggle_direction)
+        lots_var = tk.StringVar(value="1")
+        lot_box = tk.Frame(line, bg=PANEL_BG)
+        lot_box.grid(row=0, column=2, sticky="w", padx=(0, 4))
+        dec_btn = tk.Label(lot_box, text="<", bg=PANEL_BG, fg=MUTED, font=("Microsoft YaHei UI", 9), cursor="hand2", width=1)
+        dec_btn.pack(side=tk.LEFT)
+        lots_entry = tk.Entry(
+            lot_box,
+            textvariable=lots_var,
+            width=3,
+            bd=0,
+            bg="#eef2f7",
+            fg=TEXT,
+            justify=tk.CENTER,
+            font=("Microsoft YaHei UI", 9, "bold"),
+        )
+        lots_entry.pack(side=tk.LEFT, ipady=2)
+        inc_btn = tk.Label(lot_box, text=">", bg=PANEL_BG, fg=MUTED, font=("Microsoft YaHei UI", 9), cursor="hand2", width=1)
+        inc_btn.pack(side=tk.LEFT, padx=(0, 5))
+
+        def adjust_lots(step: int) -> str:
+            try:
+                current = int(lots_var.get().strip() or "0")
+            except ValueError:
+                current = 0
+            lots_var.set(str(max(1, current + step)))
+            return "break"
+
+        dec_btn.bind("<Button-1>", lambda _event: adjust_lots(-1))
+        inc_btn.bind("<Button-1>", lambda _event: adjust_lots(1))
+        status_var = tk.StringVar(value=f"{holding_lots}手" if holding_lots > 0 else "")
+        tk.Label(line, textvariable=status_var, bg=PANEL_BG, fg=MUTED, font=("Microsoft YaHei UI", 8), anchor="w").grid(row=0, column=3, sticky="ew")
+        exec_btn = tk.Label(
+            line,
+            text="执行",
+            bg=BLUE,
+            fg="#ffffff",
+            font=("Microsoft YaHei UI", 8, "bold"),
+            padx=8,
+            pady=2,
+            cursor="hand2",
+        )
+        exec_btn.grid(row=0, column=4, sticky="ew", padx=(4, 0), ipady=2)
+
+        def execute(_event: Optional[tk.Event] = None) -> str:
+            try:
+                if row.get("error"):
+                    raise ValueError(str(row.get("name") or "读取失败"))
+                raw = lots_var.get().strip()
+                if not raw.isdigit():
+                    raise ValueError("手数必须是整数")
+                lots = int(raw)
+                direction = "SELL" if direction_var.get() == "卖" else "BUY"
+                if direction == "SELL" and lots > holding_lots:
+                    raise ValueError(f"最多卖出 {holding_lots} 手")
+                if self.demo:
+                    message = f"演示模式: {name} {direction} {lots}手"
+                else:
+                    message = _execute_user_trade_manual(symbol, direction, lots, lot_size)
+                status_var.set("完成")
+                self.status_text.set(message)
+                self.refresh()
+                self._close_trade_popover()
+                return "break"
+            except Exception as exc:  # noqa: BLE001
+                status_var.set("失败")
+                self.status_text.set(f"记账失败: {exc}")
+                return "break"
+
+        exec_btn.bind("<Button-1>", execute)
+        lots_entry.bind("<Return>", execute)
+
+    def _close_trade_popover(self) -> None:
+        if self.trade_popover and self.trade_popover.winfo_exists():
+            self.trade_popover.destroy()
+        self.trade_popover = None
+        self.trade_scroll_canvas = None
+
+    def _render_selection_reason(self, body: tk.Frame, action_bar: tk.Frame, stock: Dict[str, Any]) -> None:
         tape = stock.get("tape") or {}
         trend = stock.get("trend") or {}
         plan = stock.get("entry_plan") or {}
@@ -1931,8 +2333,6 @@ class MonitorWindow:
         tk.Label(card, text=f"买点  {plan.get('action', '-')}  触发 {trigger}  止损 {stop}", bg=PANEL_BG, fg=UP_FG, font=("Microsoft YaHei UI", 8, "bold"), anchor="w").pack(fill=tk.X, pady=(7, 0))
         tk.Label(card, text=f"备注  {_short(plan.get('note'), 92) or '-'}", bg=PANEL_BG, fg=MUTED, font=("Microsoft YaHei UI", 8), justify=tk.LEFT, anchor="w", wraplength=330).pack(fill=tk.X, pady=(6, 0))
         status_var = tk.StringVar(value="")
-        action_bar = tk.Frame(body, bg=PANEL_BG)
-        action_bar.pack(fill=tk.X, pady=(8, 0))
         add_btn = tk.Label(
             action_bar,
             text="加入关注列表",
@@ -2015,7 +2415,7 @@ class MonitorWindow:
             tk.Label(body, text="暂无包含板块与龙头股的周末新闻总结", bg=BOARD_BG, fg=MUTED, font=("Microsoft YaHei UI", 10)).pack(expand=True)
             return
         self.news_page_index %= len(cards)
-        self._create_stack_layers(body, len(cards))
+        self._create_neutral_stack_layers(body, len(cards))
         stage = self._create_card_stage(body, NEWS_CARD_STAGE_HEIGHT, expand=True)
         card = self._create_news_card(stage, cards[self.news_page_index], managed=False)
         self._place_card(stage, card, slide_step)
