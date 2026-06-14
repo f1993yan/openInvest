@@ -1,6 +1,6 @@
 """openInvest 后端服务 — FastAPI + akshare 国内数据源
 
-启动: uv run uvicorn backend.server:app --host 0.0.0.0 --port 8766
+启动: uv run uvicorn backend.server:app --host 0.0.0.0 --port <port>
 
 端点:
   POST /api/committee   — 跑 4 角色委员会，返回完整投资备忘录
@@ -710,4 +710,5 @@ async def run_committee_api(req: CommitteeRequest):
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8766, log_level="info")
+    port = int(_os.getenv("INVEST_BACKEND_PORT", "0"))
+    uvicorn.run(app, host="127.0.0.1", port=port, log_level="info")

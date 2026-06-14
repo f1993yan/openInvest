@@ -8,6 +8,10 @@ from core.daily_stock_selector import (
     build_affordability,
     build_daily_selection,
     build_entry_plan,
+    build_risk_defense,
+    build_walk_forward_calibration,
+    estimate_path_distribution,
+    result_to_dict,
 )
 from services.news_sources import RawNewsItem
 
@@ -41,6 +45,22 @@ def _weak_df() -> pd.DataFrame:
     return pd.DataFrame(rows, columns=["Open", "High", "Low", "Close", "Volume"], index=idx)
 
 
+def _long_trend_df() -> pd.DataFrame:
+    rows = []
+    close = 10.0
+    for i in range(90):
+        open_price = close
+        drift = 0.08 + (0.02 if i % 7 in {0, 1, 2} else -0.01)
+        close = close + drift
+        high = close + 0.10
+        low = open_price - 0.05
+        volume = 1200 + i * 12
+        rows.append((open_price, high, low, close, volume))
+    rows[-1] = (close - 0.1, close + 0.55, close - 0.22, close + 0.48, 3600)
+    idx = pd.date_range("2026-03-01", periods=len(rows), freq="D")
+    return pd.DataFrame(rows, columns=["Open", "High", "Low", "Close", "Volume"], index=idx)
+
+
 def test_analyze_daily_tape_detects_breakout_and_volume_confirmation():
     tape = analyze_daily_tape(_trend_df())
 
@@ -67,6 +87,23 @@ def test_analyze_multi_period_trend_returns_daily_weekly_monthly_frames():
     assert trend.weekly.horizon == "weekly"
     assert trend.monthly.horizon == "monthly"
     assert trend.alignment in {"bullish_alignment", "partial_bullish", "mixed", "bearish_pressure"}
+
+
+def test_path_distribution_risk_defense_and_calibration_are_numeric():
+    df = _long_trend_df()
+    tape = analyze_daily_tape(df)
+    trend = analyze_multi_period_trend(df)
+
+    path = estimate_path_distribution(df)
+    risk = build_risk_defense(df, path_distribution=path)
+    calibration = build_walk_forward_calibration(df, tape=tape, trend=trend)
+
+    assert {window.horizon_days for window in path.windows} == {1, 5, 20}
+    assert 0 <= path.path_score <= 100
+    assert path.path_shape in {"steady_up", "volatile_breakout", "downside_tail", "range_bound", "mixed"}
+    assert risk.risk_level in {"low", "medium", "high"}
+    assert risk.risk_penalty >= 0
+    assert 0.62 <= calibration.confidence_multiplier <= 1.22
 
 
 def test_affordability_blocks_stock_when_cash_cannot_buy_one_lot():
@@ -175,6 +212,12 @@ def test_daily_selection_ranks_hot_a_share_leaders_only():
     assert result.news_impact_summary["negative"] == 1
     assert result.stocks[0].trend.daily.horizon == "daily"
     assert result.stocks[0].affordability.affordable is None
+    assert result.stocks[0].path_distribution.windows
+    assert result.stocks[0].risk_defense.risk_level in {"low", "medium", "high"}
+    assert result.stocks[0].model_edge_score >= 0
+    payload = result_to_dict(result)
+    assert "path_distribution" in payload["stocks"][0]
+    assert "calibration" in payload["stocks"][0]
 
 
 def test_daily_selection_filters_unaffordable_a_share_lots():

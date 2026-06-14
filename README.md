@@ -16,7 +16,8 @@ openInvest 的目标不是替你下单，而是把投资决策过程变得可追
 - 买卖点模型：计算回调买点、突破买点、止损、止盈、减仓、再入场、CVaR、ATR、收益风险比。
 - SMC 回测：支持 swing、BOS/CHOCH、FVG、流动性 sweep、ATR 止损、RR 止盈，A 股默认只做多。
 - PnL 快照：按日记录真实账户和委员会账户的收盘后盈亏，并生成基准对比图。
-- Web/API：提供委员会、账户、PnL、SMC 回测、系统规则、历史决策、数据源健康等接口。
+- 独立桌面窗口：实时展示标的状态、买卖准则、出场点、评分、推荐手数、现金占比、持仓手数、日度选股和周末新闻机会。
+- 可选 Web/API：保留委员会、账户、PnL、SMC 回测、系统规则、历史决策、数据源健康等接口，主要用于调试和外部集成。
 
 ## 数据源
 
@@ -92,17 +93,58 @@ backend_err.log
 
 ## 运行入口
 
-启动 GUI/API 桥，默认端口 `8765`：
+推荐直接双击 Windows 启动脚本：
+
+```powershell
+.\start-invest-backend.bat
+```
+
+默认启动内容：
+
+- 停止同一项目目录下残留的旧 OpenInvest 进程，避免日志文件或窗口被占用。
+- 启动 `jobs.market_monitor`，由委员会任务、日度选股任务和周末新闻任务写入本地快照。
+- 启动 `scheduler.runner`，负责交易日 11:30 / 15:00 日度选股和其他定时任务。
+- 打开独立桌面监控窗口，不再默认打开网页预览。
+- 跳过可选 HTTP 后端，窗口通过本地快照文件和 Python 直接调用通信。
+
+可移植环境变量：
+
+```powershell
+$env:OPENINVEST_ROOT="D:\path\to\OpenInvest"
+$env:OPENINVEST_PYTHON="D:\path\to\OpenInvest\.venv\Scripts\python.exe"
+$env:OPENINVEST_UV="uv"
+$env:OPENINVEST_LOG_DIR="logs"
+$env:OPENINVEST_RESTART_EXISTING="1"
+$env:OPENINVEST_START_WINDOW="1"
+```
+
+脚本参数：
+
+```powershell
+.\start-invest-backend.bat --no-window
+.\start-invest-backend.bat --no-restart
+.\start-invest-backend.bat --with-backend --port 8766
+```
+
+手动启动桌面窗口：
+
+```powershell
+uv run python -m scripts.launch_monitor_window
+```
+
+可选启动 GUI/API 桥，默认端口 `8765`：
 
 ```powershell
 uv run uvicorn connectors.web_api:app --host 127.0.0.1 --port 8765
 ```
 
-启动盘中监控使用的直接委员会后端，默认端口 `8766`：
+可选启动兼容 HTTP 后端，例如需要外部工具调用 `backend.server` 时：
 
 ```powershell
 uv run uvicorn backend.server:app --host 127.0.0.1 --port 8766
 ```
+
+正常桌面窗口和周末新闻流程不依赖 `8766`。`jobs.market_monitor`、`jobs.weekend_news_crawl` 和窗口内单标的委员会分析优先使用 Python 直接调用。
 
 运行盘中监控：
 
@@ -124,7 +166,7 @@ uv run python -m jobs.pnl_snapshot
 
 ## 关键接口
 
-直接后端，默认 `http://127.0.0.1:8766`：
+可选直接后端，示例 `http://127.0.0.1:8766`：
 
 - `POST /api/committee`：对单个标的运行投资委员会。
 - `GET /api/accounts`：查看真实账户和委员会账户。
@@ -133,7 +175,7 @@ uv run python -m jobs.pnl_snapshot
 - `POST /api/accounts/snapshot`：写入日度收盘 PnL 快照。
 - `GET /api/accounts/pnl`：查看账户 PnL 历史。
 
-GUI/API 桥，默认 `http://127.0.0.1:8765`：
+可选 GUI/API 桥，默认 `http://127.0.0.1:8765`：
 
 - `POST /api/committee/run`：运行 GUI 使用的委员会任务。
 - `GET /api/committee/{task_id}`：轮询委员会任务状态。
@@ -174,6 +216,20 @@ uv run pytest tests/test_gold_price.py tests/test_backtest_no_lookahead.py tests
 6. 执行护栏拦截涨停追买、重复同向影子交易、低质量或不可执行提醒。
 7. 委员会账户记录系统会怎么做，真实账户只在用户明确录入成交后变化。
 
+## 桌面监控窗口
+
+桌面窗口读取 `data/market_monitor/latest_window.json`、`data/daily_stock_selection/latest.json` 和 `data/weekend_news/` 下的最新结果。它不再按秒重新跑业务逻辑，只在委员会、选股或新闻任务写入新快照后局部刷新界面。
+
+主窗口只展示标的监控，多个标的按操作优先级用卡片堆叠展示：
+
+- `需要操作`、`触发确认`、`单轮触发` 优先于普通观察。
+- 买入 / 卖出建议以整数手展示，用户可在推荐上限内修改手数。
+- 点击“我已遵循买入/卖出”会即时拉取最新价格记账，不使用窗口缓存价格。
+- 底部展示日度选股结果；点击候选标的会弹出悬浮详情，说明入选原因，并可加入关注列表。
+- 周末新闻通过主窗口按钮打开，以相同风格的悬浮卡片展示，按影响力排序。
+
+窗口状态字段尽量使用通俗中文：收益路径表示“1/5/20 日可能涨跌范围”，风险提示表示“ATR 波动、下行风险和防守惩罚”，校准信息表示“历史相似样本命中率和样本数量”。
+
 ## 双账户账本
 
 `db/account_ledger.py` 维护两个账户：
@@ -193,7 +249,19 @@ uv run pytest tests/test_gold_price.py tests/test_backtest_no_lookahead.py tests
 - 合并国内热榜、新闻源和 RSS；
 - 调用 LLM 提炼 A 股板块、主题、催化和候选龙头；
 - 输出机会列表和需要委员会复核的标的；
-- 运行结束后弹出本地摘要。
+- 运行结束后写入本地结果，由桌面窗口的周末新闻悬浮卡片展示。
+
+## 日度选股
+
+交易日选股任务在 11:30 和 15:00 运行，以天为单位寻找 A 股热门板块和候选标的。模型会综合：
+
+- 国内新闻主题和事件催化；
+- 板块大资金流向；
+- 板块内部个股的基本面和技术面；
+- 1/5/20 日收益路径分布、ATR 风险、防守惩罚和历史相似样本命中率；
+- 账户现金约束，过滤资金不足以买入一手的标的。
+
+结果写入 `data/daily_stock_selection/latest.json`，桌面窗口底部以按钮展示候选标的。点击按钮会打开悬浮详情，展示为什么入选、什么位置更适合买入、风险在哪里，以及是否值得加入关注列表。
 
 风险新闻量化是辅助判断模型，不是收益承诺。
 

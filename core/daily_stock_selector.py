@@ -84,6 +84,47 @@ class EntryPlan:
 
 
 @dataclass(frozen=True)
+class PathWindow:
+    horizon_days: int
+    sample_size: int
+    mean_return_pct: float
+    median_return_pct: float
+    q20_return_pct: float
+    q80_return_pct: float
+    win_probability: float
+    drawdown_probability: float
+    max_runup_pct: float
+    max_drawdown_pct: float
+
+
+@dataclass(frozen=True)
+class PathDistribution:
+    windows: List[PathWindow]
+    path_shape: str
+    path_score: float
+    interpretation: str
+
+
+@dataclass(frozen=True)
+class RiskDefense:
+    atr_pct: float
+    atr_shock_ratio: Optional[float]
+    downside_tail_pct: Optional[float]
+    risk_level: str
+    risk_penalty: float
+    note: str
+
+
+@dataclass(frozen=True)
+class CalibrationSnapshot:
+    sample_size: int
+    hit_rate: Optional[float]
+    avg_forward_return_pct: Optional[float]
+    confidence_multiplier: float
+    note: str
+
+
+@dataclass(frozen=True)
 class SectorSelection:
     sector: str
     heat_score: float
@@ -114,6 +155,10 @@ class StockSelection:
     trend: MultiPeriodTrend
     affordability: Affordability
     entry_plan: EntryPlan
+    path_distribution: PathDistribution
+    risk_defense: RiskDefense
+    calibration: CalibrationSnapshot
+    model_edge_score: float
     fundamental_score: float = 50.0
     fundamental_model: str = ""
     money_flow_score: float = 0.0
@@ -220,13 +265,30 @@ def build_daily_selection(
         fundamental = (fundamentals_by_symbol or {}).get(symbol) or {}
         fundamental_score = _bounded(_safe_float(fundamental.get("score"), 50.0), 0.0, 100.0)
         money_flow_score = _bounded(_safe_float((flow_by_symbol.get(symbol) or {}).get("fund_flow_score")), 0.0, 100.0)
+        path_distribution = estimate_path_distribution(history_by_symbol.get(symbol), trade_date=trade_date)
+        risk_defense = build_risk_defense(history_by_symbol.get(symbol), path_distribution=path_distribution, trade_date=trade_date)
+        calibration = build_walk_forward_calibration(
+            history_by_symbol.get(symbol),
+            tape=tape,
+            trend=trend,
+            trade_date=trade_date,
+        )
+        model_edge_score = _bounded(
+            path_distribution.path_score * 0.42
+            + (100.0 - risk_defense.risk_penalty) * 0.28
+            + calibration.confidence_multiplier * 100.0 * 0.30,
+            0.0,
+            100.0,
+        )
         score = _bounded(
             news_score * 0.34
-            + tape.tape_score * 0.24
-            + trend.alignment_score * 0.16
+            + tape.tape_score * 0.20
+            + trend.alignment_score * 0.14
             + fundamental_score * 0.14
             + money_flow_score * 0.16
-            - risk_penalty * 0.35,
+            + model_edge_score * 0.12
+            - risk_penalty * 0.30
+            - risk_defense.risk_penalty * 0.12,
             0.0,
             100.0,
         )
@@ -235,6 +297,9 @@ def build_daily_selection(
         reasons.append(trend.interpretation)
         if fundamental.get("reason"):
             reasons.append(str(fundamental.get("reason")))
+        reasons.append(path_distribution.interpretation)
+        reasons.append(risk_defense.note)
+        reasons.append(calibration.note)
         entry_plan = build_entry_plan(history_by_symbol.get(symbol), tape=tape, trade_date=trade_date)
         stocks.append(
             StockSelection(
@@ -252,6 +317,10 @@ def build_daily_selection(
                 trend=trend,
                 affordability=affordability,
                 entry_plan=entry_plan,
+                path_distribution=path_distribution,
+                risk_defense=risk_defense,
+                calibration=calibration,
+                model_edge_score=round(model_edge_score, 2),
                 fundamental_score=round(fundamental_score, 2),
                 fundamental_model=str(fundamental.get("model") or ""),
                 money_flow_score=round(money_flow_score, 2),
@@ -560,6 +629,213 @@ def build_entry_plan(
         stop_loss_price=round(stop, 2),
         chase_risk="medium",
         note="走势未充分确认，等待放量突破触发价，或回踩均线区间缩量企稳",
+    )
+
+
+def estimate_path_distribution(
+    df: Optional[pd.DataFrame],
+    *,
+    trade_date: Optional[str] = None,
+    horizons: tuple[int, ...] = (1, 5, 20),
+) -> PathDistribution:
+    """Estimate empirical forward-return paths from available history."""
+    data = _normalize_ohlcv(df)
+    if trade_date:
+        data = data[data.index <= pd.to_datetime(trade_date)]
+    if data.empty or len(data) < 8:
+        return PathDistribution(
+            windows=[],
+            path_shape="insufficient_history",
+            path_score=50.0,
+            interpretation="path model neutral: insufficient OHLCV history",
+        )
+
+    windows: List[PathWindow] = []
+    for horizon in horizons:
+        samples = _forward_path_samples(data, horizon=horizon)
+        if not samples:
+            continue
+        returns = [item["return_pct"] for item in samples]
+        runups = [item["max_runup_pct"] for item in samples]
+        drawdowns = [item["max_drawdown_pct"] for item in samples]
+        q20 = _quantile(returns, 0.20)
+        q80 = _quantile(returns, 0.80)
+        windows.append(
+            PathWindow(
+                horizon_days=horizon,
+                sample_size=len(samples),
+                mean_return_pct=round(sum(returns) / len(returns), 3),
+                median_return_pct=round(_quantile(returns, 0.50), 3),
+                q20_return_pct=round(q20, 3),
+                q80_return_pct=round(q80, 3),
+                win_probability=round(sum(1 for value in returns if value > 0) / len(returns), 3),
+                drawdown_probability=round(sum(1 for value in drawdowns if value <= -3.0) / len(drawdowns), 3),
+                max_runup_pct=round(_quantile(runups, 0.80), 3),
+                max_drawdown_pct=round(_quantile(drawdowns, 0.20), 3),
+            )
+        )
+
+    if not windows:
+        return PathDistribution(
+            windows=[],
+            path_shape="insufficient_forward_samples",
+            path_score=50.0,
+            interpretation="path model neutral: no forward samples before latest bar",
+        )
+
+    short = _find_path_window(windows, 1) or windows[0]
+    swing = _find_path_window(windows, 5) or windows[min(len(windows) - 1, 1)]
+    trend = _find_path_window(windows, 20) or windows[-1]
+    path_score = _bounded(
+        50.0
+        + short.mean_return_pct * 2.0
+        + swing.mean_return_pct * 2.8
+        + trend.mean_return_pct * 1.6
+        + (swing.win_probability - 0.50) * 55.0
+        + _bounded(trend.q20_return_pct, -12.0, 8.0) * 1.8
+        - swing.drawdown_probability * 18.0,
+        0.0,
+        100.0,
+    )
+    if swing.q20_return_pct > 0 and trend.win_probability >= 0.58:
+        shape = "steady_up"
+    elif swing.max_runup_pct >= 6.0 and swing.max_drawdown_pct <= -4.0:
+        shape = "volatile_breakout"
+    elif trend.q20_return_pct <= -6.0 or swing.drawdown_probability >= 0.45:
+        shape = "downside_tail"
+    elif abs(swing.mean_return_pct) < 1.0 and 0.43 <= swing.win_probability <= 0.57:
+        shape = "range_bound"
+    else:
+        shape = "mixed"
+    interpretation = (
+        f"path {shape}: 5d win={swing.win_probability:.0%}, "
+        f"5d q20={swing.q20_return_pct:.1f}%, 20d mean={trend.mean_return_pct:.1f}%"
+    )
+    return PathDistribution(
+        windows=windows,
+        path_shape=shape,
+        path_score=round(path_score, 2),
+        interpretation=interpretation,
+    )
+
+
+def build_risk_defense(
+    df: Optional[pd.DataFrame],
+    *,
+    path_distribution: PathDistribution,
+    trade_date: Optional[str] = None,
+) -> RiskDefense:
+    """Quantify volatility shock and downside-tail risk for A-share selection."""
+    data = _normalize_ohlcv(df)
+    if trade_date:
+        data = data[data.index <= pd.to_datetime(trade_date)]
+    if data.empty or len(data) < 15:
+        return RiskDefense(
+            atr_pct=0.0,
+            atr_shock_ratio=None,
+            downside_tail_pct=None,
+            risk_level="unknown",
+            risk_penalty=8.0,
+            note="risk defense neutral: insufficient ATR history",
+        )
+
+    close = float(data["Close"].iloc[-1])
+    atr14 = _atr(data, window=14)
+    atr_pct = (atr14 / close * 100.0) if close else 0.0
+    atr_long = _atr(data.tail(min(len(data), 60)), window=min(50, len(data)))
+    atr_shock_ratio = (atr14 / atr_long) if atr_long > 0 else None
+    swing = _find_path_window(path_distribution.windows, 5)
+    trend = _find_path_window(path_distribution.windows, 20)
+    downside_tail = None
+    if swing is not None and trend is not None:
+        downside_tail = min(swing.q20_return_pct, trend.q20_return_pct)
+    elif swing is not None:
+        downside_tail = swing.q20_return_pct
+    elif trend is not None:
+        downside_tail = trend.q20_return_pct
+
+    penalty = 0.0
+    penalty += _bounded((atr_pct - 3.0) * 4.0, 0.0, 22.0)
+    if atr_shock_ratio is not None:
+        penalty += _bounded((atr_shock_ratio - 1.35) * 22.0, 0.0, 24.0)
+    if downside_tail is not None:
+        penalty += _bounded((-downside_tail - 4.0) * 2.4, 0.0, 28.0)
+    penalty = _bounded(penalty, 0.0, 70.0)
+    if penalty >= 38:
+        level = "high"
+    elif penalty >= 18:
+        level = "medium"
+    else:
+        level = "low"
+    shock_text = "na" if atr_shock_ratio is None else f"{atr_shock_ratio:.2f}x"
+    tail_text = "na" if downside_tail is None else f"{downside_tail:.1f}%"
+    return RiskDefense(
+        atr_pct=round(atr_pct, 3),
+        atr_shock_ratio=None if atr_shock_ratio is None else round(atr_shock_ratio, 3),
+        downside_tail_pct=None if downside_tail is None else round(downside_tail, 3),
+        risk_level=level,
+        risk_penalty=round(penalty, 2),
+        note=f"risk {level}: ATR={atr_pct:.1f}%, shock={shock_text}, tail={tail_text}",
+    )
+
+
+def build_walk_forward_calibration(
+    df: Optional[pd.DataFrame],
+    *,
+    tape: TapeAnalysis,
+    trend: MultiPeriodTrend,
+    trade_date: Optional[str] = None,
+    horizon: int = 5,
+) -> CalibrationSnapshot:
+    """Estimate whether similar historical setups had positive forward returns."""
+    data = _normalize_ohlcv(df)
+    if trade_date:
+        data = data[data.index <= pd.to_datetime(trade_date)]
+    min_len = max(35, horizon + 25)
+    if data.empty or len(data) < min_len:
+        return CalibrationSnapshot(
+            sample_size=0,
+            hit_rate=None,
+            avg_forward_return_pct=None,
+            confidence_multiplier=0.72,
+            note="calibration low confidence: insufficient walk-forward samples",
+        )
+
+    current = _signal_features_from_tape(tape, trend)
+    matches: List[float] = []
+    last_start = len(data) - horizon - 1
+    for idx in range(20, last_start):
+        hist_slice = data.iloc[: idx + 1]
+        hist_tape = analyze_daily_tape(hist_slice)
+        hist_trend = analyze_multi_period_trend(hist_slice)
+        if hist_tape is None or hist_trend is None:
+            continue
+        features = _signal_features_from_tape(hist_tape, hist_trend)
+        if _feature_distance(current, features) > 0.38:
+            continue
+        entry = float(data["Close"].iloc[idx])
+        exit_price = float(data["Close"].iloc[idx + horizon])
+        if entry > 0:
+            matches.append((exit_price / entry - 1.0) * 100.0)
+    if not matches:
+        return CalibrationSnapshot(
+            sample_size=0,
+            hit_rate=None,
+            avg_forward_return_pct=None,
+            confidence_multiplier=0.78,
+            note="calibration neutral: no close historical setup matches",
+        )
+    hit_rate = sum(1 for value in matches if value > 0) / len(matches)
+    avg_return = sum(matches) / len(matches)
+    size_weight = min(1.0, len(matches) / 20.0)
+    edge = (hit_rate - 0.50) * 0.65 + _bounded(avg_return / 8.0, -0.35, 0.35)
+    multiplier = _bounded(0.88 + edge * size_weight, 0.62, 1.22)
+    return CalibrationSnapshot(
+        sample_size=len(matches),
+        hit_rate=round(hit_rate, 3),
+        avg_forward_return_pct=round(avg_return, 3),
+        confidence_multiplier=round(multiplier, 3),
+        note=f"calibration 5d: n={len(matches)}, hit={hit_rate:.0%}, avg={avg_return:.1f}%",
     )
 
 
@@ -917,6 +1193,75 @@ def _atr(df: pd.DataFrame, *, window: int = 14) -> float:
         return 0.0
 
 
+def _forward_path_samples(df: pd.DataFrame, *, horizon: int) -> List[Dict[str, float]]:
+    if horizon <= 0 or len(df) <= horizon + 1:
+        return []
+    out: List[Dict[str, float]] = []
+    closes = df["Close"].astype(float).reset_index(drop=True)
+    highs = df["High"].astype(float).reset_index(drop=True)
+    lows = df["Low"].astype(float).reset_index(drop=True)
+    # Exclude the latest bar as a sample origin because its future is unknown.
+    for idx in range(0, len(closes) - horizon - 1):
+        entry = float(closes.iloc[idx])
+        if entry <= 0:
+            continue
+        end = idx + horizon
+        exit_price = float(closes.iloc[end])
+        window_high = float(highs.iloc[idx + 1 : end + 1].max())
+        window_low = float(lows.iloc[idx + 1 : end + 1].min())
+        out.append(
+            {
+                "return_pct": (exit_price / entry - 1.0) * 100.0,
+                "max_runup_pct": (window_high / entry - 1.0) * 100.0,
+                "max_drawdown_pct": (window_low / entry - 1.0) * 100.0,
+            }
+        )
+    return out
+
+
+def _find_path_window(windows: List[PathWindow], horizon_days: int) -> Optional[PathWindow]:
+    for window in windows:
+        if window.horizon_days == horizon_days:
+            return window
+    return None
+
+
+def _quantile(values: List[float], q: float) -> float:
+    if not values:
+        return 0.0
+    ordered = sorted(float(value) for value in values)
+    q = _bounded(q, 0.0, 1.0)
+    pos = (len(ordered) - 1) * q
+    lo = int(math.floor(pos))
+    hi = int(math.ceil(pos))
+    if lo == hi:
+        return ordered[lo]
+    weight = pos - lo
+    return ordered[lo] * (1.0 - weight) + ordered[hi] * weight
+
+
+def _signal_features_from_tape(tape: TapeAnalysis, trend: MultiPeriodTrend) -> Dict[str, float]:
+    return {
+        "change": _bounded(tape.change_pct / 10.0, -1.0, 1.0),
+        "close_position": _bounded(tape.close_position, 0.0, 1.0),
+        "volume_ratio": _bounded(((tape.volume_ratio or 1.0) - 1.0) / 3.0, -1.0, 1.0),
+        "tape_score": _bounded((tape.tape_score - 50.0) / 50.0, -1.0, 1.0),
+        "trend_score": _bounded((trend.alignment_score - 50.0) / 50.0, -1.0, 1.0),
+        "breakout": 1.0 if tape.breakout_20d else 0.0,
+        "breakdown": 1.0 if tape.breakdown_20d else 0.0,
+    }
+
+
+def _feature_distance(left: Dict[str, float], right: Dict[str, float]) -> float:
+    keys = sorted(set(left) | set(right))
+    if not keys:
+        return 1.0
+    total = 0.0
+    for key in keys:
+        total += abs(float(left.get(key, 0.0)) - float(right.get(key, 0.0)))
+    return total / len(keys)
+
+
 def _interpret_tape(
     *,
     change_pct: float,
@@ -1011,16 +1356,23 @@ def _date_str(value: Any) -> str:
 __all__ = [
     "DailySelectionResult",
     "Affordability",
+    "CalibrationSnapshot",
+    "EntryPlan",
     "MultiPeriodTrend",
+    "PathDistribution",
+    "PathWindow",
+    "RiskDefense",
     "SectorSelection",
     "StockSelection",
     "TapeAnalysis",
     "TrendFrame",
-    "EntryPlan",
     "analyze_daily_tape",
     "analyze_multi_period_trend",
     "build_affordability",
-    "build_entry_plan",
     "build_daily_selection",
+    "build_entry_plan",
+    "build_risk_defense",
+    "build_walk_forward_calibration",
+    "estimate_path_distribution",
     "result_to_dict",
 ]

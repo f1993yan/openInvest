@@ -665,6 +665,50 @@ def _operation_summary(row: Dict[str, Any]) -> str:
     return "观察"
 
 
+def _path_window(path: Dict[str, Any], horizon_days: int) -> Dict[str, Any]:
+    for item in path.get("windows") or []:
+        if int(_safe_num(item.get("horizon_days"))) == horizon_days:
+            return item
+    return {}
+
+
+def _risk_level_label(value: Any) -> str:
+    return {
+        "low": "低",
+        "medium": "中",
+        "high": "高",
+        "unknown": "未知",
+    }.get(str(value or "").lower(), str(value or "-"))
+
+
+def _path_plain_text(path: Dict[str, Any], risk: Dict[str, Any]) -> tuple[str, bool]:
+    window = _path_window(path, 5)
+    if not window:
+        return "走势概率  暂无足够历史样本", False
+    win = _safe_num(window.get("win_probability")) * 100
+    tail = _safe_num(window.get("q20_return_pct"))
+    risk_level = str(risk.get("risk_level") or "")
+    risk_label = _risk_level_label(risk_level)
+    if tail < -6:
+        tail_note = f"常见回撤可能到 {tail:.1f}%"
+    elif tail < 0:
+        tail_note = f"回撤压力约 {abs(tail):.1f}%"
+    else:
+        tail_note = "历史下沿仍为正"
+    text = f"走势概率  5日上涨概率 {win:.0f}%  {tail_note}  风险 {risk_label}"
+    return text, risk_level == "high"
+
+
+def _calibration_plain_text(calibration: Dict[str, Any]) -> str:
+    sample_size = int(_safe_num(calibration.get("sample_size")))
+    hit_rate = calibration.get("hit_rate")
+    if sample_size <= 0 or hit_rate is None:
+        return "历史验证  相似样本不足，先按低置信度观察"
+    avg = _safe_num(calibration.get("avg_forward_return_pct"))
+    confidence = _safe_num(calibration.get("confidence_multiplier"), 1.0)
+    return f"历史验证  相似样本 {sample_size} 次  5日成功率 {_safe_num(hit_rate) * 100:.0f}%  平均 {avg:.1f}%  置信 {confidence:.2f}"
+
+
 def _snapshot_detail(row: Dict[str, Any]) -> str:
     op = row.get("operation") or {}
     price = row.get("price") or {}
@@ -1770,6 +1814,9 @@ class MonitorWindow:
         tape = stock.get("tape") or {}
         trend = stock.get("trend") or {}
         plan = stock.get("entry_plan") or {}
+        path = stock.get("path_distribution") or {}
+        risk = stock.get("risk_defense") or {}
+        calibration = stock.get("calibration") or {}
         card = tk.Frame(body, bg=PANEL_BG)
         card.pack(fill=tk.BOTH, expand=True, pady=(8, 0))
         tk.Label(card, text=f"板块  {stock.get('sector', '-')}", bg=PANEL_BG, fg=MUTED, font=("Microsoft YaHei UI", 8, "bold"), anchor="w").pack(fill=tk.X)
@@ -1784,6 +1831,27 @@ class MonitorWindow:
             anchor="w",
         ).pack(fill=tk.X, pady=(7, 0))
         tk.Label(card, text=f"走势  {_short(tape.get('interpretation') or trend.get('interpretation'), 105)}", bg=PANEL_BG, fg=BLUE, font=("Microsoft YaHei UI", 8, "bold"), justify=tk.LEFT, anchor="w", wraplength=330).pack(fill=tk.X, pady=(7, 0))
+        path_text, is_high_risk = _path_plain_text(path, risk)
+        tk.Label(
+            card,
+            text=path_text,
+            bg=PANEL_BG,
+            fg=DOWN_FG if is_high_risk else TEXT,
+            font=("Microsoft YaHei UI", 8, "bold"),
+            anchor="w",
+            justify=tk.LEFT,
+            wraplength=330,
+        ).pack(fill=tk.X, pady=(7, 0))
+        tk.Label(
+            card,
+            text=_calibration_plain_text(calibration),
+            bg=PANEL_BG,
+            fg=MUTED,
+            font=("Microsoft YaHei UI", 8),
+            anchor="w",
+            justify=tk.LEFT,
+            wraplength=330,
+        ).pack(fill=tk.X, pady=(6, 0))
         trigger = _fmt_price(plan.get("trigger_price"))
         stop = _fmt_price(plan.get("stop_loss_price"))
         tk.Label(card, text=f"买点  {plan.get('action', '-')}  触发 {trigger}  止损 {stop}", bg=PANEL_BG, fg=UP_FG, font=("Microsoft YaHei UI", 8, "bold"), anchor="w").pack(fill=tk.X, pady=(7, 0))
