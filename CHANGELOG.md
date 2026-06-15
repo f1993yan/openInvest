@@ -27,6 +27,7 @@
 
 * **fundamental:** 过滤连接失败和接口限流类低价值 warning，避免基本面模型把数据源噪声误当作交易风险输入。
 * **scheduler:** 将任务 misfire 补跑宽限从 10 分钟扩展到 1 小时，降低重启后错过关键定时任务的概率。
+* **startup:** 启动前旧进程清理改为按 OpenInvest 后台模块名识别，避免 `python -m jobs.market_monitor` 等命令行不包含项目路径时漏杀旧进程。
 * **market-data:** 关闭 AkShare tqdm 和市场 provider 刷新打印，减少桌面窗口和启动日志中的噪声输出。
 * **daily-selection:** 将日度选股调度拆成交易日 11:30 和 15:00 两个任务，修正原 cron 实际在 15:30 执行的问题。
 * **monitor-window:** 修复选股气泡和手动交易面板滚轮事件被子控件吞掉的问题，并统一滚动条、列宽、执行按钮和悬浮圆按钮尺寸。

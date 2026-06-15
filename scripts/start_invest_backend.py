@@ -144,6 +144,7 @@ def stop_existing_processes(config: LaunchConfig) -> None:
     script = f"""
 $root = '{quoted_root}'
 $patterns = @({patterns})
+$currentPid = $PID
 $all = @(Get-CimInstance Win32_Process)
 $byPid = @{{}}
 foreach ($proc in $all) {{ $byPid[[int]$proc.ProcessId] = $proc }}
@@ -151,9 +152,11 @@ $seedTargets = @($all | Where-Object {{
   $cmd = ($_.CommandLine + '').ToLowerInvariant()
   $exe = ($_.ExecutablePath + '').ToLowerInvariant()
   $name = ($_.Name + '').ToLowerInvariant()
+  $matchesKnownOpenInvestModule = [bool]($patterns | Where-Object {{ $cmd.Contains($_) }})
   ($name -match '^(cmd|uv|uvicorn|python|pythonw)\\.exe$') -and
-  ($cmd.Contains($root) -or $exe.Contains($root)) -and
-  ($patterns | Where-Object {{ $cmd.Contains($_) }})
+  ([int]$_.ProcessId -ne [int]$currentPid) -and
+  $matchesKnownOpenInvestModule -and
+  (-not $cmd.Contains('scripts.start_invest_backend'))
 }})
 $targetMap = @{{}}
 foreach ($target in $seedTargets) {{
@@ -161,12 +164,16 @@ foreach ($target in $seedTargets) {{
   while ($null -ne $cursor) {{
     $name = ($cursor.Name + '').ToLowerInvariant()
     if ($name -notmatch '^(cmd|uv|uvicorn|python|pythonw)\\.exe$') {{ break }}
+    if ([int]$cursor.ProcessId -eq [int]$currentPid) {{ break }}
     $targetMap[[int]$cursor.ProcessId] = $cursor
     if (-not $byPid.ContainsKey([int]$cursor.ParentProcessId)) {{ break }}
     $parent = $byPid[[int]$cursor.ParentProcessId]
     $parentCmd = ($parent.CommandLine + '').ToLowerInvariant()
     $parentExe = ($parent.ExecutablePath + '').ToLowerInvariant()
-    if (-not ($parentCmd.Contains($root) -or $parentExe.Contains($root) -or $parent.Name.ToLowerInvariant() -eq 'uv.exe')) {{ break }}
+    $parentName = ($parent.Name + '').ToLowerInvariant()
+    $parentLooksLikeWrapper = $parentName -match '^(cmd|uv|python|pythonw)\\.exe$'
+    $parentBelongsHere = $parentCmd.Contains($root) -or $parentExe.Contains($root) -or $parentName -eq 'uv.exe'
+    if (-not ($parentLooksLikeWrapper -and $parentBelongsHere)) {{ break }}
     $cursor = $parent
   }}
 }}
@@ -339,7 +346,7 @@ def parse_args(argv: Iterable[str]) -> argparse.Namespace:
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=None)
     parser.add_argument("--log-dir", type=Path, default=None)
-    parser.add_argument("--no-restart", action="store_true")
+    parser.add_argument("--no-restart", action="store_true", help="Skip killing existing OpenInvest processes on startup")
     parser.add_argument("--with-backend", action="store_true", help="Start the optional HTTP backend on INVEST_BACKEND_PORT")
     parser.add_argument("--no-window", action="store_true")
     parser.add_argument("--window-poll-ms", type=int, default=1000)
