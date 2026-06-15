@@ -54,6 +54,39 @@ def env_int(name: str, default: int) -> int:
         return default
 
 
+def load_dotenv_file(path: Path) -> None:
+    """Load KEY=VALUE lines from .env without overriding existing environment."""
+    if not path.exists():
+        return
+    try:
+        lines = path.read_text(encoding="utf-8-sig").splitlines()
+    except OSError:
+        return
+    for raw in lines:
+        line = raw.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        key = key.strip()
+        if key.startswith("export "):
+            key = key[7:].strip()
+        if not key or not (key[0].isalpha() or key[0] == "_"):
+            continue
+        if not all(ch.isalnum() or ch == "_" for ch in key):
+            continue
+        value = value.strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
+            value = value[1:-1]
+        os.environ.setdefault(key, value)
+
+
+def load_startup_environment() -> None:
+    load_dotenv_file(ROOT / ".env")
+    configured_root = os.getenv("OPENINVEST_ROOT")
+    if configured_root:
+        load_dotenv_file(Path(configured_root).expanduser().resolve() / ".env")
+
+
 def build_config(args: argparse.Namespace) -> LaunchConfig:
     root = Path(os.getenv("OPENINVEST_ROOT") or args.root or ROOT).resolve()
     uv = os.getenv("OPENINVEST_UV") or args.uv or shutil.which("uv") or "uv"
@@ -314,6 +347,7 @@ def parse_args(argv: Iterable[str]) -> argparse.Namespace:
 
 
 def main(argv: Iterable[str] | None = None) -> None:
+    load_startup_environment()
     args = parse_args(sys.argv[1:] if argv is None else argv)
     launch(build_config(args))
 
