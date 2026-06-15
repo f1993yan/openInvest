@@ -463,8 +463,12 @@ def run_committee_direct(req: CommitteeRequest) -> CommitteeResponse:
             f"manual_overrides={len(req.fundamentals or {})}"
         )
         warnings = fundamental_snapshot.get("warnings") or []
-        if warnings:
-            fundamental_brief += f"\nDATA_WARNINGS: {', '.join(warnings[:5])}"
+        critical_warnings = [
+            w for w in warnings
+            if "ConnectionError" not in w and "failed" not in w
+        ]
+        if critical_warnings:
+            fundamental_brief += f"\nDATA_WARNINGS: {', '.join(critical_warnings[:5])}"
         market_data += f"\n\n--- FUNDAMENTAL MODEL ---\n{fundamental_brief}"
 
         # 4. 获取宏观视图（含新闻）
@@ -651,7 +655,7 @@ def run_committee_direct(req: CommitteeRequest) -> CommitteeResponse:
             confidence=parsed.get("confidence", 0),
             suggested_alloc=parsed.get("alloc_cny", 0),
             quant_signal=report.quant_view[:200] if report.quant_view else "",
-            regime=regime_brief[:200],
+            regime=regime_brief[:500],
             fundamental_model=fundamental_assessment.model_key,
             fundamental_score=fundamental_assessment.score,
             entry_exit_points=entry_exit_plan.as_dict(),

@@ -1273,8 +1273,8 @@ def write_report(round_time: str, results: List[Dict],
                 f"¥{r.get('suggested_alloc_cny', 0):,.0f} | "
                 f"{fundamental} | "
                 f"{review or '-'} | "
-                f"{r.get('quant_view', '')[:30]}... | "
-                f"{r.get('regime', '')[:20]}... |"
+                f"{r.get('quant_view', '')[:80]}... | "
+                f"{r.get('regime', '')} |"
             )
         else:
             lines.append(f"| {r.get('name', r.get('symbol'))} | ❌ 失败 | — | — | — | — | — | — |")

@@ -177,7 +177,6 @@ def get_history_data(
     if should_fetch_provider:
         try:
             from utils.cn_market_provider import fetch_history
-            print(f"🔄 [market-provider] Refreshing {symbol} (period={fetch_period})...")
             df_provider = fetch_history(symbol, fetch_period)
             if not df_provider.empty:
                 for idx, row in df_provider.iterrows():

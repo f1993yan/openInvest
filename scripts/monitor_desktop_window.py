@@ -865,7 +865,7 @@ def _snapshot_detail(row: Dict[str, Any]) -> str:
             f"快照状态: {_label_state(row.get('state'))} | 裁决: {op.get('verdict', '-')}",
             f"现价: {_fmt_price(price.get('current'))} | 涨跌: {_fmt_pct(price.get('change_pct'))}",
             f"持仓: {'是' if row.get('is_holding') else '否'} | 仓位: {_safe_num(row.get('position_pct')):.2f}%",
-            f"基本面: {_safe_num(fundamental.get('score'), 50):.1f} | 技术: {_short(technical.get('regime'), 100) or '-'}",
+            f"基本面: {_safe_num(fundamental.get('score'), 50):.1f} | 技术: {technical.get('regime') or '-'}",
             f"买入准则: {_buy_summary(row)}",
             f"出场点: {_exit_summary(row)}",
             f"当前触发: {triggers}",
@@ -890,7 +890,7 @@ def _committee_action_assessment(row: Dict[str, Any], result: Dict[str, Any]) ->
     if snapshot_verdict and latest_verdict and snapshot_verdict != latest_verdict:
         return f"快照裁决为 {snapshot_verdict}，最新委员会裁决为 {latest_verdict}，需要以最新分析为准。"
     if latest_verdict in {"HOLD", "WAIT"} or latest_alloc == 0:
-        return "最新委员会没有给出新增仓位，当前更适合观察或等待触发价确认。"
+        return "最新委员会建议持仓观望，关注价格是否回到入场区间。"
     return "最新委员会仍给出方向性建议，操作前需要核对价格是否仍在买入/出场准则附近。"
 
 
@@ -2161,12 +2161,12 @@ class MonitorWindow:
         ]
         if not rows:
             tk.Label(rows_frame, text="暂无持仓或关注标的", bg=PANEL_BG, fg=MUTED, font=("Microsoft YaHei UI", 9)).pack(fill=tk.X, pady=12)
-        for row in rows[:10]:
+        for row in rows[:20]:
             self._create_trade_row(rows_frame, row)
 
         self.root.update_idletasks()
         width = min(402, max(360, self.root.winfo_width() - 24))
-        height = min(300, max(148, 62 + max(2, min(len(rows), 8)) * 30))
+        height = min(400, max(148, 62 + max(2, min(len(rows), 15)) * 30))
         x = max(10, self.root.winfo_width() - width - 10)
         y = max(58, self.root.winfo_height() - height - 70)
         popover.place(x=x, y=y, width=width, height=height)
@@ -2286,6 +2286,21 @@ class MonitorWindow:
         self.trade_popover = None
         self.trade_scroll_canvas = None
 
+    def _current_watchlist_symbols(self) -> set:
+        if self.demo:
+            return set()
+        try:
+            from jobs.market_monitor import load_config
+            config = load_config()
+            return {
+                str(item.get("symbol") or "").strip()
+                for bucket in (config.get("holdings") or [], config.get("watchlist") or [])
+                for item in bucket
+                if item.get("symbol")
+            }
+        except Exception:
+            return set()
+
     def _render_selection_reason(self, body: tk.Frame, action_bar: tk.Frame, stock: Dict[str, Any]) -> None:
         tape = stock.get("tape") or {}
         trend = stock.get("trend") or {}
@@ -2333,11 +2348,15 @@ class MonitorWindow:
         tk.Label(card, text=f"买点  {plan.get('action', '-')}  触发 {trigger}  止损 {stop}", bg=PANEL_BG, fg=UP_FG, font=("Microsoft YaHei UI", 8, "bold"), anchor="w").pack(fill=tk.X, pady=(7, 0))
         tk.Label(card, text=f"备注  {_short(plan.get('note'), 92) or '-'}", bg=PANEL_BG, fg=MUTED, font=("Microsoft YaHei UI", 8), justify=tk.LEFT, anchor="w", wraplength=330).pack(fill=tk.X, pady=(6, 0))
         status_var = tk.StringVar(value="")
+        symbol = str(stock.get("symbol") or "").strip()
+        already_added = symbol in self._current_watchlist_symbols()
+        btn_text = "已关注" if already_added else "加入关注列表"
+        btn_fg = UP_FG if already_added else TEXT
         add_btn = tk.Label(
             action_bar,
-            text="加入关注列表",
+            text=btn_text,
             bg="#eef3f8",
-            fg=TEXT,
+            fg=btn_fg,
             font=("Microsoft YaHei UI", 8),
             padx=12,
             pady=5,
@@ -2355,6 +2374,7 @@ class MonitorWindow:
                 message = self._add_selection_to_watchlist(stock)
                 status_var.set(message)
                 self.status_text.set(message)
+                add_btn.configure(text="已关注", fg=UP_FG)
                 return "break"
             except Exception as exc:  # noqa: BLE001
                 status_var.set(f"失败: {exc}")

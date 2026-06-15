@@ -68,6 +68,26 @@ def _build_asset_overrides_from_config() -> Dict[str, Dict[str, float]]:
 THRESHOLDS: Dict[str, float] = _build_thresholds_from_config()
 ASSET_OVERRIDES: Dict[str, Dict[str, float]] = _build_asset_overrides_from_config()
 
+INPUT_LABELS = {
+    "ma20": "20日均线",
+    "ma120": "120日均线",
+    "atr_pct": "ATR波动率",
+    "price_quantile_2y": "2年价格分位",
+    "return_30d": "30日涨跌",
+    "rebound_off_30d_low": "距30日低点反弹",
+}
+
+THRESHOLD_LABELS = {
+    "trend_ma_spread_pct": "趋势MA偏离阈值",
+    "crash_atr_pct_min": "崩盘ATR下限",
+    "crash_drawdown_30d_pct": "崩盘30日回撤阈值",
+    "crash_deep_drawdown_30d_pct": "深度崩盘30日回撤阈值",
+    "recovery_rebound_pct": "恢复反弹阈值",
+    "recovery_quantile_max": "恢复分位上界",
+    "low_quantile_threshold": "低分位阈值",
+    "high_quantile_threshold": "高分位阈值",
+}
+
 
 def get_thresholds() -> Dict[str, float]:
     """实时从 config 读取 regime 阈值（set_config_override 后立即生效）。"""
@@ -334,7 +354,7 @@ def format_regime_brief(
     )
 
     inputs_str = ", ".join(
-        f"{k}={v:.4f}" if isinstance(v, float) else f"{k}={v}"
+        f"{INPUT_LABELS.get(k, k)}={v:.4f}" if isinstance(v, float) else f"{INPUT_LABELS.get(k, k)}={v}"
         for k, v in inputs.items()
     )
 
@@ -343,7 +363,7 @@ def format_regime_brief(
     has_override = bool(symbol and load_config().regime_per_asset.get(symbol))
     threshold_label = f" (per-asset {symbol})" if has_override else ""
     threshold_str = ", ".join(
-        f"{k}={v:.2f}" for k, v in thresholds_used.items()
+        f"{THRESHOLD_LABELS.get(k, k)}={v:.2f}" for k, v in thresholds_used.items()
     )
 
     return (

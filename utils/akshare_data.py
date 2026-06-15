@@ -26,6 +26,7 @@ from db.market_store import MarketStore
 log = logging.getLogger(__name__)
 _STORE = MarketStore()
 _CACHE_MAX_STALE_DAYS = int(os.getenv("INVEST_AKSHARE_HISTORY_CACHE_STALE_DAYS", "3"))
+os.environ.setdefault("TQDM_DISABLE", "1")
 
 # ==========================================
 # 内部：akshare 行情拉取
@@ -313,7 +314,7 @@ def get_macro_snapshot() -> dict:
     # 1. 中国10年期国债收益率
     try:
         import akshare as ak
-        bond_df = ak.bond_china_yield(start_date=(datetime.now() - timedelta(days=7)).strftime("%Y%m%d"))
+        bond_df = ak.bond_china_yield()
         if bond_df is not None and not bond_df.empty:
             col_10y = None
             for c in bond_df.columns:
@@ -321,7 +322,7 @@ def get_macro_snapshot() -> dict:
                     col_10y = c
                     break
             if col_10y is None and len(bond_df.columns) > 1:
-                col_10y = bond_df.columns[1]  # 通常第二列是 10 年期
+                col_10y = bond_df.columns[-2]
             if col_10y:
                 out["cn_10y_bond"] = round(float(bond_df[col_10y].iloc[-1]), 4)
             else:
@@ -368,9 +369,21 @@ def get_macro_snapshot() -> dict:
     # 4. 北向资金净流入
     try:
         import akshare as ak
-        north_df = ak.stock_hsgt_north_net_flow_in_em(symbol="北上")
-        if north_df is not None and not north_df.empty:
-            out["north_flow"] = round(float(north_df.iloc[-1, -1]), 2)
+        total = 0.0
+        count = 0
+        for symbol in ("沪股通", "深股通"):
+            hist = ak.stock_hsgt_hist_em(symbol=symbol)
+            if hist is None or hist.empty or len(hist.columns) < 2:
+                continue
+            col_net = hist.columns[1]
+            for value in reversed(hist[col_net].tolist()):
+                if pd.isna(value):
+                    continue
+                total += float(value)
+                count += 1
+                break
+        if count > 0:
+            out["north_flow"] = round(total, 2)
         else:
             out["north_flow"] = None
     except Exception:
@@ -392,27 +405,19 @@ def get_macro_data() -> str:
     if snap.get("cn_10y_bond") is not None:
         lines.append(f"1. 中国10年期国债收益率: {snap['cn_10y_bond']:.2f}%")
         lines.append("   *注意: 国债收益率上行→资金成本上升，压制股市估值；下行→利好成长股*")
-    else:
-        lines.append("1. 中国10年期国债收益率: 数据暂缺")
 
     if snap.get("usdcny") is not None:
         lines.append(f"2. 在岸人民币 (USDCNY): {snap['usdcny']:.4f}")
         lines.append("   *注意: 人民币贬值→外资流出压力；升值→利好A股*")
-    else:
-        lines.append("2. 在岸人民币: 数据暂缺")
 
     if snap.get("sh_index") is not None:
         change_str = f"({snap['sh_index_change_pct']:+.2f}%)" if snap.get("sh_index_change_pct") else ""
         lines.append(f"3. 上证指数: {snap['sh_index']:.0f} {change_str}")
-    else:
-        lines.append("3. 上证指数: 数据暂缺")
 
     if snap.get("north_flow") is not None:
         direction = "净流入" if snap["north_flow"] > 0 else "净流出"
         lines.append(f"4. 北向资金: {direction} {abs(snap['north_flow']):.1f}亿元")
         lines.append("   *注意: 北向持续净流入→外资看多A股*")
-    else:
-        lines.append("4. 北向资金: 数据暂缺")
 
     return "\n".join(lines)
 

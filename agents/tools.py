@@ -5,9 +5,9 @@ LLM 主动决定"我需要什么数据 / 看多深"。每个 tool 是 Python 函
 （OpenAI/DeepSeek 兼容的 function calling schema）由本文件维护。
 
 5 个 tool：
-- get_history_data: yfinance 多周期行情
+- get_history_data: A股/港股/国内指数历史行情
 - analyze_multi_timeframe: 多周期技术指标 (RSI/MA/分位数)
-- get_macro_snapshot: VIX/TNX/USDCNY/AUDCNY 当前值
+- get_macro_snapshot: 上证指数、人民币汇率、中国10年期国债、北向资金
 - query_dreaming_insights: Dreaming 长期模式（近 90 天行为聚类）
 - get_recent_committee_verdicts: 同资产最近 N 次委员会决策
 
@@ -39,7 +39,10 @@ TOOL_DEFINITIONS: List[Dict[str, Any]] = [
                 "properties": {
                     "symbol": {
                         "type": "string",
-                        "description": "yfinance ticker，如 'NDQ.AX', 'GC=F', 'AUDCNY=X', '^VIX'",
+                        "description": (
+                            "A股6位代码（如 600900）或港股5位代码（如 00700）。"
+                            "国内A股指数可用 000001。外汇/VIX等国际指标请用 get_macro_snapshot 替代。"
+                        ),
                     },
                     "period": {
                         "type": "string",
@@ -63,8 +66,8 @@ TOOL_DEFINITIONS: List[Dict[str, Any]] = [
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "symbol": {"type": "string", "description": "yfinance ticker"},
-                    "label": {"type": "string", "description": "可读名（如 'NDQ.AX')"},
+                    "symbol": {"type": "string", "description": "A股6位或港股5位代码"},
+                    "label": {"type": "string", "description": "可读名（如 '华天科技'）"},
                 },
                 "required": ["symbol"],
             },
@@ -75,8 +78,8 @@ TOOL_DEFINITIONS: List[Dict[str, Any]] = [
         "function": {
             "name": "get_macro_snapshot",
             "description": (
-                "返回当前宏观指标快照：VIX (恐慌指数) / TNX (10 年期国债收益率) / "
-                "USDCNY / AUDCNY。Macro Strategist 的核心数据来源。"
+                "返回当前国内宏观指标快照：上证指数、人民币汇率、中国10年期国债收益率、"
+                "北向资金。Macro Strategist 的核心数据来源。"
             ),
             "parameters": {"type": "object", "properties": {}},
         },
@@ -131,10 +134,22 @@ TOOL_DEFINITIONS: List[Dict[str, Any]] = [
 
 def _impl_get_history_data(symbol: str, period: str = "1y") -> Dict[str, Any]:
     """返回压缩的行情快照（不返回完整 dataframe，token 友好）"""
-    from utils.akshare_data import get_history_data
-    df = get_history_data(symbol, period)
+    import warnings
+    from utils.akshare_data import get_history_data as _ak_get_history_data
+    from utils.exchange_fee import get_history_data as _fallback_get_history_data
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        df = _ak_get_history_data(symbol, period)
     if df.empty:
-        return {"error": f"no data for {symbol}@{period}", "symbol": symbol}
+        df = _fallback_get_history_data(symbol, period)
+    if df.empty:
+        return {
+            "data_available": False,
+            "symbol": symbol,
+            "period": period,
+            "note": "国内数据源暂未覆盖该标的；全球指标请优先使用宏观快照。",
+        }
     closes = df["Close"].tolist()
     return {
         "symbol": symbol,
@@ -152,8 +167,17 @@ def _impl_get_history_data(symbol: str, period: str = "1y") -> Dict[str, Any]:
 
 
 def _impl_analyze_multi_timeframe(symbol: str, label: Optional[str] = None) -> str:
-    from utils.akshare_data import get_history_data, analyze_multi_timeframe
-    df = get_history_data(symbol, "2y")
+    import warnings
+    from utils.akshare_data import get_history_data as _ak_get_history_data, analyze_multi_timeframe
+    from utils.exchange_fee import get_history_data as _fallback_get_history_data
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        df = _ak_get_history_data(symbol, "2y")
+    if df.empty:
+        df = _fallback_get_history_data(symbol, "2y")
+    if df.empty:
+        return f"{label or symbol}: 国内数据源暂未覆盖该标的，无法生成多周期技术分析。"
     return analyze_multi_timeframe(df, label or symbol)
 
 

@@ -301,8 +301,9 @@ def _fetch_a_share_fundamentals(symbol: str) -> Tuple[Dict[str, float], Dict[str
                         break
             if "pb" not in metrics and "市净率" in spot.columns:
                 _put_metric(metrics, sources, "pb", row.get("市净率"), "spot:市净率")
-        except Exception as e:  # noqa: BLE001
-            warnings.append(f"stock_zh_a_spot_em_failed:{type(e).__name__}")
+        except Exception:
+            # 东方财富现货接口偶发限流；PE/PB 已由乐咕等接口兜底，失败不作为可操作 warning。
+            pass
 
     return metrics, sources, warnings
 

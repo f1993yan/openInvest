@@ -168,7 +168,7 @@ def register_jobs(sched: BackgroundScheduler) -> List[Dict[str, Any]]:
             replace_existing=True,
             max_instances=1,
             coalesce=True,
-            misfire_grace_time=600,  # 重启后 10 分钟内的 misfire 也补跑
+            misfire_grace_time=3600,  # 重启后 1 小时内的 misfire 也补跑
         )
         registered.append(cfg)
         log.info(f"[{cfg['name']}] 已注册: {cfg['schedule']} @ {cfg.get('timezone')}")
