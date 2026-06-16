@@ -1070,6 +1070,7 @@ def build_monitor_window_snapshot(
             "position_pct": round(_safe_num(stock.get("position_pct")), 4),
             "target_position_pct": stock.get("target_position_pct", stock.get("target_pct")),
             "cost": _safe_num(stock.get("cost")),
+            "entry_exit_points": ee,
             "price": {
                 "current": _safe_num(price_info.get("price"), _safe_num(ee.get("current_price"))),
                 "prev_close": _safe_num(price_info.get("prev_close")),
@@ -1615,10 +1616,16 @@ def run_monitor_round():
         max_sector_position_pct=float(config.get("max_sector_position_pct", 35.0) or 35.0),
     )
 
+    real_holding_symbols = {
+        str(h.get("symbol", "")).upper()
+        for h in holdings
+        if h.get("symbol") and (_safe_num(h.get("position_pct")) > 0 or _safe_num(h.get("units")) > 0)
+    }
+
     entry_exit_alerts, entry_exit_watch = update_entry_exit_alert_state(
         results=results,
         prices=prices,
-        holding_symbols={str(h.get("symbol", "")).upper() for h in holdings if h.get("symbol")},
+        holding_symbols=real_holding_symbols,
     )
 
     window_snapshot = build_monitor_window_snapshot(

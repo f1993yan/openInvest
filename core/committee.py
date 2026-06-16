@@ -890,29 +890,19 @@ def run_committee(
 
 def _capture_macro_context(as_of_date: Optional[str] = None) -> Dict[str, Any]:
     """快照决议时的 macro 状态（给 verdict_review 做事后归因用）。
-
-    audit A1: verdict 错时能区分'模型预判错' vs '宏观突变黑天鹅'。
-    例：BUY 后 60 天跌 8%，但同期 VIX +60% → 不是模型差，是黑天鹅冲击。
-
-    Args:
-        as_of_date: backtest 模式必传。如果不传，captured_at 用 datetime.now()
-            + macro 值用最新 close —— 跟 backtest 的 decision_date 脱节，
-            verdict_review 事后归因会用错时间窗口的 VIX 算 macro_shock。
-            backtest 模式应传 decision_date（ISO 'YYYY-MM-DD'），让 macro
-            快照时间戳和数值都对齐到历史那一天。
+    改用国内宏观指标（上证/北向资金/人民币汇率/10年国债），不再依赖 yfinance。
     """
-    # captured_at 用 decision_date（backtest）或当下（实盘）
-    if as_of_date:
-        snapshot: Dict[str, Any] = {"captured_at": as_of_date}
-    else:
-        snapshot = {"captured_at": datetime.now().isoformat(timespec="seconds")}
+    snapshot: Dict[str, Any] = {
+        "captured_at": as_of_date if as_of_date else datetime.now().isoformat(timespec="seconds"),
+    }
     try:
-        from utils.exchange_fee import get_history_data
-        for sym, label in [("^VIX", "vix"), ("^TNX", "tnx"),
-                           ("USDCNY=X", "usdcny"), ("AUDCNY=X", "audcny")]:
-            df = get_history_data(sym, "5d", as_of_date=as_of_date)
-            if not df.empty:
-                snapshot[label] = round(float(df["Close"].iloc[-1]), 4)
+        from utils.akshare_data import get_macro_snapshot
+        snap = get_macro_snapshot()
+        snapshot["sh_index"] = snap.get("sh_index")
+        snapshot["sh_index_change_pct"] = snap.get("sh_index_change_pct")
+        snapshot["usdcny"] = snap.get("usdcny")
+        snapshot["cn_10y_bond"] = snap.get("cn_10y_bond")
+        snapshot["north_flow"] = snap.get("north_flow")
     except Exception as e:
         snapshot["_capture_error"] = str(e)[:120]
     return snapshot

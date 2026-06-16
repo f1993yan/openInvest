@@ -134,14 +134,17 @@ TOOL_DEFINITIONS: List[Dict[str, Any]] = [
 
 def _impl_get_history_data(symbol: str, period: str = "1y") -> Dict[str, Any]:
     """返回压缩的行情快照（不返回完整 dataframe，token 友好）"""
-    import warnings
-    from utils.akshare_data import get_history_data as _ak_get_history_data
-    from utils.exchange_fee import get_history_data as _fallback_get_history_data
-
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore")
+    import logging as _logging
+    _ak = _logging.getLogger("utils.akshare_data")
+    _prev = _ak.level
+    _ak.setLevel(_logging.CRITICAL)
+    try:
+        from utils.akshare_data import get_history_data as _ak_get_history_data
         df = _ak_get_history_data(symbol, period)
+    finally:
+        _ak.setLevel(_prev)
     if df.empty:
+        from utils.exchange_fee import get_history_data as _fallback_get_history_data
         df = _fallback_get_history_data(symbol, period)
     if df.empty:
         return {

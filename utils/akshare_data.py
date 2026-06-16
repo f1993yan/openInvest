@@ -297,6 +297,8 @@ def get_history_data(
     return _apply_cutoff(df, as_of_date)
 
 
+_MACRO_CACHE: dict = {}
+
 def get_macro_snapshot() -> dict:
     """返回国内宏观指标快照（替代原有 VIX/TNX/USDCNY/AUDCNY）
 
@@ -309,7 +311,12 @@ def get_macro_snapshot() -> dict:
           - north_flow: 北向资金最近交易日净流入（亿元）
           - as_of: 数据时间戳
     """
-    out: dict = {"as_of": datetime.now().isoformat(timespec="seconds")}
+    # 5 分钟缓存：同一轮监控里 17 只股票不用每只都拉一遍国债+北向（耗时 16s×17）
+    global _MACRO_CACHE
+    now = datetime.now()
+    if _MACRO_CACHE and (now - _MACRO_CACHE["_ts"]).total_seconds() < 300:
+        return {k: v for k, v in _MACRO_CACHE.items() if k != "_ts"}
+    out: dict = {"as_of": now.isoformat(timespec="seconds")}
 
     # 1. 中国10年期国债收益率
     try:
@@ -318,11 +325,11 @@ def get_macro_snapshot() -> dict:
         if bond_df is not None and not bond_df.empty:
             col_10y = None
             for c in bond_df.columns:
-                if "10" in str(c) and ("年" in str(c) or "y" in str(c).lower()):
+                if "10" in str(c):
                     col_10y = c
                     break
             if col_10y is None and len(bond_df.columns) > 1:
-                col_10y = bond_df.columns[-2]
+                col_10y = bond_df.columns[-2]  # 通常倒数第二列是 10 年期
             if col_10y:
                 out["cn_10y_bond"] = round(float(bond_df[col_10y].iloc[-1]), 4)
             else:
@@ -366,30 +373,28 @@ def get_macro_snapshot() -> dict:
         out["sh_index"] = None
         out["sh_index_change_pct"] = None
 
-    # 4. 北向资金净流入
+    # 4. 北向资金净流入（沪股通(第0行)+深股通(第1行)净买额合计）
     try:
         import akshare as ak
-        total = 0.0
-        count = 0
-        for symbol in ("沪股通", "深股通"):
-            hist = ak.stock_hsgt_hist_em(symbol=symbol)
-            if hist is None or hist.empty or len(hist.columns) < 2:
-                continue
-            col_net = hist.columns[1]
-            for value in reversed(hist[col_net].tolist()):
-                if pd.isna(value):
-                    continue
-                total += float(value)
-                count += 1
-                break
-        if count > 0:
-            out["north_flow"] = round(total, 2)
-        else:
-            out["north_flow"] = None
+        summary = ak.stock_hsgt_fund_flow_summary_em()
+        if summary is not None and not summary.empty and len(summary) >= 2:
+            col_net = 5  # 成交净买额 (net daily buy, 100M CNY)
+            try:
+                sh = float(summary.iloc[0, col_net])  # 沪股通
+                sz = float(summary.iloc[1, col_net])  # 深股通
+                if sh == sh and sz == sz:  # not NaN
+                    out["north_flow"] = round(sh + sz, 2)
+                elif sh == sh:
+                    out["north_flow"] = round(sh, 2)
+                elif sz == sz:
+                    out["north_flow"] = round(sz, 2)
+            except (ValueError, TypeError, IndexError):
+                pass
     except Exception:
         # 北向资金接口可能不稳定，静默降级
         out["north_flow"] = None
 
+    _MACRO_CACHE = {**out, "_ts": now}
     return out
 
 
