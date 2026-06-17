@@ -77,6 +77,9 @@ def _cache_is_fresh(df: pd.DataFrame) -> bool:
     """
     if df.empty:
         return False
+    if len(df) < 10:
+        # Only a few cached rows are not enough for daily/weekly/monthly trend features.
+        return False
     try:
         latest = pd.to_datetime(df.index[-1]).date()
         age_days = (datetime.now().date() - latest).days
