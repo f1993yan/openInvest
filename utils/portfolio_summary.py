@@ -67,7 +67,7 @@ def portfolio_summary_text(
         if not h.get("is_tracking_only") and float(h.get("units", 0) or 0) > 0
     ]
     if not real_holdings:
-        lines.append("  - **当前无实仓持仓**（onboarding 后请通过 GUI/NapCat 添加）")
+        lines.append("  - **当前无实仓持仓**（onboarding 后请通过 GUI 或 API 添加）")
 
     # 算每个 holding 的 market value (CNY) 用于集中度
     # 2026-05-19 修复：LLM 自己算集中度连续 6 天错算 68.5%（真实 33.3%），

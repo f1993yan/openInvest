@@ -183,8 +183,6 @@ EOF
 
 如果用户同意：
 1. **不要自己写 `memory/`**（见 SKILL.md Constraints）。
-2. 告诉用户 NapCat 命令（如 `/gold_buy 5g @1040`）——执行环节走他个人 QQ bot
-   留 audit trail。
-3. 非黄金/非现金的交易（任何其他 yfinance symbol），让用户走 Web GUI 的
-   HoldingDialog 或 `POST/PUT /api/holdings/{symbol}`。NapCat 专用命令只覆盖
-   黄金 + 现金。
+2. 让用户通过桌面窗口的手动交易面板或 Web GUI 的 HoldingDialog 记录成交，
+   或调用 `POST/PUT /api/holdings/{symbol}`，保留 audit trail。
+3. openInvest 本身只做决策和记账，不直接连接券商下单。

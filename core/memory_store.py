@@ -186,7 +186,7 @@ class MemoryStore:
 
         关键修复（audit P1: TOCTOU）：
         旧版是 "self.read() + self.write()" 两把分离的锁，中间任意进程能插
-        进来，造成 Lost Update（NapCat 的存款被 scheduler 的扣款覆盖）。
+        进来，造成 Lost Update（API 写入被 scheduler 的扣款覆盖）。
         现在改成单一 _file_lock 闭包内 read-modify-write，并发写不会丢。
         """
         path = self.path_of(name)

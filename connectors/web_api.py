@@ -1,8 +1,8 @@
 """Web API connector — FastAPI REST 层
 
-设计原则（仿 connectors/napcat_bot.py 的多消费者模式）：
+设计原则：
 - core/PortfolioManager 是唯一数据源，本文件只做 HTTP 包装，不重新写业务逻辑
-- 每个请求新建一个 PortfolioManager，确保读到最新 memory（和 napcat 一致）
+- 每个请求新建一个 PortfolioManager，确保读到最新 memory
 - 写操作复用 PortfolioManager.with_portfolio_tx() 的 fcntl 锁（PR 2 才用到）
 - 同源部署（Caddy /api/* → 本服务），生产环境**不需要 CORS 头**
 - 仅当 INVEST_WEB_DEV_CORS=1 时为 Vite dev server (5173) 放行跨域
@@ -173,7 +173,7 @@ if DEV_CORS:
 
 
 def _new_pm() -> PortfolioManager:
-    """每请求新建 PortfolioManager（仿 napcat_bot.route 内的做法），
+    """每请求新建 PortfolioManager，
     保证读到 scheduler 刚写完的最新 memory，避免缓存陈旧
 
     fork 用户初次部署时 memory/*.md 还没生成 → PortfolioManager 抛 FileNotFoundError
@@ -282,7 +282,7 @@ async def get_portfolio(response: Response) -> PortfolioResponse:
     """完整持仓快照（v1 兼容输出，前端无感）：现金 CNY/AUD + 黄金 + NDQ.AX
 
     no-store：fork 用户报告"GUI 不同步"——常见原因是反向代理 / 浏览器把这条
-    GET 缓存住，NapCat 写完 portfolio.md 后 SWR 拿到的还是旧响应。后端每次
+    GET 缓存住，其他入口写完 portfolio.md 后 SWR 拿到的还是旧响应。后端每次
     都直接读 disk（PortfolioManager 不缓存），所以靠 no-store 让中间层别截。
     """
     response.headers["Cache-Control"] = "no-store"
@@ -294,7 +294,7 @@ async def get_portfolio_state(response: Response) -> Dict[str, Any]:
     """轻量同步信号：返回 portfolio.md 的 mtime + size + 一句概要。
 
     GUI / agent 可以用这条做 polling 探针——比 /api/portfolio 便宜，且只要
-    NapCat / CLI 写过盘 mtime 就会跳。比单纯靠 60s SWR 刷新更精准。
+    CLI / API 写过盘 mtime 就会跳。比单纯靠 60s SWR 刷新更精准。
 
     用法（curl 端）：
         curl -s http://127.0.0.1:8765/api/portfolio/state
@@ -410,7 +410,7 @@ def _build_holding_v2(h: Dict[str, Any]) -> HoldingV2:
 async def get_holdings(response: Response) -> HoldingsListResponse:
     """v2 通用持仓列表：cash dict + holdings 数组（含实时 quote + 计算 P&L）
 
-    no-store：参见 /api/portfolio 同步链路注释——防中间层缓存住，NapCat 写完
+    no-store：参见 /api/portfolio 同步链路注释——防中间层缓存住，其他入口写完
     portfolio.md 后下次 SWR refresh 必须拿到新数据。
     """
     response.headers["Cache-Control"] = "no-store"
@@ -877,8 +877,7 @@ async def get_daily(
 # ============================================================
 # 设计：
 # - 所有写端点都走 PortfolioManager.with_portfolio_tx()（fcntl + 原子写）
-# - 业务逻辑直接复用 connectors/napcat_bot.py 里 _deposit/_gold_buy 等的写法，
-#   不重新发明轮子（保证 NapCat 与 Web 写入语义一致，包括 history 字段）
+# - 业务逻辑直接复用 PortfolioManager，避免在 Web 层重写写入语义。
 # - 委员会触发是长任务（~6 min），用 asyncio.run_in_executor 跑同步入口，
 #   状态落盘到 memory/.committee/<task_id>/status.json，前端 SWR 轮询查
 

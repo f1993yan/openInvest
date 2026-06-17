@@ -37,7 +37,7 @@ openInvest 的目标不是替你下单，而是把投资决策过程变得可追
 ```text
 agents/       LLM 角色 prompt 和 SDK agent 封装
 backend/      盘中监控使用的直接委员会 API
-connectors/   GUI/API 桥、NapCat bot、浏览器侧接口
+connectors/   GUI/API 桥、浏览器侧接口
 core/         委员会编排、优化器、买卖点、SMC 回测
 db/           SQLite 账本：账户、交易、insights、events、行情缓存
 jobs/         盘中监控、周末新闻、PnL 快照等任务

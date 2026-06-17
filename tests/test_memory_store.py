@@ -124,7 +124,7 @@ def test_concurrent_rmw_no_lost_updates(tmp_path):
 
 
 def test_concurrent_mixed_increment_decrement(tmp_path):
-    """模拟 audit 描述场景: scheduler 扣 + napcat 存交错"""
+    """模拟 audit 描述场景: scheduler 扣 + 外部写入交错"""
     root = tmp_path / "memory"
     MemoryStore(root).write("portfolio", "state", {"cash_cny": 1000.0}, "")
 

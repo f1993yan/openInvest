@@ -294,38 +294,7 @@ uv run pytest tests/test_xxx.py::test_yyy -v --tb=long
 
 ---
 
-## 9. NapCat QQ bot 不响应命令
-
-### 症状
-
-QQ 私聊发 `/balance`，bot 不回。
-
-### 诊断
-
-```bash
-# 1. NapCat 在跑吗
-ps aux | grep -i napcat
-
-# 2. invest-napcat connector 在跑吗
-ps aux | grep "connectors.napcat_bot"
-
-# 3. journal 看接收事件
-sudo journalctl --since "5 min ago" | grep napcat
-```
-
-### 常见原因
-
-| 症状 | 原因 | 修复 |
-|------|------|------|
-| 收到消息但拒绝 | `INVEST_WHITELIST_QQ` 没设 / 不是你的 QQ 号 | `.env` 加 `INVEST_WHITELIST_QQ=你的QQ` |
-| 收不到事件 | NAPCAT_WS_URL 错 / NapCat 没开 WS | 检查 NapCat 启动参数 |
-| 收到但 reply 失败 | NAPCAT_HTTP_URL 错 | 检查 NapCat HTTP API 端口 |
-
-详见 `connectors/README.md`。
-
----
-
-## 10. 应急联系 / 找历史
+## 9. 应急联系 / 找历史
 
 - 历史决议：`memory/daily/<date>/<symbol>.md`
 - LLM 调用 telemetry：`memory/llm_usage.jsonl`

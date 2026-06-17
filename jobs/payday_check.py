@@ -1,7 +1,7 @@
 """每月 1 号 09:00 把净收入入账
 
 替代旧 PortfolioManager.process_income 的隐式副作用。
-现在显式：只在 cron 触发或 NapCat 手动 `/payday` 时执行。
+现在显式：只在 cron 触发或 CLI/API 手动执行时运行。
 """
 from __future__ import annotations
 

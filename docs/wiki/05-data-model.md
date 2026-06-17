@@ -56,7 +56,7 @@ gold_avg_cost_cny_per_gram: 1008.79
 ```
 
 **问题**：
-- 加新资产（如苹果股票 AAPL）要改代码：portfolio.md 加 `aapl_shares` 字段、PortfolioManager 加 getter、render_body 加渲染逻辑、NapCat 加 `/aapl_set` 命令——**至少 4 处**
+- 加新资产（如苹果股票 AAPL）要改代码：portfolio.md 加 `aapl_shares` 字段、PortfolioManager 加 getter、render_body 加渲染逻辑、Web API endpoint——**至少 4 处**
 - 加新币种（如 USD/EUR）同理
 - 字段越来越多，schema 维护成本指数级
 
@@ -236,7 +236,7 @@ def _file_lock(path: Path):
             fcntl.flock(fp.fileno(), fcntl.LOCK_UN)
 ```
 
-→ 同一文件 napcat_bot 进程 + invest-web 进程 + scheduler 进程同时写，**不会丢更新**。
+→ 同一文件 invest-web 进程 + scheduler 进程 + CLI 同时写，**不会丢更新**。
 
 ### 5.3 atomic write（防进程被 kill）
 
@@ -258,7 +258,7 @@ def _atomic_write_text(path: Path, text: str):
 
 ```
 50 线程并发 cash["CNY"] += 1   → 最终 delta = 50.0   (0 lost updates)
-20 轮 scheduler 扣款 + napcat 存款 race  → delta 精确 = -37880  (0 lost updates)
+20 轮 scheduler 扣款 + API 写入 race  → delta 精确 = -37880  (0 lost updates)
 ```
 
 ---
@@ -300,9 +300,9 @@ memory/
 | 死法 | 修法 | 出处 |
 |------|------|------|
 | 进程被 kill 时 portfolio.md 写到一半，状态损坏 | atomic write 三步 | `core/memory_store.py:_atomic_write_text` |
-| napcat 存款 + scheduler 扣款 TOCTOU | 单锁 RMW + transaction | `core/memory_store.py:transaction` |
+| API 写入 + scheduler 扣款 TOCTOU | 单锁 RMW + transaction | `core/memory_store.py:transaction` |
 | schema 飘字段（user 改了 portfolio.md 写了非法字段）| Pydantic v2 强校验 + render_body 用模板 | `core/schemas.py` |
-| 多 connector 实现飘移（napcat 自己改 dict）| 强制走 PortfolioManager 接口 | `core/portfolio_manager.py` |
+| 多 connector 实现飘移 | 强制走 PortfolioManager 接口 | `core/portfolio_manager.py` |
 
 ---
 

@@ -102,7 +102,7 @@ def main():
 
 ## 说明
 
-- 黄金持仓由 NapCat 私聊命令更新（`/gold_buy 12.5g @1040`）
+- 黄金持仓由 GUI/API 或导入脚本更新
 - 平均成本随每次买入自动重算
 """
     store.write("portfolio", "state", new_data, new_body)

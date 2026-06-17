@@ -113,11 +113,11 @@ git checkout -b feat/your-feature   # 或 fix/xxx / docs/xxx
 例：
 
 ```
-feat(napcat): 11 命令切 v2 数据模型 + 18 fixture 测试
+feat(web-api): 持仓写入切 v2 数据模型 + 回归测试
 
-写命令全部从 cash_cny / gold_grams 扁平字段改成 cash dict + holdings list：
-- _balance: pm.cash_amount("CNY") + holdings.find()
-- _withdraw: 加余额校验，不足直接拒绝
+写入路径全部从 cash_cny / gold_grams 扁平字段改成 cash dict + holdings list：
+- /api/holdings: 统一走 PortfolioManager
+- /api/portfolio: 加 no-store，避免缓存旧数据
 ...
 ```
 
@@ -148,7 +148,6 @@ uv run pytest tests/test_xxx.py -v   # 单跑
 | `core/*` | `tests/test_<module>.py` 直接测函数 |
 | `agents/*` | mock LLM client，测 prompt 渲染 + parse |
 | `connectors/web_api.py` | `tests/test_web_api.py`，FastAPI TestClient |
-| `connectors/napcat_bot.py` | `tests/test_napcat_v2.py`，CommandContext fixture |
 | 前端 | invest-gui 暂未配单测，至少 build 过 + 浏览器手测 |
 
 详见 [tests/README.md](tests/README.md)。

@@ -784,7 +784,7 @@ def test_smc_backtest_endpoint(client, monkeypatch):
 
 
 # ============ GUI 同步链路回归测试 ============
-# 2026-05-19 用户反馈"GUI 不显示 NapCat 同步的持仓 / 决策回放空白"。
+# 2026-05-19 用户反馈"GUI 不显示外部写入的持仓 / 决策回放空白"。
 # 后端本身没缓存（每请求 new PortfolioManager → 直接读 disk），但中间层
 # 可能缓存住 GET 响应。这一组测试守住三件事：
 #   1. 写 portfolio.md 后下一次 /api/holdings 立即拿到新数据
@@ -794,13 +794,13 @@ def test_smc_backtest_endpoint(client, monkeypatch):
 
 
 def test_holdings_reads_disk_no_cache(client, tmp_store):
-    """模拟 NapCat 写 portfolio.md：下一次 /api/holdings 必须看到新增的资产"""
+    """模拟外部入口写 portfolio.md：下一次 /api/holdings 必须看到新增的资产"""
     # 初始：tmp_store 已经种了 NDQ.AX + GC=F
     r1 = client.get("/api/holdings")
     syms_before = {h["symbol"] for h in r1.json()["holdings"]}
     assert syms_before == {"NDQ.AX", "GC=F"}
 
-    # 模拟 NapCat 在锁内追加一个 AAPL 持仓（绕过 web_api 走 PortfolioManager 的写路径）
+    # 模拟外部入口在锁内追加一个 AAPL 持仓（绕过 web_api 走 PortfolioManager 的写路径）
     from core.portfolio_manager import PortfolioManager as _PM
     pm = _PM(store=tmp_store)
     with pm.with_portfolio_tx() as p:

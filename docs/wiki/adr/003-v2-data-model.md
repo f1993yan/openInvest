@@ -24,7 +24,7 @@ gold_avg_cost_cny_per_gram: 1008.79
 ```
 
 **问题**：
-- 加新资产（如苹果 AAPL）需要在 4-5 处改代码：portfolio.md 字段 / PortfolioManager getter / render_body 模板 / NapCat 命令 / Web API endpoint
+- 加新资产（如苹果 AAPL）需要在 4-5 处改代码：portfolio.md 字段 / PortfolioManager getter / render_body 模板 / Web API endpoint
 - 加新币种（如 USD/EUR）同理
 - 字段越来越多，schema 维护成本指数级
 - 用户想"追踪一只股看看"必须改代码再部署
@@ -87,7 +87,7 @@ holdings:
 1. **数据嵌套加深一层**：`p["holdings"][i]["units"]` 而不是 `p["ndq_shares"]`
 2. **写代码变啰嗦**：每次找 holding 要 `next((h for h in holdings if h.get("symbol") == sym), None)`
 3. **Pydantic schema 复杂度增加**：HoldingV2 字段 12+ vs 旧的扁平字段 5 个
-4. **NapCat 11 命令需改写**：`/balance` 从 `p["cash_cny"]` 改 `pm.cash_amount("CNY")`，6 个写命令全要改
+4. **外部命令入口需改写**：`/balance` 类查询从 `p["cash_cny"]` 改 `pm.cash_amount("CNY")`，写命令全要改
 5. **要写 v1 read-time fallback**：避免老 portfolio.md 立刻挂
 
 ---
@@ -183,9 +183,9 @@ with self.store.transaction("portfolio") as p:
 
 → v1 portfolio.md **第一次被写**时自动升级到 v2。零停机。
 
-### NapCat 11 命令改写
+### 外部命令入口改写
 
-`connectors/napcat_bot.py` 全部命令切：
+旧外部命令入口全部命令切：
 
 | 旧 v1 | 新 v2 |
 |------|------|
@@ -208,7 +208,7 @@ with self.store.transaction("portfolio") as p:
 
 - 完整数据模型：[05-data-model.md](../05-data-model.md)
 - v2 commit: `3353d65 feat: v2 通用化数据模型 + v3 透明化 + live 多轮真辩论 + 18 README`
-- NapCat v2 切换 + 测试: `4cc1db3 feat(napcat): 11 命令切 v2 数据模型 + 18 fixture 测试`
+- 外部命令 v2 切换 + 测试: `4cc1db3 feat(command): 命令切 v2 数据模型 + 18 fixture 测试`
 - 迁移脚本: `scripts/migrate_portfolio_to_holdings.py`
 
 ---

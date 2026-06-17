@@ -145,7 +145,7 @@
 ### 改动清单
 
 1. **新建 `connectors/telegram_bot.py`**
-   - 模仿 `napcat_bot.py` 的结构（@cmd 装饰器 + dispatch）
+   - 模仿 `connectors/web_api.py` 的边界，只做协议转换和请求分发
    - 收到 Telegram 消息 → 解析 `/balance` → 调 `core/portfolio_manager.PortfolioManager` 获取数据
    - 不要自己改 portfolio dict，必须走 `pm.cash_amount(...)` / `pm.holdings.find(...)`
 
@@ -162,7 +162,7 @@
 工时：~半天。
 
 **关键约束**：connector 必须只做协议转换，业务逻辑全部 forward 给 `core/`。
-违反 → connector 间行为飘移（早期 napcat 改 dict 的教训）。
+违反 → connector 间行为飘移。
 
 ---
 

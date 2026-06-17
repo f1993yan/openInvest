@@ -14,7 +14,7 @@
 ```
 ┌─────────────────────────────────────────────────────────────┐
 │  CONNECTORS（外部触发器，多消费者模式）                       │
-│  napcat_bot.py · web_api.py · skill/run.sh                  │
+│  web_api.py · skill/run.sh · desktop window                 │
 └────────────────┬────────────────────────────────────────────┘
                  │  调用业务函数（不直接接 LLM）
                  ▼
@@ -40,16 +40,16 @@
 
 ## 1. Connectors 层（多消费者）
 
-外部世界进入 invest 的入口。当前 3 个 connector，**功能等价、各自负责自己的协议**：
+外部世界进入 invest 的入口。当前 connector **功能等价、各自负责自己的协议**：
 
 | Connector | 触发协议 | 适合 |
 |-----------|---------|------|
-| `connectors/napcat_bot.py` | QQ WebSocket 私聊命令（`/balance` `/deposit 100`）| 移动端快速操作 |
 | `connectors/web_api.py` | HTTP REST + SSE | Web GUI / 程序化集成 |
 | `skill/run.sh` (CLI) | Claude Code Skill | 让 Claude 自己当协调者跑 |
+| `scripts/monitor_desktop_window.py` | 本地桌面窗口 | 盘中监控 / 手动记账 |
 
 **关键约束**：connector 必须**只做协议转换**，业务逻辑全部 forward 给 `core/`。
-违反这条 → connector 之间会出现行为飘移（已有教训：早期 napcat 自己改 portfolio dict 导致 Web 写入失败）。
+违反这条 → connector 之间会出现行为飘移。
 
 详见各 connector 子目录 README：
 - [connectors/README.md](../../connectors/README.md)
@@ -219,15 +219,15 @@ holdings:
 
 | 场景 | 风险 | 缓解 |
 |------|------|------|
-| napcat 存款 + scheduler 扣款同时跑 | TOCTOU 丢更新 | `MemoryStore.transaction()` 单锁 RMW |
+| API/GUI 写入 + scheduler 扣款同时跑 | TOCTOU 丢更新 | `MemoryStore.transaction()` 单锁 RMW |
 | 多线程 ThreadPool 同时调 LLM | （只读不冲突）| — |
-| Web API 写 + napcat 写同时 | TOCTOU | 同上，fcntl 是进程级锁 |
+| Web API 写 + CLI 写同时 | TOCTOU | 同上，fcntl 是进程级锁 |
 | 多个 committee task 同时跑 | status.json 互踩 | 每 task_id 一个独立 dir |
 
 并发压测（`tests/test_memory_store.py`）：
 ```
 50 线程并发 cash["CNY"] += 1   → 最终 delta = 50.0  (0 lost updates)
-20 轮 scheduler 扣款 + napcat 存款 race → delta 精确 = -37880  (0 lost updates)
+20 轮 scheduler 扣款 + API 写入 race → delta 精确 = -37880  (0 lost updates)
 ```
 
 详见 [05-data-model.md#并发安全](05-data-model.md#并发安全)。
@@ -238,7 +238,7 @@ holdings:
 
 每层都设计成可独立替换：
 
-- **加 connector**（如 Telegram bot）：照 napcat_bot.py 模式新建一个文件，**不要碰 core**
+- **加 connector**（如 Telegram bot）：照 `web_api.py` 的边界新建一个文件，**不要碰 core**
 - **加 agent 角色**（如 ESG 分析师）：在 `agents/` 加 prompt 文件，在 `committee.py:run_committee` 注册
 - **换 LLM provider**（DeepSeek → OpenAI）：改 `agents/agent.py` 的 client init，prompt 不动
 - **换持久化**（Markdown → SQLite）：实现 `MemoryStore` 同接口，core 不动

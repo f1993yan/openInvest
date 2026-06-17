@@ -322,7 +322,6 @@ def launch(config: LaunchConfig) -> None:
         config.log_dir / "scheduler.log",
         config.log_dir / "scheduler.err.log",
     )
-
     if config.start_window:
         launch_window(config)
 

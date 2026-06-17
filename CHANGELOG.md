@@ -27,6 +27,7 @@
 
 ### Refactor
 
+* **connectors:** 删除废弃 IM Bot、连接检查脚本、启动开关和相关测试/文档，保留桌面窗口与 Web/API 作为交互入口。
 * **monitor-window:** 将 `monitor_desktop_window.py` 拆分为常量、数据服务、文案格式化、通用组件、新闻弹层、选股弹层、手动交易弹层和委员会分析弹层模块，降低单文件维护压力。
 
 ### Bug Fixes

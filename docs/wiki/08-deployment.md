@@ -223,11 +223,6 @@ SMTP_USER=you@gmail.com
 SMTP_PASS=app-password
 SMTP_TO=you@gmail.com
 
-# NapCat QQ bot
-NAPCAT_WS_URL=ws://localhost:6101
-NAPCAT_HTTP_URL=http://localhost:6100
-INVEST_WHITELIST_QQ=12345678   # 必填，否则 napcat 拒绝所有
-
 # 开发环境（Vite 跨域调）
 INVEST_WEB_DEV_CORS=1   # 仅本机 dev 时用，生产别开
 ```

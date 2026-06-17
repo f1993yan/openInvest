@@ -137,7 +137,7 @@ def get_history_data(
         as_of_date: **回测穿越防护**。如果给定 (ISO 'YYYY-MM-DD')，结果 df 会
             过滤到该日期**之前**（不含当日），所有数据源（DB 缓存 + yfinance 拉新
             + CSV 兜底）都受此约束。backtest_committee.py 的 _patch_tools_to_date
-            注入此参数；正常 daily_report / NapCat 不传 → 跟旧行为一致。
+            注入此参数；正常 daily_report 不传 → 跟旧行为一致。
 
             为什么需要：MarketStore DB 可能含 T+ 价格（之前 daily cron 写入），
             backtest 调 decision_date=2024-05-01 时若不过滤，LLM 会"看到未来"。

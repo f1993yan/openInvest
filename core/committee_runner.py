@@ -488,7 +488,7 @@ def run_committee_for_symbol(
 # 召回 / wealth view 注入 / prior insights 加载 / 并行 dispatch"逻辑只在这一处实现。
 #
 # 三个 entry 只负责自己路径独有的事：
-#   - Skill: Stage 0 同日 cache 检查、--force flag、最终 JSON 输出、NapCat hint
+#   - Skill: Stage 0 同日 cache 检查、--force flag、最终 JSON 输出、执行提示
 #   - Web/GUI: task_id 状态机、meta.json 审计、SSE 进度推送
 #   - Cron: staleness 熔断、邮件渲染、Gemini 第二意见、Dreaming append_daily
 #

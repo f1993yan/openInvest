@@ -709,11 +709,6 @@ def cmd_run_committee(args: argparse.Namespace) -> None:
     report = asset_result.get("report")
     cio_memo = report.cio_memo if report is not None else ""
 
-    # 检测用户是否配了 NapCat（白名单 QQ 不为 0）—— 没配的话别推 NapCat 命令，
-    # 改走 Web GUI / API 路径。多数小白用户没装 NapCat，硬塞会让他们一脸懵
-    napcat_qq = os.getenv("INVEST_WHITELIST_QQ", "0").strip()
-    has_napcat = napcat_qq and napcat_qq != "0"
-
     # 顺带把 cio_memo 是 Markdown 这件事再叮嘱一句，agent 拿到后必须 render
     cio_render_hint = (
         "⚠️ `cio_memo` 字段是 Markdown 字符串（含 `## verdict` `**confidence**` 等格式），"
@@ -725,25 +720,16 @@ def cmd_run_committee(args: argparse.Namespace) -> None:
         "`~/.claude/skills/invest/scripts/run.sh gui` 启动后端，然后浏览器刷新。"
     )
 
-    if has_napcat:
-        next_step = (
-            f"{cio_render_hint}\n\n"
-            "已生成 verdict。如果用户同意：黄金/现金交易告诉用户用 NapCat 命令"
-            "（如 `/gold_buy 5g @1040`）；其他 yfinance symbol 走 GUI HoldingDialog "
-            f"（{gui_url}）或 `POST/PUT /api/holdings/{{symbol}}`。**不要直接写 "
-            f"memory/**——所有状态变更必须走带审计的入口。\n\n{gui_troubleshoot}"
-        )
-    else:
-        next_step = (
-            f"{cio_render_hint}\n\n"
-            "已生成 verdict。如果用户同意，告诉他按下面三步走：\n"
-            f"1) 在 openInvest 里登记这笔（最方便：浏览器开 {gui_url} → 持仓页 → "
-            "编辑/新增 holding；或 `POST/PUT /api/holdings/{symbol}` API）\n"
-            "2) 打开他自己的证券 App / 银行 App，按 verdict 里的 alloc_cny 金额 + "
-            "资产 symbol 真实下单（openInvest 本身不接交易所，只做决策）\n"
-            f"3) 回 openInvest 标记成交\n\n{gui_troubleshoot}\n\n"
-            "**不要直接写 memory/**——所有状态变更必须走带审计的入口。"
-        )
+    next_step = (
+        f"{cio_render_hint}\n\n"
+        "已生成 verdict。如果用户同意，告诉他按下面三步走：\n"
+        f"1) 在 openInvest 里登记这笔（最方便：浏览器开 {gui_url} → 持仓页 → "
+        "编辑/新增 holding；或 `POST/PUT /api/holdings/{symbol}` API）\n"
+        "2) 打开他自己的证券 App / 银行 App，按 verdict 里的 alloc_cny 金额 + "
+        "资产 symbol 真实下单（openInvest 本身不接交易所，只做决策）\n"
+        f"3) 回 openInvest 标记成交\n\n{gui_troubleshoot}\n\n"
+        "**不要直接写 memory/**——所有状态变更必须走带审计的入口。"
+    )
 
     _print_json({
         "status": "ok",
@@ -1459,7 +1445,7 @@ def _write_v2_portfolio(cash: Dict[str, float], holdings: List[Dict[str, Any]]) 
         "",
         "## 说明",
         "",
-        "由 onboarding 写入。之后通过 GUI / NapCat / `POST /api/holdings` 调整，"
+        "由 onboarding 写入。之后通过 GUI / `POST /api/holdings` 调整，"
         "不要手动编辑 frontmatter。",
     ]
     store.write("portfolio", "state", portfolio_data, "\n".join(body_lines) + "\n")
@@ -1716,7 +1702,7 @@ def _interactive_prompt() -> Dict[str, Any]:
             "用一句话描述当前所有持仓 + 现金。例：\n"
             "  '510300 沪深300ETF 3000 股 4.2 元，工行积存金 50 克 750 均价，"
             "余额宝 5 万，AUD 现金 800'\n"
-            "留空就跳过，之后用 GUI 或 NapCat 命令补。",
+            "留空就跳过，之后用 GUI 或 API 补。",
             file=sys.stderr,
         )
         desc = ask("持仓描述（留空跳过）", "")

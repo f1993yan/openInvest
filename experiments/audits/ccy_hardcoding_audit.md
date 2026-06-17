@@ -112,8 +112,6 @@ total_cny = (
 - `core/committee.py:340,361,374` — `portfolio_cash_cny` 作为 wealth_context 输入: CNY-base 设计的合理表达。
 - `core/committee.py:705` — `Suggested allocation CNY`: 委员会 verdict 单位锚定 CNY（fork 用户也以 CNY 算 alloc）。
 - `connectors/web_api.py:271-273,905-906,944-945,1768-1769,3015-3016` — `WriteResponse(cash_cny=..., aud_cash=...)`: v1 API schema 兼容前端用，前端已经长这样。可在 v3 schema 升级时一并改。
-- `connectors/napcat_bot.py:129-145` — `/balance`：先打 CNY + AUD，再循环 `pm.cash` 列其他币种。已经通用化，OK。
-- `connectors/napcat_bot.py:141-142` — `if ccy in ("CNY", "AUD"): continue` 用来跳过已打印的两个 → display 合理。
 - `core/committee.py:668-669` + `agents/tools.py:163-164` + `connectors/web_api.py:2481-2486` + `scripts/skill.py:382` — VIX/TNX/USDCNY/AUDCNY macro 面板硬编码：是"通用宏观背景，所有 fork 用户都关心" (web_api 注释明说)。可加 env 让 fork 用户追加更多 FX，但 4 个 baseline 保留是合理 default。
 - `core/paper_trade_simulator.py:65-78,82-83` — `ASSET_CURRENCY` 静态映射: 已经手写常见美/澳/港/中股，未知 default USD。Backtest 工具，可接受。
 - `services/commsec_reader.py:175` — `"currency": "AUD"`: CommSec 是澳洲券商，写死 AUD 正确。
@@ -129,14 +127,7 @@ ccy_symbol = "¥" if ccy == "CNY" else ("$" if ccy in ("USD", "AUD") else "")
 **问题**: EUR/JPY/HKD 持仓的 portfolio_summary 货币符号是空字符串，输出 `"均价 1234.5"` 没单位提示。不致命，但 LLM 提示词清晰度下降。
 **修法**: 加 `"HK$" if ccy == "HKD"`, `"€" if ccy == "EUR"`, 兜底直接用 `ccy + " "` (`"EUR 1234.5"`)。
 
-### C2. `connectors/napcat_bot.py:179`
-```python
-unit_sign = "$" if ccy in ("USD", "AUD", "HKD") else "¥"
-```
-**问题**: HKD 印 `$` 不致命但应为 `HK$`；EUR 印 `¥` 是错的。
-**修法**: 同 C1。
-
-### C3. `jobs/daily_report.py:191,195` — 4.7 字面值出现在 user-facing 提示
+### C2. `jobs/daily_report.py:191,195` — 4.7 字面值出现在 user-facing 提示
 "使用历史均值 4.7 兜底" 文案被 inline 拼到 LLM warning。即使 A4 把数字修了，这条 warning 也得动态化。
 
 ---

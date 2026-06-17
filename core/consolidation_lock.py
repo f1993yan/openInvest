@@ -1,7 +1,7 @@
 """仿 Claude Code v2.1.88 leaked 的 consolidationLock.ts
 (src/services/autoDream/consolidationLock.ts)
 
-防止 Dreaming 被三处同时触发（cron / NapCat / Skill）撕裂数据。
+防止 Dreaming 被多处同时触发（cron / API / Skill）撕裂数据。
 设计要点：
 - mtime = lastConsolidatedAt（一次 stat 即可读上次完成时间）
 - body = holder PID（PID 复用守护：进程死了释放）

@@ -61,7 +61,7 @@ def main():
             "currency": "CNY",
             "channel": "浙商银行积存金",
             "max_single_invest_cny": 5000,
-            "price_offset_pct": 0.015,  # auto 推断后会被 NapCat 命令覆盖
+            "price_offset_pct": 0.015,  # auto 推断后可被 GUI/API 覆盖
             "note": "CNY 直接买克，offset 由用户报浙商克价后自动推断",
         },
     ]
@@ -84,7 +84,7 @@ def main():
 - **渠道**: 浙商银行积存金（CNY 直接买克）
 - **单次入场上限 (CNY)**: ¥5,000
 - **数据源**: yfinance `GC=F`（COMEX 期货）+ `USDCNY=X`
-- **点差**: 默认 1.5%，由 NapCat 报"今天浙商 X 元/克"后自动反推更新
+- **点差**: 默认 1.5%，由 GUI/API 记录"今天浙商 X 元/克"后自动反推更新
 
 ## 决策约束
 
@@ -125,8 +125,8 @@ def main():
 
 ## 说明
 
-此文件由 daily_report / commsec_sync / payday_check / napcat_bot 四方更新。
-- 黄金持仓需通过 NapCat 私聊命令 `/gold_set 12.5` 设置（用户主动报）
+此文件由 daily_report / commsec_sync / payday_check / web_api 更新。
+- 黄金持仓需通过 GUI/API 设置（用户主动报）
 - 其余通过自动化流程更新
 """
     store.write("portfolio", "state", new_portfolio_data, new_portfolio_body)

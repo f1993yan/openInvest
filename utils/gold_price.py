@@ -9,7 +9,7 @@
 - yfinance USDCNY=X
 
 Auto offset 推断：
-- 每次用户在 NapCat 报当日实际买入克价 → 反算 offset_pct 写回 strategy.md
+- 用户通过 GUI/API 记录当日实际买入克价后，可反算 offset_pct 写回 strategy.md
 - 这样不用手动维护各家银行（浙商 / 工行 / 招行 / 建行 / 华安 ETF 等）的点差，
   系统自动学习用户实际渠道的溢价
 """
@@ -115,7 +115,7 @@ def infer_offset_pct(reported_bank_price_cny_per_gram: float) -> Optional[float]
 
 
 def format_gold_report(snap: GoldPriceSnapshot) -> str:
-    """给 daily_report 邮件 / NapCat 用的展示文本"""
+    """给 daily_report 邮件 / GUI 用的展示文本"""
     return (
         f"--- GOLD PRICE SNAPSHOT ---\n"
         f"伦敦金现货 (GC=F): ${snap.gold_usd_per_oz:.2f}/oz\n"

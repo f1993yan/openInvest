@@ -112,7 +112,7 @@ def main():
     body_lines.append("## 说明")
     body_lines.append("")
     body_lines.append("此文件由 daily_report / commsec_sync / payday_check 三个 job 自动更新。")
-    body_lines.append("通过 GUI / NapCat 命令调整，不要手动编辑 frontmatter。")
+    body_lines.append("通过 GUI / API 调整，不要手动编辑 frontmatter。")
     portfolio_body = "\n".join(body_lines) + "\n"
     store.write("portfolio", "state", portfolio_data, portfolio_body)
     print(f"✓ memory/portfolio.md 已写入")
