@@ -15,7 +15,7 @@ import threading
 import tkinter as tk
 from datetime import datetime
 from pathlib import Path
-from tkinter import ttk
+from tkinter import messagebox, ttk
 from typing import Any, Dict, List, Optional
 
 
@@ -370,7 +370,11 @@ class MonitorWindow(MonitorNewsMixin, MonitorSelectionMixin, MonitorTradeMixin, 
             if self.demo
             else _load_snapshot(self.snapshot_path)
         )
-        rows = _sort_stock_rows(list(payload.get("rows") or []))
+        rows = _sort_stock_rows(
+            list(payload.get("rows") or [])
+            if self.demo
+            else _filter_rows_by_current_config(list(payload.get("rows") or []))
+        )
         stock_signature = tuple(
             (
                 row.get("symbol"),
@@ -680,6 +684,22 @@ class MonitorWindow(MonitorNewsMixin, MonitorSelectionMixin, MonitorTradeMixin, 
             font=("Microsoft YaHei UI", 10, "bold"),
         ).pack(side=tk.LEFT)
         tk.Label(top, text=symbol, bg=bg, fg=MUTED, font=("Microsoft YaHei UI", 9)).pack(side=tk.LEFT, padx=(8, 0))
+        if _is_config_watch_only(row):
+            remove_btn = tk.Label(
+                top,
+                text="−",
+                bg="#eef2f7" if bg == CARD_BG else bg,
+                fg=MUTED,
+                font=("Segoe UI", 11, "bold"),
+                width=2,
+                cursor="hand2",
+            )
+            remove_btn._skip_card_bindings = True  # type: ignore[attr-defined]
+            remove_btn.pack(side=tk.RIGHT, padx=(6, 0))
+            remove_btn.bind("<Button-1>", lambda event, r=row: self._confirm_remove_watchlist(r, event))
+            remove_btn.bind("<Double-Button-1>", lambda _event: "break")
+            remove_btn.bind("<Enter>", lambda _event, w=remove_btn: w.configure(bg="#fee4e2", fg=DOWN_FG))
+            remove_btn.bind("<Leave>", lambda _event, w=remove_btn: w.configure(bg="#eef2f7" if bg == CARD_BG else bg, fg=MUTED))
         tk.Label(
             top,
             text=_operation_summary(row),
@@ -746,7 +766,7 @@ class MonitorWindow(MonitorNewsMixin, MonitorSelectionMixin, MonitorTradeMixin, 
         mid.pack(fill=tk.X, pady=(6, 0))
         tk.Label(mid, text=_fmt_price(price.get("current")), bg=bg, fg=TEXT, font=("Microsoft YaHei UI", 14, "bold")).pack(side=tk.LEFT)
         tk.Label(mid, text=_fmt_pct(price.get("change_pct")), bg=bg, fg=change_color, font=("Microsoft YaHei UI", 10, "bold")).pack(side=tk.LEFT, padx=(8, 0))
-        tk.Label(mid, text=f"{_verdict_signal(op.get('verdict'))} {op.get('verdict', '-')}", bg=bg, fg=MUTED, font=("Microsoft YaHei UI", 9)).pack(side=tk.RIGHT)
+        tk.Label(mid, text=f"{_verdict_signal(op.get('verdict'))} {_compact_verdict_label(op.get('verdict'))}", bg=bg, fg=MUTED, font=("Microsoft YaHei UI", 9)).pack(side=tk.RIGHT)
 
         bottom = tk.Frame(card, bg=bg)
         bottom.pack(fill=tk.X, pady=(4, 0))
@@ -762,10 +782,44 @@ class MonitorWindow(MonitorNewsMixin, MonitorSelectionMixin, MonitorTradeMixin, 
                 continue
             widget.bind("<Double-Button-1>", lambda _event, s=symbol: self._open_analysis_dialog(s))
             for nested in widget.winfo_children():
+                if getattr(nested, "_skip_card_bindings", False):
+                    continue
                 nested.bind("<Double-Button-1>", lambda _event, s=symbol: self._open_analysis_dialog(s))
                 nested.bind("<Enter>", lambda _event: self._set_hover_stack("stocks"))
                 nested.bind("<MouseWheel>", lambda event: self._wheel_stock_stack(event))
         return card
+
+    def _confirm_remove_watchlist(self, row: Dict[str, Any], event: Optional[tk.Event] = None) -> str:
+        if event is not None:
+            try:
+                event.widget.focus_set()
+            except Exception:
+                pass
+        symbol = str(row.get("symbol") or "").strip()
+        name = str(row.get("name") or symbol)
+        if not symbol:
+            return "break"
+        if row.get("is_holding") or _safe_num(row.get("units")) > 0:
+            self.status_text.set("当前标的是持仓，不能取消关注")
+            return "break"
+        ok = messagebox.askyesno(
+            "取消关注",
+            f"确认取消关注 {name}（{symbol}）吗？\n\n这只会从关注列表移除，不会影响当前持仓。",
+            parent=self.root,
+        )
+        if not ok:
+            return "break"
+        try:
+            message = _remove_from_watchlist(symbol)
+            self.status_text.set(message)
+            self.stock_page_index = 0
+            self.last_payload_signature = ()
+            self.stock_content_signature = ()
+            self.refresh()
+        except Exception as exc:  # noqa: BLE001
+            self.status_text.set(f"取消关注失败: {exc}")
+            messagebox.showerror("取消关注失败", str(exc), parent=self.root)
+        return "break"
 
     def _set_hover_stack(self, stack: str) -> None:
         self.hover_stack = stack

@@ -208,6 +208,87 @@ def _execute_user_trade_manual(symbol: str, direction: str, lots: int, lot_size:
     return f"已按最新价记账: {name} {trade.direction} {trade.units:.0f}股 @ {trade.price:.2f}"
 
 
+def _is_config_watch_only(row: Dict[str, Any]) -> bool:
+    symbol = str(row.get("symbol") or "").strip()
+    if not symbol or row.get("_demo") or row.get("is_holding") or _safe_num(row.get("units")) > 0:
+        return False
+    try:
+        from jobs.market_monitor import load_config
+
+        config = load_config()
+        holding_symbols = {
+            str(item.get("symbol") or "").strip()
+            for item in config.get("holdings") or []
+            if item.get("symbol")
+        }
+        watch_symbols = {
+            str(item.get("symbol") or "").strip()
+            for item in config.get("watchlist") or []
+            if item.get("symbol")
+        }
+        try:
+            from db.account_ledger import AccountLedger, REAL_ACCOUNT
+
+            ledger = AccountLedger()
+            ledger.ensure_initialized(config)
+            ledger_units = max(
+                (
+                    _safe_num(item.get("units"))
+                    for item in ledger.list_holdings(REAL_ACCOUNT)
+                    if str(item.get("symbol") or "").strip() == symbol
+                ),
+                default=0.0,
+            )
+            if ledger_units > 0:
+                return False
+        except Exception:
+            pass
+        return symbol in watch_symbols and symbol not in holding_symbols
+    except Exception:
+        return False
+
+
+def _remove_from_watchlist(symbol: str) -> str:
+    symbol = str(symbol or "").strip()
+    if not symbol:
+        raise ValueError("缺少标的代码")
+    from jobs.market_monitor import CONFIG_PATH, load_config
+
+    config = load_config()
+    holdings = list(config.get("holdings") or [])
+    if any(str(item.get("symbol") or "").strip() == symbol for item in holdings):
+        raise ValueError("当前标的是持仓，不能从主窗口取消关注")
+    watchlist = list(config.get("watchlist") or [])
+    remaining = [item for item in watchlist if str(item.get("symbol") or "").strip() != symbol]
+    if len(remaining) == len(watchlist):
+        return "该标的不在关注列表"
+    config["watchlist"] = remaining
+    CONFIG_PATH.write_text(json.dumps(config, ensure_ascii=False, indent=2), encoding="utf-8")
+    return f"已取消关注: {symbol}"
+
+
+def _filter_rows_by_current_config(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    try:
+        from jobs.market_monitor import load_config
+
+        config = load_config()
+        allowed_symbols = {
+            str(item.get("symbol") or "").strip()
+            for bucket in (config.get("holdings") or [], config.get("watchlist") or [])
+            for item in bucket
+            if item.get("symbol")
+        }
+        if not allowed_symbols:
+            return rows
+        return [
+            row
+            for row in rows
+            if str(row.get("symbol") or "").strip() in allowed_symbols
+        ]
+    except Exception:
+        return rows
+
+
 def _fmt_pct(value: Any) -> str:
     return f"{_safe_num(value):+.2f}%"
 
@@ -694,6 +775,9 @@ __all__ = [
     "_operation_direction",
     "_execute_user_trade_from_row",
     "_execute_user_trade_manual",
+    "_is_config_watch_only",
+    "_remove_from_watchlist",
+    "_filter_rows_by_current_config",
     "_fmt_pct",
     "_short",
     "_load_snapshot",

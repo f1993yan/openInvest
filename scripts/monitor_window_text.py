@@ -157,6 +157,17 @@ def _verdict_label(verdict: Any) -> str:
     }.get(str(verdict or "").upper(), "暂无明确结论")
 
 
+def _compact_verdict_label(verdict: Any) -> str:
+    return {
+        "BUY": "买入",
+        "ACCUMULATE": "加仓",
+        "HOLD": "持有",
+        "WAIT": "等待",
+        "TRIM": "减仓",
+        "SELL": "卖出",
+    }.get(str(verdict or "").upper(), "暂无")
+
+
 def _regime_label(text: Any) -> str:
     value = str(text or "")
     match = re.search(r"REGIME:\s*([a-z_]+)", value, re.I)
@@ -424,6 +435,7 @@ __all__ = [
     "_exit_summary",
     "_operation_summary",
     "_verdict_label",
+    "_compact_verdict_label",
     "_regime_label",
     "_extract_one_line",
     "_extract_risk_flags",
