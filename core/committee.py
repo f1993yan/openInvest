@@ -501,7 +501,7 @@ def run_optimizer_review_view(
         "Return only the following format:\n"
         "OPTIMIZER_REVIEW:\n"
         "CONCLUSION: accept | caution | override_required\n"
-        "ONE_LINE: <action> + <reason>; 若与regime/基本面/趋势矛盾，必须写明（矛盾：A显示X、B显示Y，禁止笼统说'存在矛盾'。）\n"
+        "ONE_LINE: <action> + <reason>。若与regime/基本面/趋势矛盾，必须写明【矛盾：A显示X，B显示Y】。禁止笼统说\"存在矛盾\"。\n"
         "RISK_FLAGS: comma-separated Chinese flags or none\n"
         "HUMAN_CHECK: one concise Chinese sentence or none\n"
         "RATIONALE: two concise Chinese sentences max"
@@ -526,7 +526,7 @@ def run_optimizer_review_view(
         "Use override_required only when the deterministic output contradicts "
         "the provided constraints or has missing critical data. "
         "In ONE_LINE: ALWAYS cite the specific data that caused your verdict "
-        "(e.g., '价格高于买突破位30日回报为负等回调' not just '存在矛盾')."
+        "(e.g. '价格高于买突破但30日回报为负→等回调' not just '存在矛盾')."
     )
     return _ask(agent, context)
 

@@ -146,6 +146,17 @@ def _operation_summary(row: Dict[str, Any]) -> str:
     return "观察"
 
 
+def _llm_review_lots_hint(row: Dict[str, Any]) -> str:
+    op = row.get("operation") or {}
+    if str(op.get("status") or row.get("state") or "") != "action_required":
+        return ""
+    optimizer_lots = int(_safe_num(op.get("optimizer_lots"), _safe_num(op.get("alert_selected_lots"))))
+    llm_lots = int(_safe_num(op.get("llm_review_lots"), optimizer_lots))
+    if optimizer_lots <= 0 or llm_lots == optimizer_lots:
+        return ""
+    return f"LLM审核推荐{llm_lots}手"
+
+
 def _verdict_label(verdict: Any) -> str:
     return {
         "BUY": "买入",
@@ -434,6 +445,7 @@ __all__ = [
     "_buy_summary",
     "_exit_summary",
     "_operation_summary",
+    "_llm_review_lots_hint",
     "_verdict_label",
     "_compact_verdict_label",
     "_regime_label",

@@ -382,6 +382,9 @@ class MonitorWindow(MonitorNewsMixin, MonitorSelectionMixin, MonitorTradeMixin, 
                 row.get("state"),
                 (row.get("operation") or {}).get("verdict"),
                 _safe_num((row.get("operation") or {}).get("suggested_alloc_cny")),
+                _safe_num((row.get("operation") or {}).get("optimizer_lots")),
+                _safe_num((row.get("operation") or {}).get("llm_review_lots")),
+                (row.get("operation") or {}).get("llm_position_scale"),
                 _safe_num((row.get("price") or {}).get("current")),
                 _safe_num((row.get("price") or {}).get("change_pct")),
                 _safe_num(row.get("position_pct")),
@@ -739,6 +742,15 @@ class MonitorWindow(MonitorNewsMixin, MonitorSelectionMixin, MonitorTradeMixin, 
             cursor="hand2",
         )
         exec_btn.pack(side=tk.LEFT)
+        llm_lots_hint = _llm_review_lots_hint(row)
+        if llm_lots_hint:
+            tk.Label(
+                trade_bar,
+                text=llm_lots_hint,
+                bg=bg,
+                fg=MUTED,
+                font=("Microsoft YaHei UI", 8),
+            ).pack(side=tk.LEFT, padx=(8, 0))
         tk.Label(trade_bar, textvariable=status_var, bg=bg, fg=UP_FG, font=("Microsoft YaHei UI", 8)).pack(side=tk.RIGHT)
 
         def confirm_trade(_event: Optional[tk.Event] = None, *, r: Dict[str, Any] = row) -> str:

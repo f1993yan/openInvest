@@ -10,7 +10,9 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import os
+import re
 import subprocess
 import sys
 import time
@@ -63,6 +65,10 @@ MONITOR_POPUPS_ENABLED = os.getenv("INVEST_MONITOR_POPUPS", "0") == "1"
 AUTO_TRADE_REPEAT_COOLDOWN_MINUTES = max(
     0,
     int(os.getenv("INVEST_AUTO_TRADE_REPEAT_COOLDOWN_MINUTES", "60")),
+)
+COST_STOP_LOSS_PCT = max(
+    0.0,
+    float(os.getenv("INVEST_MONITOR_COST_STOP_LOSS_PCT", "12")),
 )
 
 # ==========================================
@@ -274,6 +280,10 @@ def _safe_num(value: Any, default: float = 0.0) -> float:
         return default
 
 
+def _clamp(value: float, low: float, high: float) -> float:
+    return max(low, min(high, value))
+
+
 def _fmt_price(value: Any) -> str:
     v = _safe_num(value, 0.0)
     return f"{v:.2f}" if v > 0 else "-"
@@ -310,6 +320,8 @@ def evaluate_entry_exit_triggers(
     entry_exit_points: Optional[Dict[str, Any]],
     *,
     is_holding: bool,
+    cost: float = 0.0,
+    cost_stop_loss_pct: float = COST_STOP_LOSS_PCT,
 ) -> List[Dict[str, Any]]:
     """Return price-level triggers for an existing entry/exit plan.
 
@@ -318,8 +330,9 @@ def evaluate_entry_exit_triggers(
     plan. Consecutive alerting then confirms that two adjacent observations
     crossed compatible levels instead of reacting to a single noisy tick.
     """
-    if not entry_exit_points or current_price <= 0:
+    if current_price <= 0:
         return []
+    entry_exit_points = entry_exit_points or {}
 
     price = float(current_price)
     buy_pullback = _safe_num(entry_exit_points.get("buy_pullback_price"))
@@ -328,6 +341,10 @@ def evaluate_entry_exit_triggers(
     take_profit = _safe_num(entry_exit_points.get("take_profit_price"))
     trim = _safe_num(entry_exit_points.get("trim_price"))
     reentry = _safe_num(entry_exit_points.get("reentry_price"))
+    avg_cost = _safe_num(cost)
+    cost_stop_level = 0.0
+    if avg_cost > 0 and cost_stop_loss_pct > 0:
+        cost_stop_level = avg_cost * (1.0 - cost_stop_loss_pct / 100.0)
 
     triggers: List[Dict[str, Any]] = []
 
@@ -341,7 +358,9 @@ def evaluate_entry_exit_triggers(
             })
 
     if is_holding:
-        if stop_loss > 0 and price <= stop_loss:
+        if cost_stop_level > 0 and price <= cost_stop_level:
+            _add("sell", "cost_stop_loss", cost_stop_level)
+        elif stop_loss > 0 and price <= stop_loss:
             _add("sell", "stop_loss", stop_loss)
         elif buy_pullback > 0 and price <= buy_pullback:
             _add("buy", "buy_pullback", buy_pullback)
@@ -369,16 +388,30 @@ def _trigger_sides(triggers: List[Dict[str, Any]]) -> Set[str]:
     return {str(t.get("side", "")) for t in triggers if t.get("side")}
 
 
+def _trigger_label(kind: Any) -> str:
+    return {
+        "cost_stop_loss": "成本止损",
+        "stop_loss": "技术止损",
+        "take_profit": "止盈",
+        "trim": "减仓",
+        "buy_pullback": "回调买入",
+        "buy_breakout": "突破买入",
+        "reentry": "重新入场",
+    }.get(str(kind or ""), str(kind or "-"))
+
+
 def update_entry_exit_alert_state(
     *,
     results: List[Dict[str, Any]],
     prices: Dict[str, Dict[str, Any]],
     holding_symbols: Set[str],
+    stocks: Optional[List[Dict[str, Any]]] = None,
     state_path: Path = ENTRY_EXIT_ALERT_STATE_PATH,
 ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
     state = load_entry_exit_alert_state(state_path)
     symbols_state = dict(state.get("symbols") or {})
     prices_by_symbol = {str(k).upper(): v for k, v in prices.items()}
+    stock_by_symbol = {str(s.get("symbol") or "").upper(): s for s in (stocks or [])}
     holding_symbols = {s.upper() for s in holding_symbols}
     now_text = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
@@ -392,8 +425,6 @@ def update_entry_exit_alert_state(
         if not symbol:
             continue
         entry_exit_points = result.get("entry_exit_points") or {}
-        if not entry_exit_points:
-            continue
 
         price_info = prices_by_symbol.get(symbol) or {}
         current_price = _safe_num(price_info.get("price"), _safe_num(entry_exit_points.get("current_price")))
@@ -404,8 +435,10 @@ def update_entry_exit_alert_state(
             current_price,
             previous.get("entry_exit_points"),
             is_holding=is_holding,
+            cost=_safe_num((stock_by_symbol.get(symbol) or {}).get("cost")),
         )
         matched_sides = sorted(_trigger_sides(previous_triggers) & _trigger_sides(current_triggers))
+        has_cost_stop_loss = any(t.get("kind") == "cost_stop_loss" for t in current_triggers)
 
         row = {
             "symbol": symbol,
@@ -414,12 +447,12 @@ def update_entry_exit_alert_state(
             "current_price": current_price,
             "entry_exit_points": entry_exit_points,
             "triggers": current_triggers,
-            "confirmed": bool(matched_sides),
-            "matched_sides": matched_sides,
+            "confirmed": bool(matched_sides) or has_cost_stop_loss,
+            "matched_sides": ["sell"] if has_cost_stop_loss else matched_sides,
         }
         watch_rows.append(row)
 
-        if matched_sides:
+        if row["confirmed"]:
             confirmed_alerts.append({
                 **row,
                 "previous_triggers": previous_triggers,
@@ -446,7 +479,7 @@ def format_entry_exit_alert_body(alerts: List[Dict[str, Any]]) -> str:
     for alert in alerts[:8]:
         side = "/".join(alert.get("matched_sides") or [])
         trigger_text = ", ".join(
-            f"{t.get('kind')}@{_fmt_price(t.get('level'))}"
+            f"{_trigger_label(t.get('kind'))}@{_fmt_price(t.get('level'))}"
             for t in (alert.get("triggers") or [])[:3]
         )
         lines.append(
@@ -540,6 +573,7 @@ def apply_repeated_trade_guard(
         current_price,
         previous.get("entry_exit_points"),
         is_holding=_safe_num(stock.get("position_pct")) > 0,
+        cost=_safe_num(stock.get("cost")),
     )
     has_direction_trigger = any(t.get("side") == direction.lower() for t in triggers)
     if has_direction_trigger:
@@ -645,15 +679,93 @@ def _has_llm_hold_conflict(result: Dict[str, Any]) -> bool:
     return "LLM=HOLD" in memo and ("-> ACCUMULATE" in memo or "-> BUY" in memo)
 
 
-def _review_penalty(result: Dict[str, Any]) -> float:
-    text = f"{result.get('optimizer_review', '')}\n{result.get('cio_memo', '')}".lower()
-    if "reject" in text or "不建议" in text:
-        return -45.0
-    if "caution" in text or "谨慎" in text or "加仓理由不充分" in text:
-        return -30.0
-    if "approve" in text or "support" in text:
-        return 12.0
-    return 0.0
+_REVIEW_APPROVE_TOKENS = {"APPROVE", "APPROVED", "SUPPORT", "SUPPORTED", "KEEP", "PASS", "OK", "ACCEPT"}
+_REVIEW_CAUTION_TOKENS = {"CAUTION", "CAUTIOUS", "WARN", "WARNING", "WATCH", "REVIEW"}
+_REVIEW_REJECT_TOKENS = {"REJECT", "REJECTED", "BLOCK", "VETO", "DENY", "AVOID"}
+
+# LLM review is qualitative evidence, not the primary optimizer.  Treat it as a
+# weak likelihood-ratio update on the objective score's implied odds:
+#   score = threshold + scale * log(odds)
+#   posterior_score = score + scale * log(likelihood_ratio)
+# These values are conservative priors, not fitted optima.  They can be
+# replaced by historical calibration once executed/ignored alert outcomes exist.
+_LLM_REVIEW_LOGIT_SCALE = 12.0
+_REVIEW_LIKELIHOOD_RATIOS = {
+    "approve": 1.12,
+    "caution": 0.78,
+    "reject": 0.48,
+}
+_LLM_HOLD_CONFLICT_LR_WITH_TRIGGER = 0.86
+_LLM_HOLD_CONFLICT_LR_WITHOUT_TRIGGER = 0.70
+
+
+def _map_review_conclusion(token: str) -> str:
+    normalized = str(token or "").strip().upper().replace("-", "_")
+    if not normalized:
+        return ""
+    if normalized in _REVIEW_REJECT_TOKENS or any(
+        phrase in token for phrase in ("拒绝", "否决", "反对", "不通过", "不建议", "放弃")
+    ):
+        return "reject"
+    if normalized in _REVIEW_CAUTION_TOKENS or any(
+        phrase in token for phrase in ("谨慎", "慎重", "观察", "观望", "风险偏高")
+    ):
+        return "caution"
+    if normalized in _REVIEW_APPROVE_TOKENS or any(
+        phrase in token for phrase in ("通过", "支持", "认可", "同意", "可以")
+    ):
+        return "approve"
+    return ""
+
+
+def _review_conclusion(result: Dict[str, Any]) -> str:
+    text = f"{result.get('optimizer_review', '')}\n{result.get('cio_memo', '')}"
+    match = re.search(r"(?i)\bCONCLUSION\s*[:：]\s*([A-Z_]+|[\u4e00-\u9fff]+)", text)
+    if match:
+        return _map_review_conclusion(match.group(1))
+    for phrase in ("明确反对", "不建议执行", "建议放弃", "暂不买入", "风险偏高"):
+        if phrase in text:
+            return "reject" if phrase != "风险偏高" else "caution"
+    return ""
+
+
+def _review_score_adjustment(
+    result: Dict[str, Any],
+    objective_score: float,
+    *,
+    threshold: float = 55.0,
+) -> float:
+    _ = (objective_score, threshold)
+    conclusion = _review_conclusion(result)
+    return _likelihood_ratio_score_adjustment(
+        _REVIEW_LIKELIHOOD_RATIOS.get(conclusion, 1.0),
+        scale=_LLM_REVIEW_LOGIT_SCALE,
+    )
+
+
+def _likelihood_ratio_score_adjustment(
+    likelihood_ratio: float,
+    *,
+    scale: float = _LLM_REVIEW_LOGIT_SCALE,
+) -> float:
+    lr = _safe_num(likelihood_ratio, 1.0)
+    if lr <= 0 or not math.isfinite(lr):
+        return 0.0
+    return scale * math.log(lr)
+
+
+def _llm_hold_conflict_adjustment(
+    result: Dict[str, Any],
+    objective_score: float,
+    *,
+    has_buy_trigger: bool,
+    threshold: float = 55.0,
+) -> float:
+    _ = (objective_score, threshold)
+    if not _has_llm_hold_conflict(result):
+        return 0.0
+    lr = _LLM_HOLD_CONFLICT_LR_WITH_TRIGGER if has_buy_trigger else _LLM_HOLD_CONFLICT_LR_WITHOUT_TRIGGER
+    return _likelihood_ratio_score_adjustment(lr, scale=_LLM_REVIEW_LOGIT_SCALE)
 
 
 def _entry_trigger_for_result(
@@ -669,6 +781,7 @@ def _entry_trigger_for_result(
         current_price,
         previous.get("entry_exit_points"),
         is_holding=_safe_num(stock.get("position_pct")) > 0,
+        cost=_safe_num(stock.get("cost")),
     )
 
 
@@ -688,10 +801,8 @@ def _action_score(
         score += 2.0
     elif verdict in {"TRIM", "SELL"}:
         score += 5.0
-    score += _review_penalty(result)
-    if _has_llm_hold_conflict(result):
-        score -= 35.0
-    if any(t.get("side") == "buy" for t in triggers):
+    has_buy_trigger = any(t.get("side") == "buy" for t in triggers)
+    if has_buy_trigger:
         score += 24.0
     elif verdict in {"BUY", "ACCUMULATE"}:
         score -= 18.0
@@ -716,6 +827,10 @@ def _action_score(
     rr = _safe_num(ee.get("reward_risk_ratio"))
     if rr > 0:
         score += min(12.0, rr * 4.0)
+
+    objective_score = score
+    score += _review_score_adjustment(result, objective_score)
+    score += _llm_hold_conflict_adjustment(result, objective_score, has_buy_trigger=has_buy_trigger)
     return score
 
 
@@ -767,6 +882,121 @@ def _option_risk_penalty(
         "post_position_pct": round(post_position_pct, 4),
         "stop_loss_pct": round(stop_loss_pct, 4),
         "reward_risk_ratio": round(rr, 4),
+    }
+
+
+def _text_percent_after_keywords(text: str, keywords: Tuple[str, ...]) -> float:
+    if not text:
+        return 0.0
+    escaped = "|".join(re.escape(k) for k in keywords)
+    match = re.search(rf"(?i)(?:{escaped})[^\d%负亏损-]*(-?\d+(?:\.\d+)?)\s*%", text)
+    if not match:
+        return 0.0
+    return abs(_safe_num(match.group(1)))
+
+
+def _tail_loss_pct(result: Dict[str, Any]) -> float:
+    ee = result.get("entry_exit_points") or {}
+    direct = max(
+        _safe_num(result.get("cvar_95_loss_pct")),
+        _safe_num(result.get("conditional_cvar_95_loss_pct")),
+        _safe_num(ee.get("cvar_95_loss_pct")),
+        _safe_num(ee.get("conditional_cvar_95_loss_pct")),
+    )
+    if direct > 0:
+        return direct
+    text = f"{result.get('optimizer_review', '')}\n{result.get('cio_memo', '')}"
+    return _text_percent_after_keywords(text, ("CVaR", "cvar", "条件CVaR", "尾部风险", "尾部损失"))
+
+
+def _position_scale_label(scale: float) -> str:
+    if scale <= 0.15:
+        return "avoid"
+    if scale <= 0.35:
+        return "tiny"
+    if scale <= 0.70:
+        return "half"
+    return "normal"
+
+
+def _position_scale_multiplier(label: str) -> float:
+    return {
+        "avoid": 0.0,
+        "tiny": 0.25,
+        "half": 0.5,
+        "normal": 1.0,
+    }.get(label, 1.0)
+
+
+def _math_review_position_scale(
+    result: Dict[str, Any],
+    *,
+    stock: Dict[str, Any],
+    price: float,
+    lots: int,
+    lot_size: int,
+    portfolio_value: float,
+    alert_score: float,
+    max_single_position_pct: float,
+) -> Dict[str, Any]:
+    if lots <= 0 or price <= 0 or lot_size <= 0:
+        return {
+            "position_scale": "avoid",
+            "position_scale_value": 0.0,
+            "position_scale_multiplier": 0.0,
+            "recommended_lots": 0,
+            "risk_components": {},
+        }
+
+    ee = result.get("entry_exit_points") or {}
+    cost = lots * lot_size * price
+    add_pct = cost / max(portfolio_value, 1.0) * 100.0
+    current_pct = _safe_num(stock.get("position_pct"))
+    target_pct = _safe_num(stock.get("target_position_pct") or stock.get("target_pct"), max_single_position_pct)
+    target_pct = min(max_single_position_pct, target_pct if target_pct > 0 else max_single_position_pct)
+
+    stop_loss = _safe_num(ee.get("stop_loss_price"))
+    if stop_loss > 0 and stop_loss < price:
+        stop_loss_pct = (price - stop_loss) / price * 100.0
+    else:
+        stop_loss_pct = max(_safe_num(ee.get("atr_pct")), 2.0)
+    stop_loss_budget_pct = 1.0
+    stop_loss_loss_pct = add_pct * stop_loss_pct / 100.0
+    stop_loss_scale = 1.0 if stop_loss_loss_pct <= 0 else _clamp(stop_loss_budget_pct / stop_loss_loss_pct, 0.0, 1.0)
+
+    cvar_pct = _tail_loss_pct(result)
+    tail_budget_pct = 1.5
+    tail_loss_pct = add_pct * cvar_pct / 100.0
+    tail_scale = 1.0 if tail_loss_pct <= 0 else _clamp(tail_budget_pct / tail_loss_pct, 0.0, 1.0)
+
+    remaining_position_pct = max(0.0, target_pct - current_pct)
+    concentration_scale = 1.0 if add_pct <= 0 else _clamp(remaining_position_pct / add_pct, 0.0, 1.0)
+
+    signal_scale = _clamp(1.0 / (1.0 + math.exp(-(_safe_num(alert_score) - 65.0) / 8.0)), 0.0, 1.0)
+
+    raw_scale = min(stop_loss_scale, tail_scale, concentration_scale, signal_scale)
+    label = _position_scale_label(raw_scale)
+    multiplier = _position_scale_multiplier(label)
+    recommended_lots = int(math.floor(lots * multiplier))
+    if label != "avoid" and lots > 0:
+        recommended_lots = max(1, recommended_lots)
+
+    return {
+        "position_scale": label,
+        "position_scale_value": round(raw_scale, 4),
+        "position_scale_multiplier": multiplier,
+        "recommended_lots": min(lots, recommended_lots),
+        "risk_components": {
+            "stop_loss_scale": round(stop_loss_scale, 4),
+            "stop_loss_loss_pct": round(stop_loss_loss_pct, 4),
+            "cvar_scale": round(tail_scale, 4),
+            "cvar_95_loss_pct": round(cvar_pct, 4),
+            "tail_loss_pct": round(tail_loss_pct, 4),
+            "concentration_scale": round(concentration_scale, 4),
+            "signal_scale": round(signal_scale, 4),
+            "add_position_pct": round(add_pct, 4),
+            "post_position_pct": round(current_pct + add_pct, 4),
+        },
     }
 
 
@@ -873,9 +1103,6 @@ def select_optimal_actionable_alerts(
         if _is_limit_up_buy_blocked(result, price_info):
             suppressed.append({"symbol": symbol, "name": result.get("name"), "reason": "limit_up_buy_blocked"})
             continue
-        if _has_llm_hold_conflict(result) and not any(t.get("side") == "buy" for t in triggers):
-            suppressed.append({"symbol": symbol, "name": result.get("name"), "reason": "llm_hold_without_buy_trigger"})
-            continue
         if score < 55.0:
             suppressed.append({"symbol": symbol, "name": result.get("name"), "reason": f"low_score:{score:.1f}"})
             continue
@@ -902,9 +1129,25 @@ def select_optimal_actionable_alerts(
                 max_single_position_pct=max_single_position_pct,
             )
             base_value = score * (lots ** 0.5)
+            math_review = _math_review_position_scale(
+                result,
+                stock=stock,
+                price=price,
+                lots=lots,
+                lot_size=lot,
+                portfolio_value=base_portfolio_value,
+                alert_score=score,
+                max_single_position_pct=max_single_position_pct,
+            )
             option = dict(result)
             option["suggested_alloc_cny"] = round(cost)
+            option["optimizer_lots"] = lots
             option["alert_selected_lots"] = lots
+            option["llm_review_lots"] = math_review["recommended_lots"]
+            option["llm_position_scale"] = math_review["position_scale"]
+            option["llm_position_scale_value"] = math_review["position_scale_value"]
+            option["llm_position_scale_multiplier"] = math_review["position_scale_multiplier"]
+            option["llm_risk_components"] = math_review["risk_components"]
             option["alert_score"] = round(score, 2)
             option["alert_raw_value"] = round(base_value, 4)
             option["alert_risk_penalty"] = round(risk_penalty, 4)
@@ -975,7 +1218,8 @@ def _operation_detail(result: Dict[str, Any], row: Dict[str, Any], actionable: D
     symbol = str(result.get("symbol") or row.get("symbol") or "").upper()
     action_row = actionable.get(symbol)
     verdict = str(result.get("verdict") or "UNKNOWN").upper()
-    alloc = _safe_num(result.get("suggested_alloc_cny"))
+    alloc_source = action_row if action_row else result
+    alloc = _safe_num(alloc_source.get("suggested_alloc_cny"))
     triggers = row.get("triggers") or []
     if action_row:
         status = "action_required"
@@ -1004,6 +1248,12 @@ def _operation_detail(result: Dict[str, Any], row: Dict[str, Any], actionable: D
         "verdict": verdict,
         "confidence": round(_safe_num(result.get("confidence")), 4),
         "suggested_alloc_cny": round(alloc, 2),
+        "optimizer_lots": None if not action_row else int(_safe_num(action_row.get("optimizer_lots") or action_row.get("alert_selected_lots"))),
+        "llm_review_lots": None if not action_row else int(_safe_num(action_row.get("llm_review_lots"), _safe_num(action_row.get("alert_selected_lots")))),
+        "llm_position_scale": "" if not action_row else str(action_row.get("llm_position_scale") or ""),
+        "llm_position_scale_value": None if not action_row else round(_safe_num(action_row.get("llm_position_scale_value")), 4),
+        "llm_position_scale_multiplier": None if not action_row else round(_safe_num(action_row.get("llm_position_scale_multiplier"), 1.0), 4),
+        "llm_risk_components": {} if not action_row else action_row.get("llm_risk_components") or {},
         "alert_score": None if not action_row else round(_safe_num(action_row.get("alert_score")), 2),
         "triggers": triggers,
         "confirmed": bool(row.get("confirmed")),
@@ -1626,6 +1876,7 @@ def run_monitor_round():
         results=results,
         prices=prices,
         holding_symbols=real_holding_symbols,
+        stocks=all_stocks,
     )
 
     window_snapshot = build_monitor_window_snapshot(

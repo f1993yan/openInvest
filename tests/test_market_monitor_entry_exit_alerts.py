@@ -3,6 +3,11 @@ import types
 from datetime import datetime
 
 from jobs.market_monitor import (
+    _action_score,
+    _llm_hold_conflict_adjustment,
+    _math_review_position_scale,
+    _review_conclusion,
+    _review_score_adjustment,
     apply_repeated_trade_guard,
     build_monitor_window_snapshot,
     call_committee,
@@ -12,6 +17,7 @@ from jobs.market_monitor import (
     should_send_monitor_summary_popup,
     update_entry_exit_alert_state,
 )
+from scripts.monitor_window_text import _llm_review_lots_hint
 
 
 def _result(symbol, price, breakout):
@@ -44,6 +50,28 @@ def test_watchlist_breakout_trigger_is_buy():
             "kind": "buy_breakout",
             "level": 10.5,
             "price": 10.8,
+        }
+    ]
+
+
+def test_holding_cost_stop_loss_triggers_before_dynamic_stop():
+    triggers = evaluate_entry_exit_triggers(
+        102.4,
+        {
+            "buy_pullback_price": 93.35,
+            "buy_breakout_price": 104.66,
+            "stop_loss_price": 90.55,
+        },
+        is_holding=True,
+        cost=134.01,
+    )
+
+    assert triggers == [
+        {
+            "side": "sell",
+            "kind": "cost_stop_loss",
+            "level": 117.9288,
+            "price": 102.4,
         }
     ]
 
@@ -96,6 +124,45 @@ def test_entry_exit_alert_requires_two_consecutive_triggers(tmp_path):
     assert alerts[0]["matched_sides"] == ["buy"]
 
 
+def test_entry_exit_alert_confirms_cost_stop_loss_for_holding(tmp_path):
+    state_path = tmp_path / "entry_exit_alert_state.json"
+    result = {
+        "success": True,
+        "symbol": "09988",
+        "name": "阿里巴巴",
+        "entry_exit_points": {
+            "current_price": 102.4,
+            "buy_pullback_price": 93.35,
+            "buy_breakout_price": 104.66,
+            "stop_loss_price": 90.55,
+        },
+    }
+    stock = {"symbol": "09988", "position_pct": 3.92, "units": 100, "cost": 134.01}
+
+    alerts, rows = update_entry_exit_alert_state(
+        results=[result],
+        prices={"09988": {"price": 102.4}},
+        holding_symbols={"09988"},
+        stocks=[stock],
+        state_path=state_path,
+    )
+    assert len(alerts) == 1
+    assert rows[0]["triggers"][0]["kind"] == "cost_stop_loss"
+    assert rows[0]["confirmed"] is True
+    assert alerts[0]["matched_sides"] == ["sell"]
+
+    alerts, rows = update_entry_exit_alert_state(
+        results=[result],
+        prices={"09988": {"price": 102.4}},
+        holding_symbols={"09988"},
+        stocks=[stock],
+        state_path=state_path,
+    )
+    assert len(alerts) == 1
+    assert rows[0]["confirmed"] is True
+    assert alerts[0]["matched_sides"] == ["sell"]
+
+
 def test_monitor_window_snapshot_contains_stable_status_fields():
     result = {
         "success": True,
@@ -128,7 +195,18 @@ def test_monitor_window_snapshot_contains_stable_status_fields():
     snapshot = build_monitor_window_snapshot(
         round_time="10:30",
         results=[result],
-        actionable=[{**result, "alert_score": 80}],
+        actionable=[{
+            **result,
+            "suggested_alloc_cny": 2120,
+            "alert_score": 80,
+            "optimizer_lots": 2,
+            "alert_selected_lots": 2,
+            "llm_review_lots": 1,
+            "llm_position_scale": "half",
+            "llm_position_scale_value": 0.62,
+            "llm_position_scale_multiplier": 0.5,
+            "llm_risk_components": {"signal_scale": 0.62},
+        }],
         prices={"600900": {"price": 10.6, "prev_close": 10.0, "change_pct": 6.0}},
         stocks=[{"symbol": "600900", "name": "长江电力", "sector": "电力", "position_pct": 0, "units": 200}],
         entry_exit_watch=[
@@ -154,6 +232,11 @@ def test_monitor_window_snapshot_contains_stable_status_fields():
     assert row["fundamental"]["score"] == 78
     assert row["technical"]["entry_exit_model"] == "atr_regime_fallback"
     assert row["llm_review"]["one_line"].startswith("买点质量")
+    assert row["operation"]["suggested_alloc_cny"] == 2120
+    assert row["operation"]["optimizer_lots"] == 2
+    assert row["operation"]["llm_review_lots"] == 1
+    assert row["operation"]["llm_position_scale"] == "half"
+    assert _llm_review_lots_hint(row) == "LLM审核推荐1手"
     assert row["units"] == 200
     assert row["is_holding"] is True
 
@@ -321,6 +404,152 @@ def test_alert_optimizer_uses_cash_constrained_utility():
     assert [r["symbol"] for r in selected] == ["600900"]
     assert selected[0]["suggested_alloc_cny"] == 2000
     assert any(item["symbol"] == "000063" for item in suppressed)
+
+
+def test_review_conclusion_uses_structured_field_not_stray_words():
+    assert _review_conclusion({"optimizer_review": "CONCLUSION: caution\nONE_LINE: 需要等回踩"}) == "caution"
+    assert _review_conclusion({"optimizer_review": "CONCLUSION: REJECT\nONE_LINE: 入场风险太高"}) == "reject"
+    assert _review_conclusion({"optimizer_review": "CONCLUSION: approve\nONE_LINE: 风险收益可接受"}) == "approve"
+    assert _review_conclusion({"optimizer_review": "NOTE: this says not reject, but has no structured conclusion"}) == ""
+
+
+def test_review_score_adjustment_is_weak_bayesian_evidence():
+    caution = _review_score_adjustment({"optimizer_review": "CONCLUSION: caution"}, 70.0)
+    reject = _review_score_adjustment({"optimizer_review": "CONCLUSION: reject"}, 70.0)
+    approve = _review_score_adjustment({"optimizer_review": "CONCLUSION: approve"}, 70.0)
+
+    assert reject < caution < 0 < approve
+    assert abs(approve) < abs(caution) < abs(reject)
+    assert reject > -10.0
+
+
+def test_reject_review_can_drop_marginal_candidate_but_caution_does_not():
+    base = {
+        "success": True,
+        "symbol": "600900",
+        "name": "边际候选",
+        "market": "a",
+        "verdict": "ACCUMULATE",
+        "confidence": 0.59,
+        "suggested_alloc_cny": 2000,
+        "fundamental_score": 75,
+        "entry_exit_points": {"reward_risk_ratio": 2.0},
+    }
+    stock = {"symbol": "600900", "position_pct": 0, "min_lot_size": 100}
+    price = {"price": 20.0, "change_pct": 1.0}
+
+    caution_score = _action_score(
+        {**base, "optimizer_review": "CONCLUSION: caution"},
+        stock=stock,
+        price_info=price,
+        triggers=[],
+    )
+    reject_score = _action_score(
+        {**base, "optimizer_review": "CONCLUSION: reject"},
+        stock=stock,
+        price_info=price,
+        triggers=[],
+    )
+
+    assert caution_score >= 55.0
+    assert reject_score < 55.0
+
+
+def test_llm_hold_conflict_is_soft_evidence_not_hard_block():
+    result = {
+        "success": True,
+        "symbol": "600900",
+        "name": "强信号候选",
+        "market": "a",
+        "verdict": "ACCUMULATE",
+        "confidence": 0.93,
+        "suggested_alloc_cny": 1000,
+        "fundamental_score": 80,
+        "cio_memo": "LLM=HOLD -> ACCUMULATE because optimizer evidence is stronger",
+        "entry_exit_points": {"reward_risk_ratio": 2.0},
+    }
+
+    assert _llm_hold_conflict_adjustment(result, 90.0, has_buy_trigger=False) < 0
+
+    selected, suppressed = select_optimal_actionable_alerts(
+        results=[result],
+        prices={"600900": {"price": 10.0, "change_pct": 1.0}},
+        cash=2000,
+        stocks=[{"symbol": "600900", "position_pct": 0, "min_lot_size": 100}],
+        entry_exit_state={},
+    )
+
+    assert [r["symbol"] for r in selected] == ["600900"]
+    assert all(item.get("reason") != "llm_hold_without_buy_trigger" for item in suppressed)
+
+
+def test_math_review_position_scale_reduces_lots_from_objective_risk():
+    result = {
+        "success": True,
+        "symbol": "600900",
+        "name": "风险复核候选",
+        "market": "a",
+        "verdict": "ACCUMULATE",
+        "confidence": 0.95,
+        "suggested_alloc_cny": 10000,
+        "fundamental_score": 80,
+        "optimizer_review": "CONCLUSION: caution\nRISK_FLAGS: 条件CVaR 95损失21.92%偏高",
+        "entry_exit_points": {
+            "reward_risk_ratio": 2.0,
+            "stop_loss_price": 8.8,
+            "cvar_95_loss_pct": 21.92,
+        },
+    }
+
+    review = _math_review_position_scale(
+        result,
+        stock={"symbol": "600900", "position_pct": 0, "min_lot_size": 100},
+        price=10.0,
+        lots=10,
+        lot_size=100,
+        portfolio_value=100000,
+        alert_score=85.0,
+        max_single_position_pct=25,
+    )
+
+    assert review["position_scale"] == "half"
+    assert review["recommended_lots"] == 5
+    assert review["risk_components"]["cvar_95_loss_pct"] == 21.92
+
+
+def test_alert_optimizer_keeps_optimizer_lots_and_llm_review_lots():
+    result = {
+        "success": True,
+        "symbol": "600900",
+        "name": "风险复核候选",
+        "market": "a",
+        "verdict": "ACCUMULATE",
+        "confidence": 0.95,
+        "suggested_alloc_cny": 10000,
+        "fundamental_score": 80,
+        "optimizer_review": "CONCLUSION: caution\nRISK_FLAGS: 条件CVaR 95损失21.92%偏高",
+        "entry_exit_points": {
+            "reward_risk_ratio": 2.0,
+            "stop_loss_price": 8.8,
+            "cvar_95_loss_pct": 21.92,
+        },
+    }
+
+    selected, _ = select_optimal_actionable_alerts(
+        results=[result],
+        prices={"600900": {"price": 10.0, "change_pct": 1.0}},
+        cash=10000,
+        stocks=[{"symbol": "600900", "position_pct": 0, "min_lot_size": 100}],
+        entry_exit_state={},
+        portfolio_value=100000,
+        max_alerts=1,
+    )
+
+    assert selected
+    row = selected[0]
+    assert row["optimizer_lots"] == row["alert_selected_lots"]
+    assert row["llm_review_lots"] < row["optimizer_lots"]
+    assert row["llm_position_scale"] in {"tiny", "half"}
 
 
 def test_alert_optimizer_prefers_risk_distributed_basket():
