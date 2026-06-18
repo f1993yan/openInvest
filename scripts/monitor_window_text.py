@@ -124,8 +124,9 @@ def _exit_summary(row: Dict[str, Any]) -> str:
     parts = []
     stop = _safe_num(exit_points.get("stop_loss_price"))
     take = _safe_num(exit_points.get("take_profit_price"))
+    prefix = "纪" if exit_points.get("plan_type") == "a_share_position_exit" else ""
     if stop > 0:
-        parts.append(f"损{stop:.2f}")
+        parts.append(f"{prefix}损{stop:.2f}")
     if take > 0:
         parts.append(f"止{take:.2f}")
     return " ".join(parts[:2]) or "-"
@@ -271,8 +272,10 @@ def _beginner_summary_lines(
     regime_text = (source or {}).get("regime") or technical.get("regime") or technical.get("quant_view")
     pullback = ee.get("buy_pullback_price")
     breakout = ee.get("buy_breakout_price")
-    stop = ee.get("stop_loss_price")
-    take = ee.get("take_profit_price")
+    exit_points = row.get("exit_points") or {}
+    stop = exit_points.get("stop_loss_price") if exit_points else ee.get("stop_loss_price")
+    take = exit_points.get("take_profit_price") if exit_points else ee.get("take_profit_price")
+    plan_type = str(exit_points.get("plan_type") or "")
     pullback_dist = _distance_pct(current, pullback)
     breakout_dist = _distance_pct(current, breakout)
     stop_dist = _distance_pct(current, stop)
@@ -303,7 +306,7 @@ def _beginner_summary_lines(
         "你最该先看这几项:",
         f"1. 当前价: {_fmt_price(current)}，今日涨跌 {_fmt_pct(price.get('change_pct'))}。",
         f"2. 理想买点: 回调 {_fmt_price(pullback)}（在当前价 {_fmt_distance(pullback_dist)}）；突破 {_fmt_price(breakout)}（在当前价 {_fmt_distance(breakout_dist)}）。",
-        f"3. 风险线: 止损 {_fmt_price(stop)}（在当前价 {_fmt_distance(stop_dist)}）；止盈 {_fmt_price(take)}（在当前价 {_fmt_distance(take_dist)}）。",
+        f"3. 风险线: {'持仓纪律' if plan_type == 'a_share_position_exit' else '入场估算'}，止损 {_fmt_price(stop)}（在当前价 {_fmt_distance(stop_dist)}）；止盈 {_fmt_price(take)}（在当前价 {_fmt_distance(take_dist)}）。",
         f"4. 仓位建议: {_fmt_money(alloc)} 元；置信度 {confidence:.0%}；当前{'已有持仓' if row.get('is_holding') else '没有持仓'}。",
         "",
         "为什么这么判断:",
@@ -316,6 +319,8 @@ def _beginner_summary_lines(
         lines.extend(["", "需要小心:"])
         if low_confidence:
             lines.append("- 买卖点模型置信度偏低，价格线只能当参考，不能机械下单。")
+        if plan_type == "a_share_position_exit":
+            lines.append("- 已持仓标的的止盈止损盘中不重算，只在收盘后按追踪规则上移风险线。")
         for flag in risk_flags:
             lines.append(f"- {flag}")
     lines.extend(

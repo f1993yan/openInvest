@@ -6,6 +6,7 @@ from jobs.market_monitor import (
     _action_score,
     _llm_hold_conflict_adjustment,
     _math_review_position_scale,
+    _update_position_exit_plan,
     _review_conclusion,
     _review_score_adjustment,
     apply_repeated_trade_guard,
@@ -147,7 +148,7 @@ def test_entry_exit_alert_confirms_cost_stop_loss_for_holding(tmp_path):
         state_path=state_path,
     )
     assert len(alerts) == 1
-    assert rows[0]["triggers"][0]["kind"] == "cost_stop_loss"
+    assert rows[0]["triggers"][0]["kind"] == "position_stop"
     assert rows[0]["confirmed"] is True
     assert alerts[0]["matched_sides"] == ["sell"]
 
@@ -161,6 +162,124 @@ def test_entry_exit_alert_confirms_cost_stop_loss_for_holding(tmp_path):
     assert len(alerts) == 1
     assert rows[0]["confirmed"] is True
     assert alerts[0]["matched_sides"] == ["sell"]
+
+
+def test_holding_position_exit_plan_does_not_follow_refreshed_committee_levels(tmp_path):
+    state_path = tmp_path / "entry_exit_alert_state.json"
+    stock = {"symbol": "600900", "position_pct": 5.0, "units": 1000, "cost": 10.0}
+
+    first = _result("600900", 10.0, 10.5)
+    first["entry_exit_points"]["atr_pct"] = 2.0
+    alerts, rows = update_entry_exit_alert_state(
+        results=[first],
+        prices={"600900": {"price": 10.0}},
+        holding_symbols={"600900"},
+        stocks=[stock],
+        state_path=state_path,
+        now=datetime(2026, 6, 18, 10, 0),
+    )
+    assert alerts == []
+    plan_1 = rows[0]["position_exit_plan"]
+
+    second = _result("600900", 10.2, 11.0)
+    second["entry_exit_points"].update({
+        "stop_loss_price": 9.8,
+        "take_profit_price": 14.0,
+        "atr_pct": 3.0,
+    })
+    alerts, rows = update_entry_exit_alert_state(
+        results=[second],
+        prices={"600900": {"price": 10.2}},
+        holding_symbols={"600900"},
+        stocks=[stock],
+        state_path=state_path,
+        now=datetime(2026, 6, 18, 10, 10),
+    )
+    plan_2 = rows[0]["position_exit_plan"]
+
+    assert plan_2["hard_stop_price"] == plan_1["hard_stop_price"]
+    assert plan_2["effective_stop_price"] == plan_1["effective_stop_price"]
+    assert plan_2["take_profit_1_price"] == plan_1["take_profit_1_price"]
+    assert rows[0]["entry_exit_points"]["stop_loss_price"] == 9.8
+
+
+def test_holding_trigger_uses_locked_position_plan_not_new_dynamic_stop(tmp_path):
+    state_path = tmp_path / "entry_exit_alert_state.json"
+    stock = {"symbol": "600900", "position_pct": 5.0, "units": 1000, "cost": 10.0}
+    first = _result("600900", 10.0, 10.5)
+    first["entry_exit_points"]["atr_pct"] = 2.0
+    update_entry_exit_alert_state(
+        results=[first],
+        prices={"600900": {"price": 10.0}},
+        holding_symbols={"600900"},
+        stocks=[stock],
+        state_path=state_path,
+        now=datetime(2026, 6, 18, 10, 0),
+    )
+
+    second = _result("600900", 9.7, 11.0)
+    second["entry_exit_points"].update({
+        "stop_loss_price": 9.8,
+        "take_profit_price": 13.0,
+        "atr_pct": 2.0,
+    })
+    alerts, rows = update_entry_exit_alert_state(
+        results=[second],
+        prices={"600900": {"price": 9.7}},
+        holding_symbols={"600900"},
+        stocks=[stock],
+        state_path=state_path,
+        now=datetime(2026, 6, 18, 10, 10),
+    )
+
+    assert alerts == []
+    assert rows[0]["triggers"] == []
+
+
+def test_position_exit_plan_stop_only_moves_up_after_close():
+    stock = {"symbol": "600900", "position_pct": 5.0, "units": 1000, "cost": 10.0}
+    result = _result("600900", 10.0, 10.5)
+    result["entry_exit_points"]["atr_pct"] = 2.0
+    first = _update_position_exit_plan(
+        None,
+        symbol="600900",
+        stock=stock,
+        result=result,
+        current_price=10.0,
+        is_holding=True,
+        now=datetime(2026, 6, 18, 10, 0),
+    )
+    assert first is not None
+    intraday = _update_position_exit_plan(
+        first,
+        symbol="600900",
+        stock=stock,
+        result=result,
+        current_price=11.0,
+        is_holding=True,
+        now=datetime(2026, 6, 18, 14, 0),
+    )
+    assert intraday["effective_stop_price"] == first["effective_stop_price"]
+    after_close = _update_position_exit_plan(
+        intraday,
+        symbol="600900",
+        stock=stock,
+        result=result,
+        current_price=11.0,
+        is_holding=True,
+        now=datetime(2026, 6, 18, 15, 1),
+    )
+    assert after_close["effective_stop_price"] > first["effective_stop_price"]
+    lower_close = _update_position_exit_plan(
+        after_close,
+        symbol="600900",
+        stock=stock,
+        result=result,
+        current_price=10.1,
+        is_holding=True,
+        now=datetime(2026, 6, 19, 15, 1),
+    )
+    assert lower_close["effective_stop_price"] == after_close["effective_stop_price"]
 
 
 def test_monitor_window_snapshot_contains_stable_status_fields():

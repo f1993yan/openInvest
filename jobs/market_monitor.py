@@ -70,6 +70,15 @@ COST_STOP_LOSS_PCT = max(
     0.0,
     float(os.getenv("INVEST_MONITOR_COST_STOP_LOSS_PCT", "12")),
 )
+POSITION_EXIT_PLAN_VERSION = 1
+A_SHARE_POSITION_MAX_LOSS_PCT = min(
+    15.0,
+    max(1.0, float(os.getenv("INVEST_A_SHARE_POSITION_MAX_LOSS_PCT", "8"))),
+)
+A_SHARE_POSITION_STOP_ATR_MULT = max(0.5, float(os.getenv("INVEST_A_SHARE_POSITION_STOP_ATR_MULT", "2.0")))
+A_SHARE_POSITION_TAKE_PROFIT_R1 = max(0.5, float(os.getenv("INVEST_A_SHARE_POSITION_TAKE_PROFIT_R1", "1.5")))
+A_SHARE_POSITION_TAKE_PROFIT_R2 = max(1.0, float(os.getenv("INVEST_A_SHARE_POSITION_TAKE_PROFIT_R2", "2.5")))
+A_SHARE_POSITION_TRAIL_ATR_MULT = max(0.5, float(os.getenv("INVEST_A_SHARE_POSITION_TRAIL_ATR_MULT", "2.8")))
 
 # ==========================================
 # 行情拉取
@@ -289,6 +298,189 @@ def _fmt_price(value: Any) -> str:
     return f"{v:.2f}" if v > 0 else "-"
 
 
+def _round_trade_price(value: float) -> float:
+    return round(max(_safe_num(value), 0.0), 2)
+
+
+def _is_after_a_share_close(now: Optional[datetime] = None) -> bool:
+    now = now or datetime.now()
+    return now.time() >= dt_time(15, 0)
+
+
+def _stock_units(stock: Dict[str, Any]) -> float:
+    return _safe_num(stock.get("units") or stock.get("shares") or stock.get("quantity"))
+
+
+def _stock_cost(stock: Dict[str, Any], fallback_price: float = 0.0) -> float:
+    cost = _safe_num(stock.get("cost") or stock.get("avg_cost") or stock.get("average_cost"))
+    return cost if cost > 0 else _safe_num(fallback_price)
+
+
+def _effective_atr_pct(entry_exit_points: Optional[Dict[str, Any]], result: Optional[Dict[str, Any]] = None) -> float:
+    ee = entry_exit_points or {}
+    result = result or {}
+    atr_pct = max(
+        _safe_num(ee.get("atr_pct")),
+        _safe_num(result.get("atr_pct")),
+        _safe_num(result.get("volatility_pct")),
+        2.0,
+    )
+    return _clamp(atr_pct, 0.5, 10.0)
+
+
+def _position_plan_should_reset(
+    previous_plan: Optional[Dict[str, Any]],
+    *,
+    entry_price: float,
+    units: float,
+    has_explicit_cost: bool = True,
+) -> bool:
+    if not previous_plan:
+        return True
+    if int(_safe_num(previous_plan.get("version"))) != POSITION_EXIT_PLAN_VERSION:
+        return True
+    previous_entry = _safe_num(previous_plan.get("entry_price"))
+    previous_units = _safe_num(previous_plan.get("units"))
+    if entry_price <= 0 or previous_entry <= 0:
+        return True
+    if has_explicit_cost and abs(previous_entry - entry_price) / max(entry_price, 0.01) > 0.005:
+        return True
+    if abs(previous_units - units) >= 1:
+        return True
+    return False
+
+
+def _build_initial_position_exit_plan(
+    *,
+    symbol: str,
+    stock: Dict[str, Any],
+    result: Dict[str, Any],
+    current_price: float,
+    now: Optional[datetime] = None,
+) -> Optional[Dict[str, Any]]:
+    entry_exit_points = result.get("entry_exit_points") or {}
+    entry_price = _stock_cost(stock, current_price)
+    if entry_price <= 0:
+        return None
+    atr_pct = _effective_atr_pct(entry_exit_points, result)
+    stop_pct = min(
+        A_SHARE_POSITION_MAX_LOSS_PCT,
+        max(3.0, atr_pct * A_SHARE_POSITION_STOP_ATR_MULT),
+    )
+    hard_stop = entry_price * (1.0 - stop_pct / 100.0)
+    risk_per_share = max(entry_price - hard_stop, 0.01)
+    take_profit_1 = entry_price + risk_per_share * A_SHARE_POSITION_TAKE_PROFIT_R1
+    take_profit_2 = entry_price + risk_per_share * A_SHARE_POSITION_TAKE_PROFIT_R2
+    now = now or datetime.now()
+    plan = {
+        "version": POSITION_EXIT_PLAN_VERSION,
+        "plan_type": "a_share_position_exit",
+        "symbol": symbol.upper(),
+        "entry_price": _round_trade_price(entry_price),
+        "units": _stock_units(stock),
+        "atr_pct": round(atr_pct, 4),
+        "max_loss_pct": round(stop_pct, 4),
+        "hard_stop_price": _round_trade_price(hard_stop),
+        "effective_stop_price": _round_trade_price(hard_stop),
+        "take_profit_1_price": _round_trade_price(take_profit_1),
+        "take_profit_2_price": _round_trade_price(take_profit_2),
+        "trim_price": _round_trade_price(take_profit_1),
+        "highest_close_since_entry": _round_trade_price(current_price if current_price > 0 else entry_price),
+        "trailing_stop_price": _round_trade_price(hard_stop),
+        "risk_per_share": _round_trade_price(risk_per_share),
+        "reward_risk_1": round(A_SHARE_POSITION_TAKE_PROFIT_R1, 4),
+        "reward_risk_2": round(A_SHARE_POSITION_TAKE_PROFIT_R2, 4),
+        "created_at": now.isoformat(timespec="seconds"),
+        "last_updated_after_close": "",
+        "locked_intraday": True,
+        "reason": "成本锚定的A股持仓纪律：盘中只检查触发，收盘后才允许追踪止损上移。",
+    }
+    return plan
+
+
+def _update_position_exit_plan(
+    previous_plan: Optional[Dict[str, Any]],
+    *,
+    symbol: str,
+    stock: Dict[str, Any],
+    result: Dict[str, Any],
+    current_price: float,
+    is_holding: bool,
+    now: Optional[datetime] = None,
+) -> Optional[Dict[str, Any]]:
+    if not is_holding:
+        return None
+    has_explicit_cost = _safe_num(stock.get("cost") or stock.get("avg_cost") or stock.get("average_cost")) > 0
+    entry_price = _stock_cost(stock, current_price)
+    units = _stock_units(stock)
+    if _position_plan_should_reset(
+        previous_plan,
+        entry_price=entry_price,
+        units=units,
+        has_explicit_cost=has_explicit_cost,
+    ):
+        return _build_initial_position_exit_plan(
+            symbol=symbol,
+            stock=stock,
+            result=result,
+            current_price=current_price,
+            now=now,
+        )
+    plan = dict(previous_plan or {})
+    now = now or datetime.now()
+    if not _is_after_a_share_close(now):
+        return plan
+
+    atr_pct = _safe_num(plan.get("atr_pct"), _effective_atr_pct(result.get("entry_exit_points") or {}, result))
+    highest_close = max(_safe_num(plan.get("highest_close_since_entry")), _safe_num(current_price))
+    entry_price = _safe_num(plan.get("entry_price"), entry_price)
+    trail_distance = entry_price * atr_pct * A_SHARE_POSITION_TRAIL_ATR_MULT / 100.0
+    trailing_stop = highest_close - trail_distance
+    effective_stop = max(
+        _safe_num(plan.get("effective_stop_price")),
+        _safe_num(plan.get("hard_stop_price")),
+        trailing_stop,
+    )
+    plan.update({
+        "highest_close_since_entry": _round_trade_price(highest_close),
+        "trailing_stop_price": _round_trade_price(trailing_stop),
+        "effective_stop_price": _round_trade_price(effective_stop),
+        "last_updated_after_close": now.isoformat(timespec="seconds"),
+        "locked_intraday": True,
+    })
+    return plan
+
+
+def evaluate_position_exit_plan_triggers(
+    current_price: float,
+    position_exit_plan: Optional[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    if current_price <= 0 or not position_exit_plan:
+        return []
+    price = float(current_price)
+    stop = _safe_num(position_exit_plan.get("effective_stop_price") or position_exit_plan.get("hard_stop_price"))
+    take_1 = _safe_num(position_exit_plan.get("take_profit_1_price"))
+    take_2 = _safe_num(position_exit_plan.get("take_profit_2_price"))
+    triggers: List[Dict[str, Any]] = []
+
+    def _add(kind: str, level: float) -> None:
+        if level > 0:
+            triggers.append({
+                "side": "sell",
+                "kind": kind,
+                "level": round(level, 4),
+                "price": round(price, 4),
+            })
+
+    if stop > 0 and price <= stop:
+        _add("position_stop", stop)
+    if take_2 > 0 and price >= take_2:
+        _add("take_profit_2", take_2)
+    elif take_1 > 0 and price >= take_1:
+        _add("take_profit_1", take_1)
+    return triggers
+
+
 def load_entry_exit_alert_state(state_path: Path = ENTRY_EXIT_ALERT_STATE_PATH) -> Dict[str, Any]:
     if not state_path.exists():
         return {"version": 1, "symbols": {}}
@@ -391,8 +583,11 @@ def _trigger_sides(triggers: List[Dict[str, Any]]) -> Set[str]:
 def _trigger_label(kind: Any) -> str:
     return {
         "cost_stop_loss": "成本止损",
+        "position_stop": "持仓纪律止损",
         "stop_loss": "技术止损",
-        "take_profit": "止盈",
+        "take_profit": "估算止盈",
+        "take_profit_1": "第一止盈",
+        "take_profit_2": "第二止盈",
         "trim": "减仓",
         "buy_pullback": "回调买入",
         "buy_breakout": "突破买入",
@@ -407,13 +602,15 @@ def update_entry_exit_alert_state(
     holding_symbols: Set[str],
     stocks: Optional[List[Dict[str, Any]]] = None,
     state_path: Path = ENTRY_EXIT_ALERT_STATE_PATH,
+    now: Optional[datetime] = None,
 ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
     state = load_entry_exit_alert_state(state_path)
     symbols_state = dict(state.get("symbols") or {})
     prices_by_symbol = {str(k).upper(): v for k, v in prices.items()}
     stock_by_symbol = {str(s.get("symbol") or "").upper(): s for s in (stocks or [])}
     holding_symbols = {s.upper() for s in holding_symbols}
-    now_text = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    now_dt = now or datetime.now()
+    now_text = now_dt.strftime("%Y-%m-%d %H:%M:%S")
 
     confirmed_alerts: List[Dict[str, Any]] = []
     watch_rows: List[Dict[str, Any]] = []
@@ -430,15 +627,29 @@ def update_entry_exit_alert_state(
         current_price = _safe_num(price_info.get("price"), _safe_num(entry_exit_points.get("current_price")))
         is_holding = symbol in holding_symbols
         previous = symbols_state.get(symbol) or {}
-        previous_triggers = previous.get("last_triggers") or []
-        current_triggers = evaluate_entry_exit_triggers(
-            current_price,
-            previous.get("entry_exit_points"),
+        stock = stock_by_symbol.get(symbol) or {}
+        position_exit_plan = _update_position_exit_plan(
+            previous.get("position_exit_plan"),
+            symbol=symbol,
+            stock=stock,
+            result=result,
+            current_price=current_price,
             is_holding=is_holding,
-            cost=_safe_num((stock_by_symbol.get(symbol) or {}).get("cost")),
+            now=now_dt,
         )
+        previous_triggers = previous.get("last_triggers") or []
+        if is_holding:
+            current_triggers = evaluate_position_exit_plan_triggers(current_price, position_exit_plan)
+        else:
+            current_triggers = evaluate_entry_exit_triggers(
+                current_price,
+                previous.get("entry_exit_points"),
+                is_holding=False,
+            )
         matched_sides = sorted(_trigger_sides(previous_triggers) & _trigger_sides(current_triggers))
-        has_cost_stop_loss = any(t.get("kind") == "cost_stop_loss" for t in current_triggers)
+        has_immediate_exit_stop = any(
+            t.get("kind") in {"cost_stop_loss", "position_stop"} for t in current_triggers
+        )
 
         row = {
             "symbol": symbol,
@@ -446,9 +657,10 @@ def update_entry_exit_alert_state(
             "is_holding": is_holding,
             "current_price": current_price,
             "entry_exit_points": entry_exit_points,
+            "position_exit_plan": position_exit_plan,
             "triggers": current_triggers,
-            "confirmed": bool(matched_sides) or has_cost_stop_loss,
-            "matched_sides": ["sell"] if has_cost_stop_loss else matched_sides,
+            "confirmed": bool(matched_sides) or has_immediate_exit_stop,
+            "matched_sides": ["sell"] if has_immediate_exit_stop else matched_sides,
         }
         watch_rows.append(row)
 
@@ -463,6 +675,7 @@ def update_entry_exit_alert_state(
             "is_holding": is_holding,
             "current_price": round(current_price, 4),
             "entry_exit_points": entry_exit_points,
+            "position_exit_plan": position_exit_plan,
             "last_triggers": current_triggers,
             "last_checked_at": now_text,
         }
@@ -569,12 +782,18 @@ def apply_repeated_trade_guard(
         return result
 
     previous = ((entry_exit_state.get("symbols") or {}).get(symbol) or {})
-    triggers = evaluate_entry_exit_triggers(
-        current_price,
-        previous.get("entry_exit_points"),
-        is_holding=_safe_num(stock.get("position_pct")) > 0,
-        cost=_safe_num(stock.get("cost")),
-    )
+    is_holding = _safe_num(stock.get("position_pct")) > 0 or _stock_units(stock) > 0
+    if is_holding and direction == "SELL":
+        triggers = evaluate_position_exit_plan_triggers(
+            current_price,
+            previous.get("position_exit_plan"),
+        )
+    else:
+        triggers = evaluate_entry_exit_triggers(
+            current_price,
+            previous.get("entry_exit_points"),
+            is_holding=False,
+        )
     has_direction_trigger = any(t.get("side") == direction.lower() for t in triggers)
     if has_direction_trigger:
         return result
@@ -777,11 +996,16 @@ def _entry_trigger_for_result(
 ) -> List[Dict[str, Any]]:
     symbol = str(result.get("symbol") or stock.get("symbol") or "").upper()
     previous = ((entry_exit_state.get("symbols") or {}).get(symbol) or {})
+    is_holding = _safe_num(stock.get("position_pct")) > 0 or _stock_units(stock) > 0
+    if is_holding:
+        return evaluate_position_exit_plan_triggers(
+            current_price,
+            previous.get("position_exit_plan"),
+        )
     return evaluate_entry_exit_triggers(
         current_price,
         previous.get("entry_exit_points"),
-        is_holding=_safe_num(stock.get("position_pct")) > 0,
-        cost=_safe_num(stock.get("cost")),
+        is_holding=False,
     )
 
 
@@ -1307,6 +1531,35 @@ def build_monitor_window_snapshot(
         price_info = price_by_symbol.get(symbol, {})
         row = watch_by_symbol.get(symbol, {})
         ee = result.get("entry_exit_points") or row.get("entry_exit_points") or {}
+        position_exit_plan = row.get("position_exit_plan") or (
+            (result.get("position_exit_plan") or {}) if isinstance(result, dict) else {}
+        )
+        is_holding = _safe_num(stock.get("position_pct")) > 0 or _safe_num(stock.get("units")) > 0
+        if is_holding and position_exit_plan:
+            exit_points = {
+                "stop_loss_price": _safe_num(
+                    position_exit_plan.get("effective_stop_price"),
+                    _safe_num(position_exit_plan.get("hard_stop_price")),
+                ),
+                "take_profit_price": _safe_num(position_exit_plan.get("take_profit_1_price")),
+                "take_profit_2_price": _safe_num(position_exit_plan.get("take_profit_2_price")),
+                "trim_price": _safe_num(position_exit_plan.get("trim_price")),
+                "trailing_stop_price": _safe_num(position_exit_plan.get("trailing_stop_price")),
+                "hard_stop_price": _safe_num(position_exit_plan.get("hard_stop_price")),
+                "plan_type": position_exit_plan.get("plan_type", "a_share_position_exit"),
+                "locked_intraday": bool(position_exit_plan.get("locked_intraday", True)),
+                "created_at": position_exit_plan.get("created_at", ""),
+                "last_updated_after_close": position_exit_plan.get("last_updated_after_close", ""),
+                "reason": position_exit_plan.get("reason", ""),
+            }
+        else:
+            exit_points = {
+                "stop_loss_price": _safe_num(ee.get("stop_loss_price")),
+                "take_profit_price": _safe_num(ee.get("take_profit_price")),
+                "trim_price": _safe_num(ee.get("trim_price")),
+                "plan_type": "pre_trade_estimate",
+                "locked_intraday": False,
+            }
         operation = _operation_detail(result, row, actionable_by_symbol)
         rows.append({
             "symbol": symbol,
@@ -1316,11 +1569,12 @@ def build_monitor_window_snapshot(
             "industry": stock.get("industry", ""),
             "min_lot_size": int(_safe_num(stock.get("min_lot_size"), 100) or 100),
             "units": round(_safe_num(stock.get("units")), 4),
-            "is_holding": _safe_num(stock.get("position_pct")) > 0 or _safe_num(stock.get("units")) > 0,
+            "is_holding": is_holding,
             "position_pct": round(_safe_num(stock.get("position_pct")), 4),
             "target_position_pct": stock.get("target_position_pct", stock.get("target_pct")),
             "cost": _safe_num(stock.get("cost")),
             "entry_exit_points": ee,
+            "position_exit_plan": position_exit_plan,
             "price": {
                 "current": _safe_num(price_info.get("price"), _safe_num(ee.get("current_price"))),
                 "prev_close": _safe_num(price_info.get("prev_close")),
@@ -1335,11 +1589,7 @@ def build_monitor_window_snapshot(
                 "reward_risk_ratio": _safe_num(ee.get("reward_risk_ratio")),
                 "reason": ee.get("reason", ""),
             },
-            "exit_points": {
-                "stop_loss_price": _safe_num(ee.get("stop_loss_price")),
-                "take_profit_price": _safe_num(ee.get("take_profit_price")),
-                "trim_price": _safe_num(ee.get("trim_price")),
-            },
+            "exit_points": exit_points,
             "fundamental": {
                 "model": result.get("fundamental_model", ""),
                 "score": _safe_num(result.get("fundamental_score"), 50.0),
