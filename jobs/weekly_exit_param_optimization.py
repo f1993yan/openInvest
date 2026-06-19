@@ -282,6 +282,22 @@ def run() -> Dict[str, Any]:
             }
             continue
         best_params = dict(result["best"]["params"])
+        best_metrics = dict(result["best"].get("metrics") or {})
+        metric_keys = (
+            "objective_score",
+            "policy_quality_score",
+            "sell_count",
+            "sell_win_count",
+            "sell_win_rate",
+            "sell_win_rate_posterior",
+            "sell_win_rate_lower",
+            "avg_sell_win_cny",
+            "avg_sell_loss_cny",
+            "profit_factor",
+            "conservative_sell_expectancy_cny",
+            "total_return_pct",
+            "max_drawdown_pct",
+        )
         sector_policies[sector] = {
             "max_loss_pct": best_params["max_loss_pct"],
             "stop_atr_mult": best_params["stop_atr_mult"],
@@ -290,7 +306,7 @@ def run() -> Dict[str, Any]:
             "trailing_atr_mult": best_params["trailing_atr_mult"],
             "sample_symbols": symbols,
             "sample_names": names,
-            "objective_score": result["best"]["metrics"].get("objective_score"),
+            **{key: best_metrics.get(key) for key in metric_keys if key in best_metrics},
             "updated_at": datetime.now(ZoneInfo("Asia/Shanghai")).isoformat(timespec="seconds"),
         }
         sector_results[sector] = {

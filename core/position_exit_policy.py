@@ -22,6 +22,15 @@ class PositionExitPolicy:
     take_profit_r1: float
     take_profit_r2: float
     trailing_atr_mult: float
+    policy_quality_score: float = 0.0
+    objective_score: float = 0.0
+    sell_count: int = 0
+    sell_win_count: int = 0
+    sell_win_rate: float = 0.0
+    sell_win_rate_lower: float = 0.0
+    profit_factor: float = 0.0
+    conservative_sell_expectancy_cny: float = 0.0
+    max_drawdown_pct: float = 0.0
     source: str = ".env"
     sector: str = ""
     sample_symbols: str = ""
@@ -93,6 +102,15 @@ def _policy_from_values(values: Dict[str, Any], *, source: str, sector: str = ""
         take_profit_r1=max(0.5, _safe_float(values.get("take_profit_r1"), 1.5)),
         take_profit_r2=max(1.0, _safe_float(values.get("take_profit_r2"), 2.5)),
         trailing_atr_mult=max(0.5, _safe_float(values.get("trailing_atr_mult"), 2.8)),
+        policy_quality_score=_safe_float(values.get("policy_quality_score"), 0.0),
+        objective_score=_safe_float(values.get("objective_score"), 0.0),
+        sell_count=int(max(0, _safe_float(values.get("sell_count"), 0.0))),
+        sell_win_count=int(max(0, _safe_float(values.get("sell_win_count"), 0.0))),
+        sell_win_rate=_clamp(_safe_float(values.get("sell_win_rate"), 0.0), 0.0, 1.0),
+        sell_win_rate_lower=_clamp(_safe_float(values.get("sell_win_rate_lower"), 0.0), 0.0, 1.0),
+        profit_factor=max(0.0, _safe_float(values.get("profit_factor"), 0.0)),
+        conservative_sell_expectancy_cny=_safe_float(values.get("conservative_sell_expectancy_cny"), 0.0),
+        max_drawdown_pct=_safe_float(values.get("max_drawdown_pct"), 0.0),
         source=source,
         sector=sector,
         sample_symbols=",".join(str(x) for x in (values.get("sample_symbols") or []) if x),

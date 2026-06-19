@@ -103,6 +103,34 @@ def _llm_hold_conflict_adjustment(
     return _likelihood_ratio_score_adjustment(lr, scale=_LLM_REVIEW_LOGIT_SCALE)
 
 
+def _position_policy_quality_adjustment(result: Dict[str, Any], stock: Dict[str, Any]) -> float:
+    """Small likelihood-ratio adjustment for existing-position sell discipline.
+
+    The policy quality score is already a risk-adjusted expected utility from
+    weekly walk-forward backtests.  We only use it for held TRIM/SELL candidates
+    and shrink it by sell sample size, so it cannot turn a weak/no-trigger idea
+    into an automatic trade by itself.
+    """
+    verdict = str(result.get("verdict", "")).upper()
+    if verdict not in {"TRIM", "SELL"}:
+        return 0.0
+    if _safe_num(stock.get("position_pct")) <= 0 and _safe_num(stock.get("units")) <= 0:
+        return 0.0
+    policy = result.get("position_exit_policy") or {}
+    quality = _safe_num(policy.get("policy_quality_score"))
+    sell_count = max(0.0, _safe_num(policy.get("sell_count")))
+    win_lower = _safe_num(policy.get("sell_win_rate_lower"))
+    expectancy = _safe_num(policy.get("conservative_sell_expectancy_cny"))
+    reliability = sell_count / (sell_count + 8.0) if sell_count > 0 else 0.0
+    if reliability <= 0:
+        return 0.0
+    utility_edge = math.tanh(quality / 4.0)
+    expectancy_edge = math.tanh(expectancy / 500.0)
+    win_edge = max(-0.5, min(0.5, win_lower - 0.5))
+    log_lr = reliability * (0.22 * utility_edge + 0.12 * expectancy_edge + 0.08 * win_edge)
+    return _clamp(_LLM_REVIEW_LOGIT_SCALE * log_lr, -4.0, 4.0)
+
+
 def _entry_trigger_for_result(
     result: Dict[str, Any],
     *,
@@ -171,6 +199,7 @@ def _action_score(
     objective_score = score
     score += _review_score_adjustment(result, objective_score)
     score += _llm_hold_conflict_adjustment(result, objective_score, has_buy_trigger=has_buy_trigger)
+    score += _position_policy_quality_adjustment(result, stock)
     return score
 
 

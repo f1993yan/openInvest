@@ -315,6 +315,60 @@ def _objective_metrics(equity_curve: List[Dict[str, Any]], max_drawdown_pct: flo
         "annualized_expected_return_pct": round(annualized_expected, 4),
         "objective_score": round(annualized_expected / risk, 6),
     }
+
+
+def _wilson_lower_bound(wins: int, total: int, z: float = 1.96) -> float:
+    """Conservative Bernoulli success lower bound for small samples."""
+    if total <= 0:
+        return 0.0
+    p = wins / total
+    denom = 1.0 + z * z / total
+    center = p + z * z / (2.0 * total)
+    margin = z * math.sqrt((p * (1.0 - p) + z * z / (4.0 * total)) / total)
+    return max(0.0, min(1.0, (center - margin) / denom))
+
+
+def _sell_policy_stats(sell_pnls: List[float]) -> Dict[str, float]:
+    """Bayesian/shrinkage diagnostics for exit-policy reliability."""
+    count = len(sell_pnls)
+    wins = [x for x in sell_pnls if x > 0]
+    losses = [-x for x in sell_pnls if x < 0]
+    win_count = len(wins)
+    gross_profit = sum(wins)
+    gross_loss = sum(losses)
+    avg_win = gross_profit / len(wins) if wins else 0.0
+    avg_loss = gross_loss / len(losses) if losses else 0.0
+    raw_win_rate = win_count / count if count else 0.0
+    posterior_win_rate = (win_count + 0.5) / (count + 1.0) if count else 0.5
+    conservative_win_rate = _wilson_lower_bound(win_count, count)
+    profit_factor = gross_profit / gross_loss if gross_loss > 0 else (gross_profit if gross_profit > 0 else 0.0)
+    conservative_expectancy = conservative_win_rate * avg_win - (1.0 - conservative_win_rate) * avg_loss
+    return {
+        "sell_count": count,
+        "sell_win_count": win_count,
+        "sell_win_rate": round(raw_win_rate, 6),
+        "sell_win_rate_posterior": round(posterior_win_rate, 6),
+        "sell_win_rate_lower": round(conservative_win_rate, 6),
+        "avg_sell_win_cny": round(avg_win, 4),
+        "avg_sell_loss_cny": round(avg_loss, 4),
+        "profit_factor": round(profit_factor, 6),
+        "conservative_sell_expectancy_cny": round(conservative_expectancy, 4),
+    }
+
+
+def _policy_quality_score(metrics: Dict[str, Any]) -> float:
+    """Risk-adjusted utility used to choose and weight exit policies."""
+    objective = _safe_float(metrics.get("objective_score"))
+    expectancy = _safe_float(metrics.get("conservative_sell_expectancy_cny"))
+    profit_factor = max(0.0, _safe_float(metrics.get("profit_factor")))
+    sell_count = max(0.0, _safe_float(metrics.get("sell_count")))
+    max_dd = abs(_safe_float(metrics.get("max_drawdown_pct")))
+    reliability = sell_count / (sell_count + 8.0) if sell_count > 0 else 0.0
+    expectancy_term = math.copysign(math.log1p(abs(expectancy) / 100.0), expectancy)
+    profit_factor_term = math.log(max(profit_factor, 0.01))
+    drawdown_penalty = math.log1p(max_dd / 10.0)
+    score = objective + reliability * (0.75 * expectancy_term + 0.25 * profit_factor_term) - 0.10 * drawdown_penalty
+    return round(score, 6)
 def run_backtest(
     *,
     histories: Dict[str, pd.DataFrame],
@@ -549,21 +603,24 @@ def run_backtest(
     max_drawdown_pct = max_dd * 100.0
     return_risk_ratio = total_return_pct / max(abs(max_drawdown_pct), 0.01)
     objective = _objective_metrics(equity_curve, max_drawdown_pct)
+    sell_stats = _sell_policy_stats(sell_pnls)
+    metrics = {
+        "initial_cash": round(initial_cash, 2),
+        "final_equity": round(final_equity, 2),
+        "total_return_pct": round(total_return_pct, 4),
+        "max_drawdown_pct": round(max_drawdown_pct, 4),
+        "return_risk_ratio": round(return_risk_ratio, 6),
+        "trade_count": len(trades),
+        "buy_count": sum(1 for t in trades if t["side"] == "BUY"),
+        "realized_pnl": round(sum(sell_pnls), 2),
+        "win_rate": sell_stats["sell_win_rate"],
+        **sell_stats,
+        **objective,
+    }
+    metrics["policy_quality_score"] = _policy_quality_score(metrics)
     return {
         "params": asdict(params),
-        "metrics": {
-            "initial_cash": round(initial_cash, 2),
-            "final_equity": round(final_equity, 2),
-            "total_return_pct": round(total_return_pct, 4),
-            "max_drawdown_pct": round(max_drawdown_pct, 4),
-            "return_risk_ratio": round(return_risk_ratio, 6),
-            "trade_count": len(trades),
-            "buy_count": sum(1 for t in trades if t["side"] == "BUY"),
-            "sell_count": sum(1 for t in trades if t["side"] == "SELL"),
-            "realized_pnl": round(sum(sell_pnls), 2),
-            "win_rate": round(sum(1 for x in sell_pnls if x > 0) / len(sell_pnls), 4) if sell_pnls else 0.0,
-            **objective,
-        },
+        "metrics": metrics,
         "trades": trades,
         "equity_curve": equity_curve,
         "symbol_daily_rows": symbol_daily_rows,
@@ -774,7 +831,7 @@ def optimize_exit_params(
             fee_rate=fee_rate,
             max_ops_per_symbol_per_day=max_ops_per_symbol_per_day,
         )
-        score = result["metrics"].get("objective_score", result["metrics"]["return_risk_ratio"])
+        score = result["metrics"].get("policy_quality_score", result["metrics"].get("objective_score", result["metrics"]["return_risk_ratio"]))
         compact = {
             "score": round(score, 6),
             "params": result["params"],

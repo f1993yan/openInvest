@@ -778,3 +778,50 @@ def test_call_committee_uses_direct_backend_call(monkeypatch):
     assert result == {"success": True, "symbol": "600900", "verdict": "HOLD"}
     assert captured["req"].symbol == "600900"
     assert captured["req"].holdings[0].weight_pct == 5.0
+
+def test_policy_quality_adjusts_existing_position_sell_score_conservatively():
+    from jobs.market_monitor import _action_score
+
+    base = {
+        "success": True,
+        "symbol": "600900",
+        "verdict": "TRIM",
+        "confidence": 0.50,
+        "suggested_alloc_cny": -10000,
+        "position_exit_policy": {
+            "policy_quality_score": 8.0,
+            "sell_count": 20,
+            "sell_win_rate_lower": 0.62,
+            "conservative_sell_expectancy_cny": 350.0,
+        },
+    }
+    stock = {"symbol": "600900", "position_pct": 10.0, "units": 1000}
+    price = {"price": 10.0, "change_pct": 0.0}
+    triggers = [{"side": "sell", "kind": "take_profit_1", "level": 10.8, "price": 10.9}]
+
+    high_quality = _action_score(base, stock=stock, price_info=price, triggers=triggers)
+    low_quality = _action_score(
+        {**base, "position_exit_policy": {"policy_quality_score": -8.0, "sell_count": 20, "sell_win_rate_lower": 0.25, "conservative_sell_expectancy_cny": -350.0}},
+        stock=stock,
+        price_info=price,
+        triggers=triggers,
+    )
+
+    assert high_quality > low_quality
+    assert high_quality - low_quality <= 8.1
+
+
+def test_sell_policy_stats_shrink_small_sample_win_rate():
+    from scripts.backtest_ashare_committee_exit import _sell_policy_stats, _policy_quality_score
+
+    stats = _sell_policy_stats([100.0, 80.0])
+    assert stats["sell_win_rate"] == 1.0
+    assert stats["sell_win_rate_lower"] < 0.7
+
+    metrics = {
+        **stats,
+        "objective_score": 1.0,
+        "max_drawdown_pct": -5.0,
+    }
+    assert _policy_quality_score(metrics) < 2.0
+
