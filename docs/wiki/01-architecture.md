@@ -93,6 +93,7 @@ market_monitor_runtime.run_monitor_round()
 - `position_exit_plan` 是已经持仓后的 A 股纪律计划，锚定真实成本和板块参数，盘中只检查触发，收盘后才允许追踪止损上移。
 - A 股持仓纪律止损在 `evaluate_position_exit_plan_triggers()` 中判断，价格**跌破**锁定止损线才触发；止盈目标价达到即可触发。
 - 每周 `jobs/weekly_exit_param_optimization.py` 会按板块回看最近数据，写入 `policy_quality_score`、`sell_win_rate_lower`、`profit_factor` 等质量字段；这些字段只用于校准已有持仓的减仓/卖出纪律，不参与买入点计算。
+- 板块映射顺序是：东方财富浏览器请求头直连 → AkShare → `data/sector_cache.json` 本地缓存 → `market_monitor_config.json` 的 `sector`/`industry`；`data/` 被 git 忽略，移植时可手动带走缓存。
 
 ---
 

@@ -4,7 +4,7 @@ from __future__ import annotations
 import json
 import os
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from itertools import product
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
@@ -13,6 +13,19 @@ from zoneinfo import ZoneInfo
 ROOT = Path(__file__).resolve().parent.parent
 CONFIG_PATH = ROOT / "jobs" / "market_monitor_config.json"
 REPORT_PATH = ROOT / "reports" / "weekly_exit_param_optimization.json"
+SECTOR_CACHE_PATH = ROOT / "data" / "sector_cache.json"
+EASTMONEY_CLIST_URL = "https://push2.eastmoney.com/api/qt/clist/get"
+EASTMONEY_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/126.0.0.0 Safari/537.36"
+    ),
+    "Accept": "application/json, text/plain, */*",
+    "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+    "Connection": "keep-alive",
+    "Referer": "https://quote.eastmoney.com/center/boardlist.html",
+}
 
 EASTMONEY_INDUSTRY_FALLBACK: Dict[str, str] = {}
 
@@ -84,6 +97,18 @@ def _sector_symbol_groups(
     return groups
 
 
+def _config_sector_mapping(config: Dict[str, Any]) -> Dict[str, str]:
+    mapping: Dict[str, str] = {}
+    for stock in list(config.get("holdings") or []) + list(config.get("watchlist") or []):
+        if str(stock.get("market", "a")).lower() != "a":
+            continue
+        symbol = str(stock.get("symbol") or "").strip()
+        sector = str(stock.get("sector") or stock.get("industry") or "").strip()
+        if symbol and sector and symbol not in mapping:
+            mapping[symbol] = sector
+    return mapping
+
+
 def _fallback_symbols() -> Dict[str, List[Dict[str, str]]]:
     symbols = [s.strip() for s in os.getenv("INVEST_EXIT_PARAM_OPT_SYMBOLS", "").split(",") if s.strip()]
     return {
@@ -102,61 +127,159 @@ def _target_a_share_symbols(config: Dict[str, Any]) -> List[str]:
     return symbols
 
 
+def _read_sector_cache(path: Path = SECTOR_CACHE_PATH) -> Dict[str, Any]:
+    if not path.exists():
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def _write_sector_cache(mapping: Dict[str, str], *, source: str, path: Path = SECTOR_CACHE_PATH) -> None:
+    if not mapping:
+        return
+    existing = _read_sector_cache(path)
+    merged = dict(existing.get("mapping") or {})
+    merged.update({str(k): str(v) for k, v in mapping.items() if k and v})
+    payload = {
+        "version": 1,
+        "source": source,
+        "updated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "mapping": dict(sorted(merged.items())),
+    }
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
+
+
+def _eastmoney_get_json(params: Dict[str, str], *, timeout: int = 15) -> Dict[str, Any]:
+    import requests
+
+    response = requests.get(EASTMONEY_CLIST_URL, params=params, headers=EASTMONEY_HEADERS, timeout=timeout)
+    response.raise_for_status()
+    data = response.json()
+    return data if isinstance(data, dict) else {}
+
+
+def _fetch_eastmoney_board_list_direct() -> List[Dict[str, Any]]:
+    params = {
+        "pn": "1",
+        "pz": "500",
+        "po": "1",
+        "np": "1",
+        "fltt": "2",
+        "invt": "2",
+        "fid": "f3",
+        "fs": "m:90+t:2",
+        "fields": "f12,f14,f3,f62",
+    }
+    data = _eastmoney_get_json(params)
+    rows = ((data.get("data") or {}).get("diff") or [])
+    return rows if isinstance(rows, list) else []
+
+
+def _fetch_eastmoney_board_cons_direct(board_code: str) -> List[Dict[str, Any]]:
+    params = {
+        "pn": "1",
+        "pz": "5000",
+        "po": "1",
+        "np": "1",
+        "fltt": "2",
+        "invt": "2",
+        "fid": "f3",
+        "fs": f"b:{board_code}+f:!50",
+        "fields": "f12,f14,f3,f2",
+    }
+    data = _eastmoney_get_json(params)
+    rows = ((data.get("data") or {}).get("diff") or [])
+    return rows if isinstance(rows, list) else []
+
+
+def _fetch_eastmoney_industry_map_direct(symbols: List[str]) -> Tuple[Dict[str, str], List[str]]:
+    target = set(symbols)
+    mapping: Dict[str, str] = {}
+    failures: List[str] = []
+    for board in _fetch_eastmoney_board_list_direct():
+        sector = str(board.get("f14") or "").strip()
+        code = str(board.get("f12") or "").strip()
+        if not sector or not code:
+            continue
+        try:
+            for item in _fetch_eastmoney_board_cons_direct(code):
+                symbol = str(item.get("f12") or "").strip()
+                if symbol in target and symbol not in mapping:
+                    mapping[symbol] = sector
+        except Exception as exc:  # noqa: BLE001
+            failures.append(f"{sector}:{type(exc).__name__}")
+        if target.issubset(mapping):
+            break
+        time.sleep(0.03)
+    return mapping, failures[:10]
+
+
+def _fetch_eastmoney_industry_map_akshare(symbols: List[str]) -> Tuple[Dict[str, str], List[str]]:
+    import akshare as ak  # type: ignore
+
+    target = set(symbols)
+    board_df = ak.stock_board_industry_name_em()
+    mapping: Dict[str, str] = {}
+    failures: List[str] = []
+    for _, row in board_df.iterrows():
+        sector = str(row.get("板块名称") or "").strip()
+        code = str(row.get("板块代码") or "").strip()
+        if not sector or not code:
+            continue
+        try:
+            cons = ak.stock_board_industry_cons_em(symbol=code)
+        except Exception as exc:  # noqa: BLE001
+            failures.append(f"{sector}:{type(exc).__name__}")
+            continue
+        for _, item in cons.iterrows():
+            symbol = str(item.get("代码") or "").strip()
+            if symbol in target and symbol not in mapping:
+                mapping[symbol] = sector
+        if target.issubset(mapping):
+            break
+        time.sleep(0.05)
+    return mapping, failures[:10]
+
+
 def _fetch_eastmoney_industry_map(symbols: List[str]) -> Tuple[Dict[str, str], str, List[str]]:
     """Map A-share symbols to Eastmoney industry-board names.
 
-    The live path uses Eastmoney industry boards and their constituents.
-    Fallback sector mappings are intentionally not shipped in the public repo;
-    local users should provide sectors in market_monitor_config.json or rerun
-    when Eastmoney is reachable.
+    Order: browser-like direct Eastmoney request -> AkShare -> local ignored
+    cache -> empty.  If all live paths fail, caller still falls back to
+    market_monitor_config.json sector/industry through _sector_key().
     """
     target = set(symbols)
     if not target:
         return {}, "empty", []
-    try:
-        import akshare as ak  # type: ignore
+    warnings: List[str] = []
 
-        board_df = ak.stock_board_industry_name_em()
-        mapping: Dict[str, str] = {}
-        failures: List[str] = []
-        for _, row in board_df.iterrows():
-            sector = str(row.get("板块名称") or "").strip()
-            code = str(row.get("板块代码") or "").strip()
-            if not sector or not code:
-                continue
-            try:
-                cons = ak.stock_board_industry_cons_em(symbol=code)
-            except Exception as exc:  # noqa: BLE001
-                failures.append(f"{sector}:{type(exc).__name__}")
-                continue
-            for _, item in cons.iterrows():
-                symbol = str(item.get("代码") or "").strip()
-                if symbol in target and symbol not in mapping:
-                    mapping[symbol] = sector
-            if target.issubset(mapping):
-                break
-            time.sleep(0.05)
-        missing = sorted(target - set(mapping))
-        if mapping:
-            if missing:
-                for symbol in missing:
-                    if symbol in EASTMONEY_INDUSTRY_FALLBACK:
-                        mapping[symbol] = EASTMONEY_INDUSTRY_FALLBACK[symbol]
-                source = "eastmoney_live_with_fallback"
-            else:
-                source = "eastmoney_live"
-            return mapping, source, failures[:10]
-    except Exception as exc:  # noqa: BLE001
-        return (
-            {symbol: EASTMONEY_INDUSTRY_FALLBACK[symbol] for symbol in symbols if symbol in EASTMONEY_INDUSTRY_FALLBACK},
-            f"eastmoney_fallback_after_{type(exc).__name__}",
-            [str(exc)[:200]],
-        )
-    return (
-        {symbol: EASTMONEY_INDUSTRY_FALLBACK[symbol] for symbol in symbols if symbol in EASTMONEY_INDUSTRY_FALLBACK},
-        "eastmoney_fallback",
-        [],
-    )
+    for source, fetcher in (
+        ("eastmoney_direct_browser_headers", _fetch_eastmoney_industry_map_direct),
+        ("eastmoney_akshare", _fetch_eastmoney_industry_map_akshare),
+    ):
+        try:
+            mapping, failures = fetcher(symbols)
+            warnings.extend(f"{source}:{msg}" for msg in failures)
+            if mapping:
+                _write_sector_cache(mapping, source=source)
+                return mapping, source, warnings[:10]
+        except Exception as exc:  # noqa: BLE001
+            warnings.append(f"{source}:{type(exc).__name__}:{str(exc)[:200]}")
+
+    cache = _read_sector_cache()
+    cached_mapping = {
+        symbol: str((cache.get("mapping") or {}).get(symbol) or "").strip()
+        for symbol in symbols
+    }
+    cached_mapping = {k: v for k, v in cached_mapping.items() if v}
+    if cached_mapping:
+        return cached_mapping, f"sector_cache:{cache.get('source', 'unknown')}", warnings[:10]
+
+    return {}, "sector_config_fallback", warnings[:10]
 
 
 def _representative_values(values: List[float], *, limit: int) -> List[float]:
@@ -240,6 +363,11 @@ def run() -> Dict[str, Any]:
     config = _load_monitor_config()
     target_symbols = _target_a_share_symbols(config)
     sector_by_symbol, sector_source, sector_warnings = _fetch_eastmoney_industry_map(target_symbols)
+    if not sector_by_symbol:
+        sector_by_symbol = _config_sector_mapping(config)
+        if sector_by_symbol:
+            _write_sector_cache(sector_by_symbol, source="market_monitor_config")
+            sector_source = "market_monitor_config_cached"
     sector_groups = _sector_symbol_groups(config, max_symbols_per_sector, sector_by_symbol) or _fallback_symbols()
     only_sectors = {
         s.strip()

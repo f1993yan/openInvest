@@ -5,14 +5,17 @@
 ### Refactor
 
 * **market-monitor:** 将 `jobs/market_monitor.py` 从单文件大模块拆成入口 facade + 行情、通知、买卖点、风控护栏、告警优化、窗口快照和运行编排等职责模块，保留旧 `jobs.market_monitor` 导入路径兼容。
+* **exit-policy:** A 股止盈止损周度优化改为风险调整期望效用目标，卖出胜率使用 Wilson 下界和样本可靠性收缩，避免小样本裸胜率误导参数选择。
 
 ### Bug Fixes
 
 * **market-monitor:** 修复 A 股持仓纪律止损的边界触发，持仓止损改为跌破锁定止损线才触发，避免价格刚好等于止损价时误报；止盈仍按达到目标价触发。
+* **exit-policy:** 东方财富行业映射新增浏览器请求头直连和 `data/sector_cache.json` 本地缓存；接口断连时先读缓存，再回退本地配置板块。
 
 ### Docs
 
 * **wiki:** 更新架构和执行路径文档，补充盘中监控的数据流、模块职责和止盈止损/入场出场边界，方便新对话快速定位代码逻辑。
+* **exit-policy:** 补充 `policy_quality_score`、保守卖出胜率、行业映射缓存和委员会影响边界说明。
 
 ## Unreleased (2026-06-14)
 
