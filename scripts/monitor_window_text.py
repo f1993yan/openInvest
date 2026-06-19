@@ -274,8 +274,12 @@ def _beginner_summary_lines(
     pullback = ee.get("buy_pullback_price")
     breakout = ee.get("buy_breakout_price")
     exit_points = row.get("exit_points") or {}
-    stop = exit_points.get("stop_loss_price") if exit_points else ee.get("stop_loss_price")
-    take = exit_points.get("take_profit_price") if exit_points else ee.get("take_profit_price")
+    stop = exit_points.get("stop_loss_price")
+    if not stop or stop <= 0:
+        stop = ee.get("stop_loss_price")
+    take = exit_points.get("take_profit_price")
+    if not take or take <= 0:
+        take = ee.get("take_profit_price")
     plan_type = str(exit_points.get("plan_type") or "")
     pullback_dist = _distance_pct(current, pullback)
     breakout_dist = _distance_pct(current, breakout)
@@ -335,6 +339,27 @@ def _beginner_summary_lines(
     )
     if source is not None and not source.get("success"):
         lines.extend(["", f"分析失败: {source.get('error') or '-'}"])
+
+    # Append Chan Theory & Pattern Analysis [SHADOW MODE]
+    symbol = row.get("symbol")
+    if symbol:
+        try:
+            from utils.exchange_fee import get_history_data
+            df = get_history_data(symbol, "2y")
+            if df is not None and not df.empty:
+                from utils.chan import analyze_chan, format_chan_brief
+                chan_data = analyze_chan(df, symbol)
+                chan_brief = format_chan_brief(chan_data)
+                if chan_brief:
+                    lines.extend([
+                        "",
+                        "--- 缠论与技术形态分析 [影子模式] ---",
+                        chan_brief
+                    ])
+        except Exception as e:
+            import logging as _logging
+            _logging.getLogger(__name__).warning(f"Failed to calculate Chan brief in monitor_window_text for {symbol}: {e}")
+
     return lines
 
 

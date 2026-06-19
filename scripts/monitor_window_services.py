@@ -70,6 +70,8 @@ def _fmt_price(value: Any) -> str:
 
 def _fmt_money(value: Any) -> str:
     value = _safe_num(value)
+    if value == 0:
+        return "0"
     return f"{value:,.0f}" if abs(value) >= 1 else "-"
 
 

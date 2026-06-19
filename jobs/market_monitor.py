@@ -51,6 +51,9 @@ from jobs.market_monitor_snapshot import (  # noqa: F401
     _llm_operation_review,
     _operation_detail,
 )
+from jobs.market_monitor_runtime import (  # noqa: F401
+    _sync_config_account_fields,
+)
 
 
 if __name__ == "__main__":

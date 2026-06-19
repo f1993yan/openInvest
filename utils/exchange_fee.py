@@ -109,7 +109,7 @@ class TransactionCostCalculator:
     def calculate_stock_friction(self, amount_aud: float) -> StockFriction:
         if amount_aud <= 0:
             return StockFriction(0, 0, 0)
-        
+
         if amount_aud <= 1000:
             fee = self.commsec_tier_1
         elif amount_aud <= 10000:
@@ -359,6 +359,40 @@ def analyze_multi_timeframe(hist: pd.DataFrame, title: str) -> str:
             report_lines.append("- 均线排列: MA20 < MA120 < MA250（空头排列 🔴）")
         else:
             report_lines.append("- 均线排列: 交织（趋势不明朗）")
+
+    # 缠论与技术形态分析集成
+    try:
+        import re
+        # 从 title 提取干净的 symbol 与 name
+        # 常见格式如: "测试标的 (600000)" 或 "TARGET ASSET (GC=F)"
+        symbol_extracted = title
+        name_extracted = ""
+        symbol_match = re.search(r'\(([^)]+)\)', title)
+        if symbol_match:
+            symbol_extracted = symbol_match.group(1).strip()
+            # 提取名称
+            name_match = re.match(r'^([^(]+)', title)
+            if name_match:
+                name_extracted = name_match.group(1).strip()
+        else:
+            # 如果没有括号，尝试取最后一个词作为 symbol
+            words = title.split()
+            if words:
+                symbol_extracted = words[-1]
+
+        # 过滤掉非实体的占位名称
+        if name_extracted.upper().startswith("TARGET ASSET"):
+            name_extracted = ""
+
+        from .chan import analyze_chan, format_chan_brief
+        chan_data = analyze_chan(hist, symbol_extracted, name_extracted)
+        chan_brief = format_chan_brief(chan_data)
+        if chan_brief:
+            report_lines.append("\n**Chan Theory & Pattern Analysis [SHADOW MODE]:**")
+            report_lines.append(chan_brief)
+    except Exception as e:
+        import logging as _logging
+        _logging.getLogger(__name__).warning(f"缠论与形态分析执行失败: {e}")
 
     return "\n".join(report_lines)
 

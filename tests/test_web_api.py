@@ -886,6 +886,7 @@ def test_committee_sessions_reads_disk_after_first_run(client, tmp_store):
     assert "BetaShares" in r2.json()["content"]
 
 
+
 def test_committee_sessions_lists_multiple_dates_reverse_sorted(client, tmp_store):
     """多天的 transcript 必须按日期倒序"""
     base = tmp_store.root / ".committee"
@@ -904,3 +905,38 @@ def test_committee_sessions_lists_multiple_dates_reverse_sorted(client, tmp_stor
     sessions = r.json()["sessions"]
     dates = [s["date"] for s in sessions]
     assert dates == ["2026-05-19", "2026-05-18", "2026-05-17"], "必须按日期倒序"
+
+
+def test_get_regime_with_chan_analysis(client, monkeypatch):
+    """测试 /api/regime/{symbol} 端点正确调用了缠论与形态分析，并且在 brief 中包含了影子模式标记"""
+    dates = pd.date_range("2026-01-01", periods=150, freq="D")
+    import numpy as np
+    close = [100.0 + 5.0 * np.sin(i / 5.0) for i in range(150)]
+    high = [c + 1.0 for c in close]
+    low = [c - 1.0 for c in close]
+    open_p = [c - 0.2 for c in close]
+    volume = [10000.0 for _ in range(150)]
+
+    fake_df = pd.DataFrame(
+        {
+            "Open": open_p,
+            "High": high,
+            "Low": low,
+            "Close": close,
+            "Volume": volume,
+        },
+        index=dates,
+    )
+
+    monkeypatch.setattr(web_api, "get_history_data", lambda symbol, period="2y": fake_df)
+
+    r = client.get("/api/regime/NDQ.AX")
+    assert r.status_code == 200
+    data = r.json()
+    assert data["symbol"] == "NDQ.AX"
+    assert "regime" in data
+    assert "brief" in data
+
+    brief = data["brief"]
+    assert "SHADOW MODE" in brief
+    assert "最新确认笔" in brief

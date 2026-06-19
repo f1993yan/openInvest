@@ -2251,11 +2251,22 @@ async def get_regime(symbol: str) -> RegimeResponse:
         raise HTTPException(404, f"无 {symbol} 行情数据")
 
     metrics = compute_metrics(df)
-    info = classify_regime(metrics)
+    info = classify_regime(metrics, symbol=symbol)
     regime_label = info.get("regime", "unknown")
     reason = info.get("reason", "")
-    hint = regime_strategy_hint(regime_label, metrics.get("price_quantile_2y"))
-    brief = format_regime_brief(metrics)
+    hint = regime_strategy_hint(regime_label, metrics.get("price_quantile_2y"), symbol=symbol)
+    brief = format_regime_brief(metrics, symbol=symbol)
+
+    # Chan Theory and Pattern Analysis integration (Shadow Mode)
+    try:
+        from utils.chan import analyze_chan, format_chan_brief
+        chan_data = analyze_chan(df, symbol)
+        chan_brief = format_chan_brief(chan_data)
+        if chan_brief:
+            brief += f"\n\n**Chan Theory & Pattern Analysis [SHADOW MODE]:**\n{chan_brief}"
+    except Exception as e:
+        import logging as _logging
+        _logging.getLogger(__name__).warning(f"Failed to append Chan analysis to regime brief for {symbol}: {e}")
 
     # 把 numpy / pandas 类型转成 JSON-safe
     inputs_safe = {}
