@@ -17,7 +17,7 @@ import os
 import sqlite3
 import threading
 from dataclasses import dataclass
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
 
@@ -100,11 +100,26 @@ class AccountLedger:
                 )
             """)
             cur.execute("""
+                CREATE TABLE IF NOT EXISTS cash_settlements (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    account TEXT NOT NULL,
+                    symbol TEXT NOT NULL,
+                    amount_cny REAL NOT NULL,
+                    trade_date TEXT NOT NULL,
+                    settle_date TEXT NOT NULL,
+                    source TEXT NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'pending',
+                    created_at TEXT NOT NULL,
+                    settled_at TEXT
+                )
+            """)
+            cur.execute("""
                 CREATE TABLE IF NOT EXISTS daily_pnl (
                     trade_date TEXT NOT NULL,
                     account TEXT NOT NULL,
                     total_value_cny REAL NOT NULL,
                     cash_cny REAL NOT NULL,
+                    t2_pending_cash_cny REAL NOT NULL DEFAULT 0,
                     holdings_value_cny REAL NOT NULL,
                     cost_basis_cny REAL NOT NULL,
                     day_pnl_cny REAL,
@@ -115,6 +130,8 @@ class AccountLedger:
                     PRIMARY KEY (trade_date, account)
                 )
             """)
+            _ensure_column(cur, "daily_pnl", "t2_pending_cash_cny", "REAL NOT NULL DEFAULT 0")
+            self._repair_legacy_unsettled_hk_sells(cur)
             self.conn.commit()
 
     def initialize_from_monitor_config(self, config: Dict[str, Any], *, reset: bool = False) -> bool:
@@ -129,6 +146,7 @@ class AccountLedger:
             cur = self.conn.cursor()
             cur.execute("DELETE FROM daily_pnl")
             cur.execute("DELETE FROM trades")
+            cur.execute("DELETE FROM cash_settlements")
             cur.execute("DELETE FROM holdings")
             cur.execute("DELETE FROM accounts")
 
@@ -256,8 +274,56 @@ class AccountLedger:
     def account_summary(self, account: str) -> Dict[str, Any]:
         _validate_account(account)
         with self._lock:
+            self.settle_due_cash(account=account)
             row = self.conn.execute("SELECT * FROM accounts WHERE account = ?", (account,)).fetchone()
-        return dict(row) if row else {}
+            if not row:
+                return {}
+            out = dict(row)
+            pending = self._pending_cash(account)
+            out["available_cash_cny"] = float(out.get("cash_cny", 0) or 0)
+            out["t2_pending_cash_cny"] = pending
+            out["total_cash_cny"] = out["available_cash_cny"] + pending
+            return out
+
+    def settle_due_cash(self, *, account: Optional[str] = None, today: Optional[str] = None) -> float:
+        """Release due HK T+2 settlement cash into available cash.
+
+        ``accounts.cash_cny`` is the only cash allowed for new orders. Pending
+        settlement remains in ``cash_settlements`` until ``settle_date``.
+        """
+        if account is not None:
+            _validate_account(account)
+        today = today or date.today().isoformat()
+        with self._lock:
+            params: List[Any] = [today]
+            where_account = ""
+            if account is not None:
+                where_account = " AND account = ?"
+                params.append(account)
+            rows = self.conn.execute(
+                f"""SELECT id, account, amount_cny FROM cash_settlements
+                    WHERE status = 'pending' AND settle_date <= ?{where_account}""",
+                params,
+            ).fetchall()
+            if not rows:
+                return 0.0
+            now = _now()
+            released = 0.0
+            for row in rows:
+                amount = float(row["amount_cny"] or 0)
+                if amount <= 0:
+                    continue
+                released += amount
+                self.conn.execute(
+                    "UPDATE accounts SET cash_cny = cash_cny + ?, updated_at = ? WHERE account = ?",
+                    (amount, now, row["account"]),
+                )
+                self.conn.execute(
+                    "UPDATE cash_settlements SET status = 'settled', settled_at = ? WHERE id = ?",
+                    (now, row["id"]),
+                )
+            self.conn.commit()
+            return released
 
     def stocks_for_committee_input(self, config: Dict[str, Any], account: str = REAL_ACCOUNT) -> List[Dict[str, Any]]:
         """Merge account units with config metadata for committee analysis."""
@@ -369,6 +435,7 @@ class AccountLedger:
             for account in (REAL_ACCOUNT, COMMITTEE_ACCOUNT):
                 summary = self.account_summary(account)
                 cash = float(summary.get("cash_cny", 0) or 0)
+                pending_cash = float(summary.get("t2_pending_cash_cny", 0) or 0)
                 initial_equity = float(summary.get("initial_equity_cny", 0) or 0)
                 holdings = self.list_holdings(account)
                 holdings_value = 0.0
@@ -383,7 +450,7 @@ class AccountLedger:
                     holdings_value += units * price
                     cost_basis += units * float(h.get("avg_cost", 0) or 0)
                     used_prices[symbol] = price
-                total_value = cash + holdings_value
+                total_value = cash + pending_cash + holdings_value
                 prev = self.conn.execute(
                     """SELECT total_value_cny FROM daily_pnl
                        WHERE account = ? AND trade_date < ?
@@ -397,11 +464,11 @@ class AccountLedger:
                 self.conn.execute(
                     """INSERT OR REPLACE INTO daily_pnl
                        (trade_date, account, total_value_cny, cash_cny, holdings_value_cny,
-                        cost_basis_cny, day_pnl_cny, total_pnl_cny, total_pnl_pct,
+                        t2_pending_cash_cny, cost_basis_cny, day_pnl_cny, total_pnl_cny, total_pnl_pct,
                         prices_json, created_at)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                     (
-                        trade_date, account, total_value, cash, holdings_value,
+                        trade_date, account, total_value, cash, holdings_value, pending_cash,
                         cost_basis, day_pnl, total_pnl, total_pnl_pct,
                         json.dumps(used_prices, ensure_ascii=False, sort_keys=True), now,
                     ),
@@ -411,6 +478,9 @@ class AccountLedger:
                     "account": account,
                     "total_value_cny": round(total_value, 2),
                     "cash_cny": round(cash, 2),
+                    "available_cash_cny": round(cash, 2),
+                    "t2_pending_cash_cny": round(pending_cash, 2),
+                    "total_cash_cny": round(cash + pending_cash, 2),
                     "holdings_value_cny": round(holdings_value, 2),
                     "day_pnl_cny": None if day_pnl is None else round(day_pnl, 2),
                     "total_pnl_cny": round(total_pnl, 2),
@@ -472,6 +542,7 @@ class AccountLedger:
             raise ValueError("units and price must be positive")
         trade_date = trade_date or date.today().isoformat()
         with self._lock:
+            self.settle_due_cash(account=account)
             holding = self._get_holding(account, symbol)
             if holding is None:
                 if direction == "SELL":
@@ -497,7 +568,12 @@ class AccountLedger:
                 )
             current_units = float(holding.get("units", 0) or 0)
             current_avg = float(holding.get("avg_cost", 0) or 0)
-            cash = float(self.account_summary(account).get("cash_cny", 0) or 0)
+            market = str(holding.get("market") or "").strip().lower()
+            account_row = self.conn.execute(
+                "SELECT cash_cny FROM accounts WHERE account = ?",
+                (account,),
+            ).fetchone()
+            cash = float(account_row["cash_cny"] if account_row else 0)
             if direction == "BUY":
                 cost = units * price
                 if cost > cash + 1e-6:
@@ -515,7 +591,19 @@ class AccountLedger:
                     units = current_units
                 new_units = max(0.0, current_units - units)
                 new_avg = current_avg
-                cash_delta = units * price
+                proceeds = units * price
+                if _is_hk_market(symbol, market):
+                    cash_delta = 0.0
+                    settle_date = _settlement_date(trade_date, sessions=2, calendar_code="XHKG")
+                    note = _append_note(note, f"hk_t2_pending_cny={proceeds:.2f};settle_date={settle_date}")
+                    self.conn.execute(
+                        """INSERT INTO cash_settlements
+                           (account, symbol, amount_cny, trade_date, settle_date, source, status, created_at)
+                           VALUES (?, ?, ?, ?, ?, ?, 'pending', ?)""",
+                        (account, symbol, proceeds, trade_date, settle_date, source, _now()),
+                    )
+                else:
+                    cash_delta = proceeds
             new_cash = cash + cash_delta
             now = _now()
             self.conn.execute(
@@ -546,6 +634,59 @@ class AccountLedger:
             note=note,
         )
 
+    def _pending_cash(self, account: str) -> float:
+        row = self.conn.execute(
+            """SELECT COALESCE(SUM(amount_cny), 0) AS amount
+               FROM cash_settlements
+               WHERE account = ? AND status = 'pending'""",
+            (account,),
+        ).fetchone()
+        return float(row["amount"] if row else 0)
+
+    def _repair_legacy_unsettled_hk_sells(self, cur: sqlite3.Cursor) -> None:
+        today = date.today().isoformat()
+        rows = cur.execute(
+            """SELECT id, account, symbol, trade_date, cash_delta, source
+               FROM trades
+               WHERE direction = 'SELL' AND cash_delta > 0""",
+        ).fetchall()
+        for row in rows:
+            symbol = str(row["symbol"] or "")
+            if not _is_hk_market(symbol, ""):
+                continue
+            amount = float(row["cash_delta"] or 0)
+            settle_date = _settlement_date(str(row["trade_date"]), sessions=2, calendar_code="XHKG")
+            if settle_date <= today:
+                continue
+            exists = cur.execute(
+                """SELECT 1 FROM cash_settlements
+                   WHERE account = ? AND symbol = ? AND trade_date = ?
+                     AND ABS(amount_cny - ?) < 0.01
+                   LIMIT 1""",
+                (row["account"], symbol, row["trade_date"], amount),
+            ).fetchone()
+            if exists:
+                continue
+            now = _now()
+            cur.execute(
+                """INSERT INTO cash_settlements
+                   (account, symbol, amount_cny, trade_date, settle_date, source, status, created_at)
+                   VALUES (?, ?, ?, ?, ?, ?, 'pending', ?)""",
+                (
+                    row["account"],
+                    symbol,
+                    amount,
+                    row["trade_date"],
+                    settle_date,
+                    f"legacy_hk_t2_repair:{row['source'] or 'unknown'}",
+                    now,
+                ),
+            )
+            cur.execute(
+                "UPDATE accounts SET cash_cny = cash_cny - ?, updated_at = ? WHERE account = ?",
+                (amount, now, row["account"]),
+            )
+
     def _get_holding(self, account: str, symbol: str) -> Optional[Dict[str, Any]]:
         row = self.conn.execute(
             "SELECT * FROM holdings WHERE account = ? AND symbol = ?",
@@ -565,6 +706,53 @@ def _validate_account(account: str) -> None:
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+def _ensure_column(cur: sqlite3.Cursor, table: str, column: str, definition: str) -> None:
+    existing = {row[1] for row in cur.execute(f"PRAGMA table_info({table})").fetchall()}
+    if column not in existing:
+        cur.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+
+
+def _is_hk_market(symbol: str, market: str) -> bool:
+    market_text = str(market or "").strip().lower()
+    symbol_text = str(symbol or "").strip().upper()
+    return market_text in {"hk", "hkg", "hongkong"} or symbol_text.endswith(".HK") or (
+        symbol_text.isdigit() and len(symbol_text) == 5
+    )
+
+
+def _settlement_date(trade_date: str, *, sessions: int, calendar_code: str) -> str:
+    base = datetime.strptime(trade_date[:10], "%Y-%m-%d").date()
+    try:
+        import exchange_calendars as xcal  # type: ignore
+
+        cal = xcal.get_calendar(calendar_code)
+        current = base.isoformat()
+        if not cal.is_session(current):
+            current = cal.date_to_session(current, direction="next").date().isoformat()
+        session = current
+        for _ in range(max(0, sessions)):
+            session = cal.next_session(session).date().isoformat()
+        return session
+    except Exception:
+        current = base
+        remaining = max(0, sessions)
+        while remaining > 0:
+            current += timedelta(days=1)
+            if current.weekday() < 5:
+                remaining -= 1
+        return current.isoformat()
+
+
+def _append_note(note: str, extra: str) -> str:
+    note = str(note or "").strip()
+    extra = str(extra or "").strip()
+    if not note:
+        return extra
+    if not extra:
+        return note
+    return f"{note};{extra}"
 
 
 def _min_lot_size(stock: Dict[str, Any]) -> int:

@@ -6,7 +6,7 @@ from tkinter import ttk
 from typing import Any, Optional
 
 from scripts.monitor_window_constants import BLUE, BOARD_BG, LINE, PANEL_BG, TEXT
-from scripts.monitor_window_services import _cash_ratio, _fmt_cash_line
+from scripts.monitor_window_services import _cash_ratio, _fmt_cash_line, _safe_num
 
 class RoundedButton(tk.Canvas):
     def __init__(
@@ -153,12 +153,14 @@ class CashRatioBar(tk.Canvas):
         )
         self.cash_text = "现金 -"
         self.ratio = 0.0
+        self.pending_ratio = 0.0
         self.bind("<Configure>", lambda _event: self._draw())
         self._draw()
 
-    def set_values(self, cash: Any, total_assets: Any) -> None:
-        self.cash_text = _fmt_cash_line(cash, total_assets)
-        self.ratio = 1.0 - _cash_ratio(cash, total_assets)
+    def set_values(self, cash: Any, total_assets: Any, pending_cash: Any = 0) -> None:
+        self.cash_text = _fmt_cash_line(cash, total_assets, pending_cash)
+        self.ratio = 1.0 - _cash_ratio(_safe_num(cash) + _safe_num(pending_cash), total_assets)
+        self.pending_ratio = max(0.0, min(_cash_ratio(pending_cash, total_assets), 1.0))
         self._draw()
 
     def _rounded_rect(self, x1: float, y1: float, x2: float, y2: float, radius: float, *, fill: str, outline: str = "") -> None:
@@ -180,12 +182,18 @@ class CashRatioBar(tk.Canvas):
         pad = 1
         inner_w = width - pad * 2
         fill_w = max(0, int(inner_w * self.ratio))
+        pending_w = max(0, int(inner_w * self.pending_ratio))
         self._rounded_rect(pad, pad, width - pad, height - pad, 7, fill="#e8eef7", outline=LINE)
         if fill_w > 0:
             if fill_w >= inner_w - 2:
                 self._rounded_rect(pad + 1, pad + 1, width - pad - 1, height - pad - 1, 6, fill="#9ec5ff")
             else:
                 self.create_rectangle(pad + 1, pad + 1, pad + fill_w, height - pad - 1, fill="#9ec5ff", outline="")
+        if pending_w > 0:
+            x1 = min(width - pad - 1, pad + fill_w)
+            x2 = min(width - pad - 1, x1 + pending_w)
+            if x2 > x1:
+                self.create_rectangle(x1, pad + 1, x2, height - pad - 1, fill="#f2b35d", outline="")
         self.create_text(
             width - 9,
             height / 2,

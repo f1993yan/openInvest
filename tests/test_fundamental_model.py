@@ -8,6 +8,16 @@ def test_selects_sector_specific_models():
     assert select_fundamental_model(symbol="603308", industry="高端铸件/航空航天") == "industrial_quality_value"
 
 
+def test_selects_models_from_eastmoney_industry_names():
+    assert select_fundamental_model(symbol="000000", sector="电子元件") == "growth_innovation"
+    assert select_fundamental_model(symbol="000000", sector="消费电子") == "growth_innovation"
+    assert select_fundamental_model(symbol="000000", sector="通信设备") == "growth_innovation"
+    assert select_fundamental_model(symbol="000000", sector="电力行业") == "regulated_yield"
+    assert select_fundamental_model(symbol="000000", sector="电网设备") == "industrial_quality_value"
+    assert select_fundamental_model(symbol="000000", sector="通用设备") == "industrial_quality_value"
+    assert select_fundamental_model(symbol="000000", sector="非金属材料") == "industrial_quality_value"
+
+
 def test_missing_fundamentals_are_neutral_low_confidence():
     assessment = assess_fundamentals(
         symbol="600900",

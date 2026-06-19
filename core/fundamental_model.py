@@ -224,6 +224,60 @@ MODEL_NAMES = {
 }
 
 
+EASTMONEY_INDUSTRY_MODEL_MAP: Dict[str, str] = {
+    # TMT / electronics: growth quality, R&D intensity, margins and valuation.
+    "半导体": "growth_innovation",
+    "电子元件": "growth_innovation",
+    "消费电子": "growth_innovation",
+    "通信设备": "growth_innovation",
+    "光学光电子": "growth_innovation",
+    "软件开发": "growth_innovation",
+    "互联网服务": "growth_innovation",
+    "计算机设备": "growth_innovation",
+    "游戏": "growth_innovation",
+    # Regulated yield / stable cash-flow assets.
+    "电力行业": "regulated_yield",
+    "公用事业": "regulated_yield",
+    "铁路公路": "regulated_yield",
+    "燃气": "regulated_yield",
+    "水务": "regulated_yield",
+    # Manufacturing / equipment / materials: cycle quality, cash flow and leverage.
+    "通用设备": "industrial_quality_value",
+    "专用设备": "industrial_quality_value",
+    "电网设备": "industrial_quality_value",
+    "电机": "industrial_quality_value",
+    "电源设备": "industrial_quality_value",
+    "工程机械": "industrial_quality_value",
+    "自动化设备": "industrial_quality_value",
+    "非金属材料": "industrial_quality_value",
+    "玻璃玻纤": "industrial_quality_value",
+    "小金属": "industrial_quality_value",
+    "有色金属": "industrial_quality_value",
+    "钢铁行业": "industrial_quality_value",
+    "化学制品": "industrial_quality_value",
+    "化学原料": "industrial_quality_value",
+    "塑料制品": "industrial_quality_value",
+    "橡胶制品": "industrial_quality_value",
+    "汽车零部件": "industrial_quality_value",
+    "航天航空": "industrial_quality_value",
+    "船舶制造": "industrial_quality_value",
+    "军工电子": "industrial_quality_value",
+    # Financials.
+    "银行": "financial_residual_income",
+    "保险": "financial_residual_income",
+    "证券": "financial_residual_income",
+    "多元金融": "financial_residual_income",
+    # Consumer / healthcare compounders.
+    "食品饮料": "quality_compounder",
+    "酿酒行业": "quality_compounder",
+    "医疗服务": "quality_compounder",
+    "医疗器械": "quality_compounder",
+    "中药": "quality_compounder",
+    "化学制药": "quality_compounder",
+    "生物制品": "quality_compounder",
+}
+
+
 KNOWN_SYMBOL_MODELS = {
     "600900": "regulated_yield",
     "00700": "growth_innovation",
@@ -328,6 +382,11 @@ def select_fundamental_model(
     sym = (symbol or "").strip().upper()
     if sym in KNOWN_SYMBOL_MODELS:
         return KNOWN_SYMBOL_MODELS[sym]
+
+    for label in (sector, industry):
+        model = EASTMONEY_INDUSTRY_MODEL_MAP.get(str(label or "").strip())
+        if model:
+            return model
 
     text = " ".join([name or "", sector or "", industry or "", market or ""]).lower()
     for model_key, keywords in KEYWORD_MODELS:

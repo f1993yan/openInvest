@@ -1,4 +1,4 @@
-"""Investment Committee 编排 - 4 角色（Quant / Macro / Risk Officer / CIO）
+﻿"""Investment Committee 编排 - 4 角色（Quant / Macro / Risk Officer / CIO）
 
 设计要点：
 - 信息分隔（每个 agent 只看自己领域的数据）
@@ -484,6 +484,8 @@ def run_optimizer_review_view(
     optimizer_audit: str,
     entry_exit_audit: str,
     regime_brief: str,
+    position_exit_policy_audit: str = "",
+    right_side_gate_audit: str = "",
     fundamental_brief: str = "",
 ) -> str:
     """LLM review of deterministic optimizer outputs.
@@ -498,6 +500,9 @@ def run_optimizer_review_view(
         "You are an optimizer audit reviewer for an investment committee. "
         "You evaluate deterministic optimizer outputs; you do not recalculate "
         "or invent new prices, positions, or allocation amounts. "
+        "Keep ENTRY_EXIT_POINTS, RIGHT_SIDE_TREND_GATE, and POSITION_EXIT_POLICY separate: "
+        "entry/exit points are price levels, right-side gate is entry permission, "
+        "and position policy is cost-anchored exits after holding. "
         "Return only the following format:\n"
         "OPTIMIZER_REVIEW:\n"
         "CONCLUSION: accept | caution | override_required\n"
@@ -520,8 +525,11 @@ def run_optimizer_review_view(
         f"# Fundamental model\n{fundamental_brief or '(none)'}\n\n"
         f"# Deterministic optimizer audit\n{optimizer_audit or '(none)'}\n\n"
         f"# Entry/exit point audit\n{entry_exit_audit or '(none)'}\n\n"
+        f"# Right-side trend gate audit\n{right_side_gate_audit or '(none)'}\n\n"
+        f"# Position exit policy audit\n{position_exit_policy_audit or '(none)'}\n\n"
         "Task: judge whether the optimizer output is coherent and actionable. "
-        "Do not change the numbers. If hard constraints, tail risk, low data "
+        "Do not change the numbers. Do not mix right-side entry permission, buy entry points, "
+        "or cost-anchored position stops. If hard constraints, tail risk, low data "
         "confidence, or reward/risk are questionable, use CONCLUSION: caution. "
         "Use override_required only when the deterministic output contradicts "
         "the provided constraints or has missing critical data. "

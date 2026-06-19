@@ -10,6 +10,7 @@ jobs/market_monitor_config.json
 data/
 logs/
 backend*.log
+reports/
 
 # Python
 __pycache__/

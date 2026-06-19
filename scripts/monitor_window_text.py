@@ -266,6 +266,7 @@ def _beginner_summary_lines(
     confidence = _safe_num((source or op).get("confidence"))
     alloc = _safe_num((source or op).get("suggested_alloc_cny"))
     ee = (source or {}).get("entry_exit_points") or _entry_exit_from_row(row)
+    right_gate = (source or {}).get("right_side_trend_gate") or row.get("right_side_trend_gate") or {}
     review = str((source or {}).get("optimizer_review") or (source or {}).get("cio_memo") or _review_text_from_row(row))
     one_line = _extract_one_line(review)
     risk_flags = _extract_risk_flags(review)
@@ -311,6 +312,8 @@ def _beginner_summary_lines(
         "",
         "为什么这么判断:",
         f"- 技术面: {_regime_label(regime_text)}",
+        f"- 右侧趋势闸门: {'通过' if right_gate.get('allow') else '未通过'}"
+        f"（{right_gate.get('reason') or '未提供'}）。",
         f"- 基本面: {_safe_num((source or {}).get('fundamental_score'), _safe_num(fundamental.get('score'), 50)):.0f} 分，属于{'偏强' if _safe_num((source or {}).get('fundamental_score'), _safe_num(fundamental.get('score'), 50)) >= 70 else '一般' if _safe_num((source or {}).get('fundamental_score'), _safe_num(fundamental.get('score'), 50)) >= 45 else '偏弱'}。",
     ]
     if one_line and one_line != "-":

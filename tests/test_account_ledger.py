@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+from datetime import datetime, timedelta
+
 import pytest
 
-from db.account_ledger import AccountLedger
+from db.account_ledger import AccountLedger, _settlement_date
 
 
 def _config():
@@ -32,6 +34,24 @@ def _config():
             }
         ],
     }
+
+
+def _hk_config():
+    config = _config()
+    config["holdings"] = [
+        {
+            "symbol": "09988",
+            "name": "阿里巴巴-W",
+            "market": "hk",
+            "sector": "互联网",
+            "industry": "电商",
+            "position_pct": 20,
+            "cost": 80,
+            "min_lot_size": 100,
+        }
+    ]
+    config["watchlist"] = []
+    return config
 
 
 def test_initialize_dual_accounts_from_monitor_config(tmp_path):
@@ -154,3 +174,52 @@ def test_daily_pnl_records_both_accounts(tmp_path):
 
     hist = db.list_daily_pnl(limit=10)
     assert len(hist) == 2
+
+
+def test_hk_sell_proceeds_are_t2_pending_not_available_cash(tmp_path):
+    db = AccountLedger(str(tmp_path / "accounts.db"))
+    db.initialize_from_monitor_config(_hk_config())
+
+    trade = db.apply_user_trade(
+        symbol="09988",
+        direction="SELL",
+        units=100,
+        price=90,
+        trade_date="2026-06-19",
+    )
+    assert trade.cash_delta == pytest.approx(0)
+
+    summary = db.account_summary("real")
+    assert summary["cash_cny"] == pytest.approx(10000)
+    assert summary["available_cash_cny"] == pytest.approx(10000)
+    assert summary["t2_pending_cash_cny"] == pytest.approx(9000)
+    assert summary["total_cash_cny"] == pytest.approx(19000)
+
+    rows = db.snapshot_daily_pnl(prices={"09988": 90}, trade_date="2026-06-19")
+    real = next(r for r in rows if r["account"] == "real")
+    assert real["cash_cny"] == pytest.approx(10000)
+    assert real["t2_pending_cash_cny"] == pytest.approx(9000)
+    assert real["total_value_cny"] == pytest.approx(32500)
+
+
+def test_due_hk_t2_cash_is_released_to_available_cash(tmp_path):
+    trade_date = "2026-06-19"
+    settle_date = _settlement_date(trade_date, sessions=2, calendar_code="XHKG")
+    before_settle_date = (datetime.strptime(settle_date, "%Y-%m-%d") - timedelta(days=1)).date().isoformat()
+    db = AccountLedger(str(tmp_path / "accounts.db"))
+    db.initialize_from_monitor_config(_hk_config())
+    db.apply_user_trade(
+        symbol="09988",
+        direction="SELL",
+        units=100,
+        price=90,
+        trade_date=trade_date,
+    )
+
+    assert db.settle_due_cash(account="real", today=before_settle_date) == pytest.approx(0)
+    assert db.account_summary("real")["cash_cny"] == pytest.approx(10000)
+
+    assert db.settle_due_cash(account="real", today=settle_date) == pytest.approx(9000)
+    summary = db.account_summary("real")
+    assert summary["cash_cny"] == pytest.approx(19000)
+    assert summary["t2_pending_cash_cny"] == pytest.approx(0)

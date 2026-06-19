@@ -55,6 +55,44 @@
 - [connectors/README.md](../../connectors/README.md)
 - [skill/README.md](../../skill/README.md)
 
+### 1.1 本地盘中监控窗口（2026-06-19 模块地图）
+
+本地盘中监控不是 Web 预览页，主入口是独立桌面窗口：
+
+| 层 | 入口/模块 | 职责 |
+|----|-----------|------|
+| 启动 | `start-invest-backend.bat` → `start_invest_backend.py` | 读取 `.env`，清理旧进程，启动监控、调度器和桌面窗口 |
+| UI | `scripts/monitor_desktop_window.py` | 独立窗口主循环、卡片布局、悬浮窗协调 |
+| UI 服务 | `scripts/monitor_window_services.py` | 读取监控快照、手动交易、关注列表、最新价 |
+| 监控入口 | `jobs/market_monitor.py` | 仅保留 CLI 入口和兼容导出，旧导入仍可用 |
+| 监控通用 | `jobs/market_monitor_common.py` | 路径、日志、交易时段常量、通用数值函数 |
+| 行情/委员会 | `jobs/market_monitor_quotes.py` | 新浪行情、直接 Python 调用委员会，不依赖 8766 HTTP |
+| 买卖点/止盈止损 | `jobs/market_monitor_entry_exit.py` | 连续触发状态、A 股持仓纪律止盈止损计划 |
+| 风控护栏 | `jobs/market_monitor_guards.py` | 涨停买入拦截、重复交易冷却 |
+| 告警优化 | `jobs/market_monitor_alerts.py` | 现金约束、仓位风险、LLM 审核修正后的最优提醒选择 |
+| 快照/报告 | `jobs/market_monitor_snapshot.py` | 写 `data/market_monitor/latest_window.json` 和本地报告 |
+| 运行编排 | `jobs/market_monitor_runtime.py` | 监控轮次、新闻摘要、账本同步、窗口快照刷新 |
+
+盘中监控的数据流：
+
+```
+market_monitor_runtime.run_monitor_round()
+  → load_config() + AccountLedger 读取真实账户
+  → fetch_sina_prices() 拉最新价
+  → call_committee() 直接调用 backend.server.run_committee_direct()
+  → apply_repeated_trade_guard() / apply_limit_up_guard()
+  → select_optimal_actionable_alerts()
+  → update_entry_exit_alert_state()
+  → build_monitor_window_snapshot()
+  → scripts/monitor_desktop_window.py 监听 latest_window.json 并局部刷新 UI
+```
+
+止盈止损和入场出场的边界要分清：
+
+- `entry_exit_points` 是委员会/技术模型给出的入场、突破、回调、重新入场和技术出场参考，会随行情刷新。
+- `position_exit_plan` 是已经持仓后的 A 股纪律计划，锚定真实成本和板块参数，盘中只检查触发，收盘后才允许追踪止损上移。
+- A 股持仓纪律止损在 `evaluate_position_exit_plan_triggers()` 中判断，价格**跌破**锁定止损线才触发；止盈目标价达到即可触发。
+
 ---
 
 ## 2. Agents 层（LLM 角色）

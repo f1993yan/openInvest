@@ -73,10 +73,13 @@ def _fmt_money(value: Any) -> str:
     return f"{value:,.0f}" if abs(value) >= 1 else "-"
 
 
-def _fmt_cash_line(cash: Any, total_assets: Any) -> str:
+def _fmt_cash_line(cash: Any, total_assets: Any, pending_cash: Any = 0) -> str:
     cash_value = _safe_num(cash)
+    pending_value = _safe_num(pending_cash)
     total_value = _safe_num(total_assets)
     pct = cash_value / total_value * 100.0 if total_value > 0 else 0.0
+    if pending_value > 0:
+        return f"可用 {_fmt_money(cash_value)} / {pct:.1f}% · T+2 {_fmt_money(pending_value)}"
     return f"现金 {_fmt_money(cash_value)} / {pct:.1f}%"
 
 
@@ -344,11 +347,26 @@ def _load_config_snapshot(message: str = "", *, source_path: Optional[Path] = No
         timestamp_path = source_path
 
     rows = [_config_stock_row(stock, prices.get(str(stock.get("symbol") or "").strip()) or {}) for stock in stocks]
+    cash = _safe_num(config.get("cash"))
+    t2_pending_cash = _safe_num(config.get("t2_pending_cash"))
+    try:
+        from db.account_ledger import AccountLedger, REAL_ACCOUNT
+
+        ledger = AccountLedger()
+        ledger.ensure_initialized(config)
+        summary = ledger.account_summary(REAL_ACCOUNT)
+        cash = _safe_num(summary.get("cash_cny"), cash)
+        t2_pending_cash = _safe_num(summary.get("t2_pending_cash_cny"), t2_pending_cash)
+    except Exception:
+        pass
     return {
         "version": 1,
         "generated_at": _file_timestamp(timestamp_path),
         "round_time": "config",
-        "cash_cny": round(_safe_num(config.get("cash")), 2),
+        "cash_cny": round(cash, 2),
+        "available_cash_cny": round(cash, 2),
+        "t2_pending_cash_cny": round(t2_pending_cash, 2),
+        "total_cash_cny": round(cash + t2_pending_cash, 2),
         "total_assets_cny": round(_safe_num(config.get("total_assets")), 2),
         "counts": {
             "symbols": len(rows),
@@ -731,10 +749,12 @@ def _run_latest_committee_for_row(row: Dict[str, Any]) -> Dict[str, Any]:
 
     total_assets = float(config.get("total_assets", 0) or 0)
     cash = float(config.get("cash", 0) or 0)
+    t2_pending_cash = float(config.get("t2_pending_cash", 0) or 0)
     if ledger is not None:
         try:
             real_summary = ledger.account_summary("real")
             cash = float(real_summary.get("cash_cny", cash) or cash)
+            t2_pending_cash = float(real_summary.get("t2_pending_cash_cny", t2_pending_cash) or 0)
         except Exception:
             pass
 
@@ -755,7 +775,7 @@ def _run_latest_committee_for_row(row: Dict[str, Any]) -> Dict[str, Any]:
         cash=cash,
         all_holdings=other_holdings,
         target_position_pct=stock.get("target_position_pct", stock.get("target_pct")),
-        t2_pending=float(config.get("t2_pending_cash", 0) or 0),
+        t2_pending=t2_pending_cash,
         sector=str(stock.get("sector") or row.get("sector") or ""),
         industry=str(stock.get("industry") or row.get("industry") or ""),
         fundamentals=stock.get("fundamentals", {}),

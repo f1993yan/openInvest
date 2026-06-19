@@ -1,4 +1,4 @@
-"""openInvest 后端服务 — FastAPI + akshare 国内数据源
+﻿"""openInvest 后端服务 — FastAPI + akshare 国内数据源
 
 启动: uv run uvicorn backend.server:app --host 0.0.0.0 --port <port>
 
@@ -128,6 +128,8 @@ class CommitteeResponse(BaseModel):
     fundamental_coverage: float = 0.0
     fundamental_anchor_multiplier: float = 1.0
     entry_exit_points: Dict[str, Any] = Field(default_factory=dict)
+    position_exit_policy: Dict[str, Any] = Field(default_factory=dict)
+    right_side_trend_gate: Dict[str, Any] = Field(default_factory=dict)
     optimizer_review: str = ""
     error: str = ""
     elapsed_sec: float = 0.0
@@ -486,7 +488,17 @@ def run_committee_direct(req: CommitteeRequest) -> CommitteeResponse:
             "display_name": req.name or req.symbol,
         }
         portfolio_summary = _build_portfolio_summary(req)
+        from core.position_exit_policy import load_position_exit_policy
+        position_exit_policy = load_position_exit_policy(sector=req.sector)
+        position_exit_policy_text = position_exit_policy.audit_text(
+            symbol=req.symbol,
+            market=req.market,
+            is_holding=req.position_pct > 0,
+            cost=req.cost,
+            current_price=current_price or 0.0,
+        )
         portfolio_summary += f"\n\n### 基本面数学模型锚点\n{fundamental_brief}"
+        portfolio_summary += f"\n\n### 已持仓A股止盈止损纪律（不要当作入场点）\n{position_exit_policy_text}"
 
         # 构建 wealth_context_view stub（无 user.md 时用）
         from core.committee import run_wealth_context_view
@@ -589,8 +601,23 @@ def run_committee_direct(req: CommitteeRequest) -> CommitteeResponse:
             conditional_return_stats=conditional_return_stats,
             expected_return_pct=opt.expected_return_pct,
         )
+        from core.right_side_trend_gate import evaluate_right_side_trend_gate
+
+        right_side_gate = evaluate_right_side_trend_gate(
+            metrics=metrics,
+            regime_brief=regime_brief,
+            optimizer_expected_return_pct=opt.expected_return_pct,
+            entry_exit_points=entry_exit_plan.as_dict(),
+            conditional_return_stats=conditional_return_stats,
+            quant_view=report.quant_view or "",
+            risk_view=report.risk_view or "",
+            cio_memo=cio_memo,
+            market=req.market,
+            is_holding=req.position_pct > 0,
+        )
         opt_audit_text = opt.audit_text()
         entry_exit_audit_text = entry_exit_plan.audit_text()
+        right_side_gate_text = right_side_gate.audit_text()
         optimizer_review = ""
         if req.optimizer_review_enabled:
             try:
@@ -599,6 +626,8 @@ def run_committee_direct(req: CommitteeRequest) -> CommitteeResponse:
                     asset=asset,
                     optimizer_audit=opt_audit_text,
                     entry_exit_audit=entry_exit_audit_text,
+                    right_side_gate_audit=right_side_gate_text,
+                    position_exit_policy_audit=position_exit_policy_text,
                     regime_brief=regime_brief,
                     fundamental_brief=fundamental_brief,
                 )
@@ -627,19 +656,35 @@ def run_committee_direct(req: CommitteeRequest) -> CommitteeResponse:
             # 让LLM分析技术面给出target_position_pct
             parsed["target_position_pct"] = max(5.0, min(req.position_pct, 35.0))
         else:
-            if (
-                parsed.get("verdict") != opt.verdict
-                or int(parsed.get("alloc_cny", 0) or 0) != opt.alloc_cny
-            ):
+            right_side_blocked = (
+                req.position_pct <= 0
+                and opt.verdict in {"BUY", "ACCUMULATE"}
+                and not right_side_gate.allow
+            )
+            if right_side_blocked:
                 cio_memo += (
-                    f"\n[OPTIMIZER_OVERRIDE] LLM={parsed.get('verdict')} "
-                    f"alloc={parsed.get('alloc_cny', 0)} -> {opt.verdict} alloc={opt.alloc_cny}"
+                    f"\n[RIGHT_SIDE_GATE_BLOCK] {opt.verdict} -> HOLD "
+                    f"reason={right_side_gate.reason}"
                 )
-            parsed["verdict"] = opt.verdict
-            parsed["confidence"] = opt.confidence
-            parsed["alloc_cny"] = opt.alloc_cny
+                parsed["verdict"] = "HOLD"
+                parsed["confidence"] = min(opt.confidence, 0.55)
+                parsed["alloc_cny"] = 0
+            else:
+                if (
+                    parsed.get("verdict") != opt.verdict
+                    or int(parsed.get("alloc_cny", 0) or 0) != opt.alloc_cny
+                ):
+                    cio_memo += (
+                        f"\n[OPTIMIZER_OVERRIDE] LLM={parsed.get('verdict')} "
+                        f"alloc={parsed.get('alloc_cny', 0)} -> {opt.verdict} alloc={opt.alloc_cny}"
+                    )
+                parsed["verdict"] = opt.verdict
+                parsed["confidence"] = opt.confidence
+                parsed["alloc_cny"] = opt.alloc_cny
             cio_memo += opt_audit_text
         cio_memo += entry_exit_audit_text
+        cio_memo += right_side_gate_text
+        cio_memo += position_exit_policy_text
         if optimizer_review:
             cio_memo += f"\n\n[OPTIMIZER_LLM_REVIEW]\n{optimizer_review}"
 
@@ -659,6 +704,8 @@ def run_committee_direct(req: CommitteeRequest) -> CommitteeResponse:
             fundamental_model=fundamental_assessment.model_key,
             fundamental_score=fundamental_assessment.score,
             entry_exit_points=entry_exit_plan.as_dict(),
+            position_exit_policy=position_exit_policy.as_dict(),
+            right_side_trend_gate=right_side_gate.as_dict(),
             optimizer_review=optimizer_review[:500],
             cio_note=cio_memo[:500],
         )
@@ -685,6 +732,8 @@ def run_committee_direct(req: CommitteeRequest) -> CommitteeResponse:
             fundamental_coverage=fundamental_assessment.coverage,
             fundamental_anchor_multiplier=fundamental_assessment.anchor_multiplier,
             entry_exit_points=entry_exit_plan.as_dict(),
+            position_exit_policy=position_exit_policy.as_dict(),
+            right_side_trend_gate=right_side_gate.as_dict(),
             optimizer_review=optimizer_review,
             elapsed_sec=round(elapsed, 1),
         )

@@ -86,6 +86,7 @@ Agent({...})  // cio 综合 transcript
 | `~/.claude/skills/invest/run.sh run_committee SYM` | Cursor / Cline / Codex / 普通脚本 / DeepSeek 本地 / 任意 agent | 一条命令拿 verdict JSON + CIO memo |
 | `POST /api/committee/run` | Web GUI 的"触发/直播"按钮 | 异步 + SSE 进度推送 |
 | cron `0 3 * * *` 跑 `jobs/daily_report.py` | 服务器自动每日 | 跑全部 target_assets，可选发邮件 |
+| `python -m jobs.market_monitor` | 本地盘中桌面窗口/启动脚本 | 交易时段按委员会刷新快照，不要求 8766 HTTP 可用 |
 
 ### 触发
 
@@ -134,6 +135,44 @@ cio_memo = _ask(cio_agent, cio_prompt_with_full_transcript)
 - ❌ DeepSeek 模型能力 < Claude 4，复杂场景 verdict 质量略低
 - ❌ 用户付 DeepSeek 费用（虽然便宜，¥0.01-0.03 一次）
 - ❌ 同进程不是真 subagent（虽然信息隔离正确，但 marketing 上 Claude 党会挑刺）
+
+---
+
+## 2.1 本地盘中监控 Direct 路径
+
+盘中监控走 Direct 路径，但它不是 `POST /api/committee/run` 的浏览器预览分支。当前推荐链路是：
+
+```
+start-invest-backend.bat
+  → start_invest_backend.py
+  → python -m jobs.market_monitor
+  → scripts/monitor_desktop_window.py
+```
+
+核心原则：
+
+- `jobs.market_monitor_quotes.call_committee()` 直接调用 `backend.server.run_committee_direct()`，不通过 `http://127.0.0.1:8766`。
+- `jobs.market_monitor_runtime.run_monitor_round()` 是一轮盘中监控的唯一编排入口，负责行情、委员会、账本、新闻、告警和快照输出。
+- `scripts/monitor_desktop_window.py` 只消费 `data/market_monitor/latest_window.json`，窗口跟随委员会/选股/新闻输出文件变化刷新，不再单独定义业务刷新频率。
+- 弹框默认关闭，稳定窗口是主交互面；只有显式开启相关环境变量时才恢复旧 Windows 弹框。
+
+模块定位：
+
+| 文件 | 查什么问题 |
+|------|------------|
+| `jobs/market_monitor.py` | CLI 入口、旧导入兼容 |
+| `jobs/market_monitor_runtime.py` | 一轮监控为什么跑、什么时候跑、快照何时写 |
+| `jobs/market_monitor_quotes.py` | 行情和委员会直接调用 |
+| `jobs/market_monitor_entry_exit.py` | 买卖点连续触发、持仓止盈止损计划 |
+| `jobs/market_monitor_alerts.py` | 为什么某只标的排在前面、为什么被现金/风险约束压掉 |
+| `jobs/market_monitor_guards.py` | 涨停和重复交易为什么被拦截 |
+| `jobs/market_monitor_snapshot.py` | 主窗口看到的字段从哪里来 |
+| `scripts/monitor_window_*.py` | 主窗口 UI、悬浮详情、手动交易和选股/新闻卡片 |
+
+对新维护者最容易混淆的一点：
+
+- 入场/出场点来自 `entry_exit_points`，服务于“现在能不能买/加/减”的技术确认。
+- 持仓止盈止损来自 `position_exit_plan`，服务于“已经持有后如何守纪律”，锚定成本和板块参数，不能拿来反推买入点。
 
 ---
 

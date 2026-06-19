@@ -1,5 +1,19 @@
 # Changelog
 
+## Unreleased (2026-06-19)
+
+### Refactor
+
+* **market-monitor:** 将 `jobs/market_monitor.py` 从单文件大模块拆成入口 facade + 行情、通知、买卖点、风控护栏、告警优化、窗口快照和运行编排等职责模块，保留旧 `jobs.market_monitor` 导入路径兼容。
+
+### Bug Fixes
+
+* **market-monitor:** 修复 A 股持仓纪律止损的边界触发，持仓止损改为跌破锁定止损线才触发，避免价格刚好等于止损价时误报；止盈仍按达到目标价触发。
+
+### Docs
+
+* **wiki:** 更新架构和执行路径文档，补充盘中监控的数据流、模块职责和止盈止损/入场出场边界，方便新对话快速定位代码逻辑。
+
 ## Unreleased (2026-06-14)
 
 ### Features

@@ -365,6 +365,9 @@ class MonitorWindow(MonitorNewsMixin, MonitorSelectionMixin, MonitorTradeMixin, 
                 "counts": {"symbols": 2, "action_required": 1},
                 "generated_at": datetime.now().isoformat(timespec="seconds"),
                 "cash_cny": 28600,
+                "available_cash_cny": 28600,
+                "t2_pending_cash_cny": 5200,
+                "total_cash_cny": 33800,
                 "total_assets_cny": 100000,
             }
             if self.demo
@@ -397,6 +400,9 @@ class MonitorWindow(MonitorNewsMixin, MonitorSelectionMixin, MonitorTradeMixin, 
             payload.get("generated_at"),
             payload.get("round_time"),
             _safe_num(payload.get("cash_cny")),
+            _safe_num(payload.get("available_cash_cny")),
+            _safe_num(payload.get("t2_pending_cash_cny")),
+            _safe_num(payload.get("total_cash_cny")),
             _safe_num(payload.get("total_assets_cny")),
             counts.get("symbols", len(rows)),
             counts.get("action_required", 0),
@@ -419,7 +425,11 @@ class MonitorWindow(MonitorNewsMixin, MonitorSelectionMixin, MonitorTradeMixin, 
             f"{counts.get('symbols', len(rows))} 标的 / {counts.get('action_required', 0)} 操作"
         )
         self.last_update_text.set(_fmt_update_time(payload.get("generated_at")))
-        self.cash_bar.set_values(payload.get("cash_cny"), payload.get("total_assets_cny"))
+        self.cash_bar.set_values(
+            payload.get("available_cash_cny", payload.get("cash_cny")),
+            payload.get("total_assets_cny"),
+            payload.get("t2_pending_cash_cny", 0),
+        )
         self._render_rows()
         self._resize_to_rows(len(self._filtered_rows()))
         self._place_refresh_fab()
