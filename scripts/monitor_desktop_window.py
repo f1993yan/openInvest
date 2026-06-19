@@ -247,7 +247,28 @@ class MonitorWindow(MonitorNewsMixin, MonitorSelectionMixin, MonitorTradeMixin, 
             fg=MUTED,
             font=("Microsoft YaHei UI", 8, "bold"),
         ).pack(side=tk.LEFT, padx=(0, 8))
-        tk.Frame(self.selection_bar, bg=BOARD_BG, width=108).pack(side=tk.RIGHT)
+
+        # Pack FABs on the right of selection_bar for horizontal bottom-alignment
+        self.refresh_fab = CircleButton(
+            self.selection_bar,
+            text="↻",
+            command=self.refresh,
+            size=32,
+            font=("Segoe UI Symbol", 12, "bold"),
+        )
+        self.refresh_fab.pack(side=tk.RIGHT, padx=(6, 0))
+
+        self.trade_fab = CircleButton(
+            self.selection_bar,
+            text="+",
+            command=self._toggle_trade_popover,
+            size=32,
+            color="#111827",
+            hover_color="#374151",
+            font=("Segoe UI", 14, "bold"),
+        )
+        self.trade_fab.pack(side=tk.RIGHT, padx=(6, 0))
+
         self.selection_buttons_canvas = tk.Canvas(
             self.selection_bar,
             bg=BOARD_BG,
@@ -274,25 +295,6 @@ class MonitorWindow(MonitorNewsMixin, MonitorSelectionMixin, MonitorTradeMixin, 
         self.canvas.bind("<Configure>", self._on_canvas_configure)
         self.cards_frame.bind("<Configure>", self._on_cards_configure)
         self.canvas.bind_all("<MouseWheel>", self._on_mousewheel)
-
-        self.refresh_fab = CircleButton(
-            self.root,
-            text="↻",
-            command=self.refresh,
-            size=44,
-            font=("Segoe UI Symbol", 16, "bold"),
-        )
-        self.refresh_fab.place(relx=1.0, rely=1.0, x=-16, y=-16, anchor="se")
-        self.trade_fab = CircleButton(
-            self.root,
-            text="+",
-            command=self._toggle_trade_popover,
-            size=44,
-            color="#111827",
-            hover_color="#374151",
-            font=("Segoe UI", 17, "bold"),
-        )
-        self.trade_fab.place(relx=1.0, rely=1.0, x=-68, y=-16, anchor="se")
 
     def _start_drag(self, event: tk.Event) -> None:
         self.drag_origin = (event.x_root - self.root.winfo_x(), event.y_root - self.root.winfo_y())
@@ -450,12 +452,8 @@ class MonitorWindow(MonitorNewsMixin, MonitorSelectionMixin, MonitorTradeMixin, 
     def _place_refresh_fab(self) -> None:
         if hasattr(self, "refresh_fab"):
             self.refresh_fab._draw(self.refresh_fab.color)
-            self.root.tk.call("raise", self.refresh_fab._w)
-            self.refresh_fab.place(relx=1.0, rely=1.0, x=-16, y=-16, anchor="se")
         if hasattr(self, "trade_fab"):
             self.trade_fab._draw(self.trade_fab.color)
-            self.root.tk.call("raise", self.trade_fab._w)
-            self.trade_fab.place(relx=1.0, rely=1.0, x=-68, y=-16, anchor="se")
 
     def _on_canvas_configure(self, event: tk.Event) -> None:
         self.canvas.itemconfigure(self.cards_window, width=event.width)
