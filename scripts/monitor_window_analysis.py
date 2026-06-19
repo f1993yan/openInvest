@@ -16,8 +16,9 @@ from scripts.monitor_window_widgets import *
 
 
 class MonitorAnalysisMixin:
-    def _open_analysis_dialog(self, symbol: str) -> None:
-        row = next((item for item in self.current_rows if item.get("symbol") == symbol), None)
+    def _open_analysis_dialog(self, symbol: str, row: Optional[Dict[str, Any]] = None) -> None:
+        if not row:
+            row = next((item for item in self.current_rows if item.get("symbol") == symbol), None)
         if not row:
             return
         existing = self.dialogs.get(symbol)
@@ -26,6 +27,7 @@ class MonitorAnalysisMixin:
             return
 
         dialog = tk.Toplevel(self.root)
+        dialog._row = row  # Store row on the dialog
         dialog.title(f"{row.get('name', symbol)} {symbol} 最新委员会分析")
         dialog.geometry("620x560")
         dialog.minsize(520, 420)
@@ -207,7 +209,7 @@ class MonitorAnalysisMixin:
                 if progress_wrap is not None and progress_wrap.winfo_exists():
                     progress_wrap.destroy()
                 if text is not None:
-                    row = next((item for item in self.current_rows if item.get("symbol") == symbol), {})
+                    row = getattr(dialog, "_row", {})
                     text.configure(state=tk.NORMAL)
                     text.delete("1.0", tk.END)
                     text.insert(tk.END, _format_committee_result(row, result))

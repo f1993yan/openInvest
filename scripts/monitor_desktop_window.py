@@ -217,6 +217,7 @@ class MonitorWindow(MonitorNewsMixin, MonitorSelectionMixin, MonitorTradeMixin, 
             font=("Microsoft YaHei UI", 10),
         )
         search.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(8, 0))
+        search.bind("<Return>", lambda event: self._on_search_return(event))
 
         section = tk.Frame(self.root, bg=BOARD_BG, padx=14)
         section.pack(fill=tk.X)
@@ -890,6 +891,137 @@ class MonitorWindow(MonitorNewsMixin, MonitorSelectionMixin, MonitorTradeMixin, 
             winsound.MessageBeep(winsound.MB_ICONEXCLAMATION)
         except Exception:
             self.root.bell()
+
+    def _on_search_return(self, event: Optional[tk.Event] = None) -> None:
+        query = self.filter_text.get().strip()
+        if not query:
+            return
+
+        # Check if the query matches a symbol or name in holdings/watchlist
+        query_upper = query.upper()
+        match = None
+        for row in self.current_rows:
+            sym = str(row.get("symbol") or "").upper()
+            name = str(row.get("name") or "")
+            if query_upper == sym or query.strip().lower() == name.strip().lower():
+                match = row
+                break
+
+        if match:
+            # Found in holdings/watchlist! Just open the existing dialog
+            self._open_analysis_dialog(match.get("symbol"))
+        else:
+            # Not in holdings/watchlist! Run online search
+            self._search_online_and_analyze(query)
+
+    def _search_online_and_analyze(self, query: str) -> None:
+        self.status_text.set(f"正在联网搜索标的 '{query}'...")
+
+        def run_search():
+            try:
+                resolved = self._resolve_query_to_stock(query)
+                if not resolved:
+                    self.root.after(0, lambda: self.status_text.set(f"未找到标的 '{query}'"))
+                    return
+                symbol, name, price_info = resolved
+                self.root.after(0, lambda: self._open_resolved_online_dialog(symbol, name, price_info))
+            except Exception as e:
+                self.root.after(0, lambda: self.status_text.set(f"搜索失败: {e}"))
+
+        threading.Thread(target=run_search, daemon=True).start()
+
+    def _resolve_query_to_stock(self, query: str) -> Optional[tuple[str, str, Dict[str, Any]]]:
+        query = query.strip()
+        if not query:
+            return None
+
+        # Determine if it's a code
+        is_code = False
+        clean_code = query.upper()
+        if query.isdigit() and len(query) in (5, 6):
+            is_code = True
+        elif (query.lower().startswith("sh") or query.lower().startswith("sz")) and query[2:].isdigit() and len(query[2:]) == 6:
+            is_code = True
+            clean_code = query[2:]
+        elif query.lower().startswith("hk") and query[2:].isdigit() and len(query[2:]) == 5:
+            is_code = True
+            clean_code = query[2:]
+
+        from jobs.market_monitor_quotes import fetch_sina_prices
+
+        if is_code:
+            prices = fetch_sina_prices([clean_code])
+            if clean_code in prices:
+                p_info = prices[clean_code]
+                return clean_code, p_info.get("name", clean_code), p_info
+
+            # Fallback to akshare
+            try:
+                import akshare as ak
+                df = ak.stock_info_a_code_name()
+                for _, row in df.iterrows():
+                    code = str(row.get("code") or row.get("证券代码") or "").strip()
+                    name = str(row.get("name") or row.get("证券简称") or "").strip()
+                    if code == clean_code:
+                        return code, name, {"price": 0.0, "change_pct": 0.0}
+            except Exception:
+                pass
+            return clean_code, clean_code, {"price": 0.0, "change_pct": 0.0}
+        else:
+            # Name lookup in akshare
+            try:
+                import akshare as ak
+                df = ak.stock_info_a_code_name()
+
+                # Exact match
+                for _, row in df.iterrows():
+                    code = str(row.get("code") or row.get("证券代码") or "").strip()
+                    name = str(row.get("name") or row.get("证券简称") or "").strip()
+                    if name.lower() == query.lower():
+                        prices = fetch_sina_prices([code])
+                        p_info = prices.get(code, {"price": 0.0, "change_pct": 0.0})
+                        return code, name, p_info
+
+                # Substring match
+                for _, row in df.iterrows():
+                    code = str(row.get("code") or row.get("证券代码") or "").strip()
+                    name = str(row.get("name") or row.get("证券简称") or "").strip()
+                    if query.lower() in name.lower() or name.lower() in query.lower():
+                        prices = fetch_sina_prices([code])
+                        p_info = prices.get(code, {"price": 0.0, "change_pct": 0.0})
+                        return code, name, p_info
+            except Exception as e:
+                import logging
+                logging.getLogger(__name__).warning(f"akshare name resolution failed: {e}")
+
+        return None
+
+    def _open_resolved_online_dialog(self, symbol: str, name: str, price_info: Optional[Dict[str, Any]] = None) -> None:
+        if price_info is None:
+            price_info = {}
+
+        self.status_text.set(f"已找到标的: {name} ({symbol})")
+
+        dummy_row = {
+            "symbol": symbol,
+            "name": name,
+            "market": "hk" if len(symbol) == 5 else "a",
+            "state": "watch",
+            "operation": {
+                "verdict": "HOLD",
+            },
+            "price": {
+                "current": price_info.get("price", 0.0),
+                "change_pct": price_info.get("change_pct", 0.0),
+            },
+            "fundamental": {
+                "score": 50,
+            },
+            "position_pct": 0,
+            "units": 0,
+        }
+
+        self._open_analysis_dialog(symbol, dummy_row)
 
 
 def main() -> None:
