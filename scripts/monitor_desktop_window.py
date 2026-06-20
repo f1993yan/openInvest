@@ -911,24 +911,22 @@ class MonitorWindow(MonitorNewsMixin, MonitorSelectionMixin, MonitorTradeMixin, 
             # Found in holdings/watchlist! Just open the existing dialog
             self._open_analysis_dialog(match.get("symbol"))
         else:
-            # Not in holdings/watchlist! Run online search
-            self._search_online_and_analyze(query)
+            # Not in holdings/watchlist! Open dialog immediately in resolving state
+            existing = self.dialogs.get(query_upper)
+            if existing and existing.winfo_exists():
+                existing.lift()
+                return
 
-    def _search_online_and_analyze(self, query: str) -> None:
-        self.status_text.set(f"正在联网搜索标的 '{query}'...")
-
-        def run_search():
-            try:
-                resolved = self._resolve_query_to_stock(query)
-                if not resolved:
-                    self.root.after(0, lambda: self.status_text.set(f"未找到标的 '{query}'"))
-                    return
-                symbol, name, price_info = resolved
-                self.root.after(0, lambda: self._open_resolved_online_dialog(symbol, name, price_info))
-            except Exception as e:
-                self.root.after(0, lambda: self.status_text.set(f"搜索失败: {e}"))
-
-        threading.Thread(target=run_search, daemon=True).start()
+            loading_row = {
+                "symbol": query_upper,
+                "name": query,
+                "state": "watch",
+                "operation": {"verdict": "HOLD"},
+                "price": {"current": 0.0, "change_pct": 0.0},
+                "fundamental": {"score": 50},
+                "_is_resolving": True,
+            }
+            self._open_analysis_dialog(query_upper, loading_row)
 
     def _resolve_query_to_stock(self, query: str) -> Optional[tuple[str, str, Dict[str, Any]]]:
         query = query.strip()
@@ -995,33 +993,6 @@ class MonitorWindow(MonitorNewsMixin, MonitorSelectionMixin, MonitorTradeMixin, 
                 logging.getLogger(__name__).warning(f"akshare name resolution failed: {e}")
 
         return None
-
-    def _open_resolved_online_dialog(self, symbol: str, name: str, price_info: Optional[Dict[str, Any]] = None) -> None:
-        if price_info is None:
-            price_info = {}
-
-        self.status_text.set(f"已找到标的: {name} ({symbol})")
-
-        dummy_row = {
-            "symbol": symbol,
-            "name": name,
-            "market": "hk" if len(symbol) == 5 else "a",
-            "state": "watch",
-            "operation": {
-                "verdict": "HOLD",
-            },
-            "price": {
-                "current": price_info.get("price", 0.0),
-                "change_pct": price_info.get("change_pct", 0.0),
-            },
-            "fundamental": {
-                "score": 50,
-            },
-            "position_pct": 0,
-            "units": 0,
-        }
-
-        self._open_analysis_dialog(symbol, dummy_row)
 
 
 def main() -> None:
