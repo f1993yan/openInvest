@@ -155,7 +155,7 @@ GUI HoldingCard 显示"⚠ 陈旧"标记，或行情字段是 `null`。
 ```bash
 # 用 Python 直接试
 cd ~/projects-review/invest
-uv run python -c "from utils.exchange_fee import get_history_data; df = get_history_data('NDQ.AX', '5d'); print(df.tail())"
+uv run python -c "from utils.market_data_provider import get_history_data; df = get_history_data('NDQ.AX', '5d'); print(df.tail())"
 ```
 
 ### 常见原因

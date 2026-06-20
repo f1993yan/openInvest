@@ -301,7 +301,7 @@ def get_history_data(
 
 _MACRO_CACHE: dict = {}
 
-def get_macro_snapshot() -> dict:
+def get_macro_snapshot(as_of_date: Optional[str] = None) -> dict:
     """返回国内宏观指标快照（替代原有 VIX/TNX/USDCNY/AUDCNY）
 
     Returns:
@@ -316,9 +316,9 @@ def get_macro_snapshot() -> dict:
     # 5 分钟缓存：同一轮监控里 17 只股票不用每只都拉一遍国债+北向（耗时 16s×17）
     global _MACRO_CACHE
     now = datetime.now()
-    if _MACRO_CACHE and (now - _MACRO_CACHE["_ts"]).total_seconds() < 300:
+    if not as_of_date and _MACRO_CACHE and (now - _MACRO_CACHE["_ts"]).total_seconds() < 300:
         return {k: v for k, v in _MACRO_CACHE.items() if k != "_ts"}
-    out: dict = {"as_of": now.isoformat(timespec="seconds")}
+    out: dict = {"as_of": as_of_date if as_of_date else now.isoformat(timespec="seconds")}
 
     # 1. 中国10年期国债收益率
     try:
@@ -361,7 +361,8 @@ def get_macro_snapshot() -> dict:
 
     # 3. 上证指数
     try:
-        sh_df = get_history_data("000001", "5d")
+        from utils.market_data_provider import get_history_data as _prov_get_history_data
+        sh_df = _prov_get_history_data("000001", "5d", as_of_date=as_of_date)
         if not sh_df.empty and len(sh_df) >= 2:
             out["sh_index"] = round(float(sh_df["Close"].iloc[-1]), 2)
             prev = float(sh_df["Close"].iloc[-2])

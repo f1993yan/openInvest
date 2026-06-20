@@ -21,14 +21,17 @@ openInvest 的目标不是替你下单，而是把投资决策过程变得可追
 
 ## 数据源
 
-项目已经完全移除 `yfinance` 依赖，不再安装或导入 `yfinance`。
+项目行情与外部宏观信息获取已全部收拢于统一中间层 `utils.market_data_provider`，方便后续切换数据源。
 
 当前行情和新闻入口：
 
-- A 股搜索：`akshare.stock_info_a_code_name()`。
-- A 股 / 港股 / 宏观 / 汇率 / 黄金代理行情：`utils.cn_market_provider` 与现有 SQLite 行情缓存兜底。
-- 新闻：国内新闻聚合、热榜、RSS、DDGS/web search。
-- symbol 相关新闻：`services.news_sources.symbol_news`，通过通用 web/news search 获取，不依赖行情包。
+- **行情分发中间层**：`utils.market_data_provider` 提供统一的价格拉取（`fetch_prices`）、历史行情获取（`get_history_data`）以及标的代码检索（`search_symbols`）等接口。
+- **实时行情**：A 股及港股通过新浪行情直接提取。
+- **历史行情路由**：A 股自动调用 `utils.akshare_data`（新浪源）；全球/美股/外汇等资产走 `utils.exchange_fee`（yfinance 源）。
+- **标的检索**：`utils.market_data_provider.search_symbols`（通过 `akshare` 检索）。
+- **宏观快照及数据**：`utils.market_data_provider.get_macro_snapshot` 统一聚合国内宏观数据（上证指数、北向资金、在岸人民币汇率、10年期国债收益率），支持传入 `as_of_date` 拦截历史数据以防止回测中发生数据穿越。
+- **新闻**：国内新闻聚合、热榜、RSS、DDGS/web search。
+- **symbol 相关新闻**：`services.news_sources.symbol_news`，通过通用 web/news search 获取，不依赖行情包。
 
 历史配置里仍可能出现字段名 `yfinance_proxy`。这是旧 schema 的兼容字段，用于表示行情代理 symbol，例如黄金用 `GC=F` 和 `USDCNY=X` 反推人民币克价；它不是包依赖。
 

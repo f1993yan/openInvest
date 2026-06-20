@@ -7,12 +7,12 @@ from utils.akshare_data import _apply_period_filter, _cache_is_fresh
 
 def test_akshare_cache_freshness_uses_latest_cached_date():
     fresh = pd.DataFrame(
-        {"Close": [1.0]},
-        index=pd.to_datetime([datetime.now().date()]),
+        {"Close": [1.0] * 10},
+        index=pd.to_datetime([(datetime.now() - timedelta(days=i)).date() for i in range(10)][::-1]),
     )
     stale = pd.DataFrame(
-        {"Close": [1.0]},
-        index=pd.to_datetime([(datetime.now() - timedelta(days=30)).date()]),
+        {"Close": [1.0] * 10},
+        index=pd.to_datetime([(datetime.now() - timedelta(days=30 + i)).date() for i in range(10)][::-1]),
     )
 
     assert _cache_is_fresh(fresh)

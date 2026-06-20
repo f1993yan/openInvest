@@ -142,7 +142,7 @@ def test_env_on_all_rejected_writes_audit_event(store, monkeypatch):
     # 但应该写 audit event
     events_path = store.root / ".dreams" / "events.jsonl"
     assert events_path.exists()
-    content = events_path.read_text()
+    content = events_path.read_text(encoding="utf-8")
     assert "all_rejected_by_llm_verify" in content
 
 

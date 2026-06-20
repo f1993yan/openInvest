@@ -23,8 +23,8 @@ def test_beginner_summary_lines_includes_chan_analysis(monkeypatch):
     )
 
     # Monkeypatch the get_history_data function in scripts.monitor_window_text
-    import utils.exchange_fee
-    monkeypatch.setattr(utils.exchange_fee, "get_history_data", lambda symbol, period="2y": fake_df)
+    import utils.market_data_provider
+    monkeypatch.setattr(utils.market_data_provider, "get_history_data", lambda symbol, period="2y": fake_df)
 
     row = {
         "symbol": "688017",
@@ -43,8 +43,8 @@ def test_beginner_summary_lines_includes_chan_analysis(monkeypatch):
 
 def test_stop_take_and_alloc_fallback(monkeypatch):
     # Mock get_history_data to return empty df so we skip Chan analysis and focus on fallback
-    import utils.exchange_fee
-    monkeypatch.setattr(utils.exchange_fee, "get_history_data", lambda symbol, period="2y": pd.DataFrame())
+    import utils.market_data_provider
+    monkeypatch.setattr(utils.market_data_provider, "get_history_data", lambda symbol, period="2y": pd.DataFrame())
 
     row = {
         "symbol": "688017",

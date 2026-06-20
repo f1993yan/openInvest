@@ -344,7 +344,7 @@ def _beginner_summary_lines(
     symbol = row.get("symbol")
     if symbol:
         try:
-            from utils.exchange_fee import get_history_data
+            from utils.market_data_provider import get_history_data
             df = get_history_data(symbol, "2y")
             if df is not None and not df.empty:
                 from utils.chan import analyze_chan, format_chan_brief

@@ -96,7 +96,7 @@ def test_apply_cutoff_with_tz_aware_index():
 
 def test_capture_macro_context_uses_decision_date(monkeypatch):
     import core.committee as cm
-    import utils.exchange_fee as ef
+    import utils.market_data_provider as prov
 
     calls = []
     fake_df = pd.DataFrame(
@@ -108,7 +108,7 @@ def test_capture_macro_context_uses_decision_date(monkeypatch):
         calls.append({"symbol": symbol, "as_of_date": as_of_date})
         return fake_df.copy()
 
-    monkeypatch.setattr(ef, "get_history_data", spy_get_history)
+    monkeypatch.setattr(prov, "get_history_data", spy_get_history)
 
     snapshot = cm._capture_macro_context(as_of_date="2024-05-01")
 
@@ -119,9 +119,9 @@ def test_capture_macro_context_uses_decision_date(monkeypatch):
 
 def test_capture_macro_context_live_mode_uses_now(monkeypatch):
     import core.committee as cm
-    import utils.exchange_fee as ef
+    import utils.market_data_provider as prov
 
-    monkeypatch.setattr(ef, "get_history_data", lambda *a, **kw: pd.DataFrame())
+    monkeypatch.setattr(prov, "get_history_data", lambda *a, **kw: pd.DataFrame())
 
     snapshot = cm._capture_macro_context()
 

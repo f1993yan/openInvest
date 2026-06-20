@@ -945,52 +945,28 @@ class MonitorWindow(MonitorNewsMixin, MonitorSelectionMixin, MonitorTradeMixin, 
             is_code = True
             clean_code = query[2:]
 
-        from jobs.market_monitor_quotes import fetch_sina_prices
+        from utils.market_data_provider import fetch_prices, search_symbols
 
         if is_code:
-            prices = fetch_sina_prices([clean_code])
+            prices = fetch_prices([clean_code])
             if clean_code in prices:
                 p_info = prices[clean_code]
                 return clean_code, p_info.get("name", clean_code), p_info
 
-            # Fallback to akshare
-            try:
-                import akshare as ak
-                df = ak.stock_info_a_code_name()
-                for _, row in df.iterrows():
-                    code = str(row.get("code") or row.get("证券代码") or "").strip()
-                    name = str(row.get("name") or row.get("证券简称") or "").strip()
-                    if code == clean_code:
-                        return code, name, {"price": 0.0, "change_pct": 0.0}
-            except Exception:
-                pass
+            # Fallback search if price fetch failed
+            found = search_symbols(clean_code, limit=1)
+            if found:
+                return found[0]["symbol"], found[0]["name"], {"price": 0.0, "change_pct": 0.0}
             return clean_code, clean_code, {"price": 0.0, "change_pct": 0.0}
         else:
-            # Name lookup in akshare
-            try:
-                import akshare as ak
-                df = ak.stock_info_a_code_name()
-
-                # Exact match
-                for _, row in df.iterrows():
-                    code = str(row.get("code") or row.get("证券代码") or "").strip()
-                    name = str(row.get("name") or row.get("证券简称") or "").strip()
-                    if name.lower() == query.lower():
-                        prices = fetch_sina_prices([code])
-                        p_info = prices.get(code, {"price": 0.0, "change_pct": 0.0})
-                        return code, name, p_info
-
-                # Substring match
-                for _, row in df.iterrows():
-                    code = str(row.get("code") or row.get("证券代码") or "").strip()
-                    name = str(row.get("name") or row.get("证券简称") or "").strip()
-                    if query.lower() in name.lower() or name.lower() in query.lower():
-                        prices = fetch_sina_prices([code])
-                        p_info = prices.get(code, {"price": 0.0, "change_pct": 0.0})
-                        return code, name, p_info
-            except Exception as e:
-                import logging
-                logging.getLogger(__name__).warning(f"akshare name resolution failed: {e}")
+            # Name lookup in unified provider search
+            found = search_symbols(query, limit=1)
+            if found:
+                code = found[0]["symbol"]
+                name = found[0]["name"]
+                prices = fetch_prices([code])
+                p_info = prices.get(code, {"price": 0.0, "change_pct": 0.0})
+                return code, name, p_info
 
         return None
 

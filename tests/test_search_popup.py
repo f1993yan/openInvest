@@ -8,7 +8,7 @@ def test_resolve_query_to_code_exact(monkeypatch):
     mock_prices = {
         "600519": {"name": "贵州茅台", "price": 1700.0, "change_pct": 0.5}
     }
-    monkeypatch.setattr("jobs.market_monitor_quotes.fetch_sina_prices", lambda symbols: mock_prices)
+    monkeypatch.setattr("utils.market_data_provider.fetch_prices", lambda symbols: mock_prices)
 
     win = MagicMock()
     win._resolve_query_to_stock = MonitorWindow._resolve_query_to_stock.__get__(win, MagicMock)
@@ -33,13 +33,14 @@ def test_resolve_query_to_name_akshare(monkeypatch):
         def stock_info_a_code_name():
             return fake_df
             
-    monkeypatch.setattr("sys.modules", {"akshare": FakeAk})
+    import sys
+    monkeypatch.setitem(sys.modules, "akshare", FakeAk)
     
     # Mock fetch_sina_prices
     mock_prices = {
         "000333": {"name": "美的集团", "price": 70.0, "change_pct": -1.2}
     }
-    monkeypatch.setattr("jobs.market_monitor_quotes.fetch_sina_prices", lambda symbols: mock_prices)
+    monkeypatch.setattr("utils.market_data_provider.fetch_prices", lambda symbols: mock_prices)
 
     win = MagicMock()
     win._resolve_query_to_stock = MonitorWindow._resolve_query_to_stock.__get__(win, MagicMock)
@@ -87,7 +88,11 @@ def test_on_search_return_non_existing(monkeypatch):
     assert called_args[1]["_is_resolving"] is True
 
 
-def test_open_analysis_dialog_adds_watchlist_button():
+def test_open_analysis_dialog_adds_watchlist_button(monkeypatch):
+    import pandas as pd
+    import utils.market_data_provider
+    monkeypatch.setattr(utils.market_data_provider, "get_history_data", lambda symbol, period="2y": pd.DataFrame())
+
     from scripts.monitor_window_analysis import MonitorAnalysisMixin
     
     class DummyWindow(MonitorAnalysisMixin):

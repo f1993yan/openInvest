@@ -87,6 +87,26 @@
 
 工时：~2-3 小时（含测试）。
 
+### 场景 B：更换或添加股票行情、历史日线、宏观信息源（改统一中间层）
+
+行情与宏观信息获取（价格、历史日线、标的代码搜索、宏观快照等）统一收拢在 `utils/market_data_provider.py` 中。如需替换底层数据源：
+
+1. **修改 `utils/market_data_provider.py` 内部对应的分发逻辑**：
+   - 实时价格：修改 `fetch_prices(symbols)`。
+   - 历史日线：修改 `get_history_data(symbol, period, as_of_date)`。
+   - 标的代码搜索：修改 `search_symbols(query, limit)`。
+   - 宏观指标快照：修改 `get_macro_snapshot(as_of_date)`。
+   - 宏观文本报告：修改 `get_macro_data()`。
+
+2. **验证数据格式兼容性**：
+   - `get_history_data` 返回的 DataFrame 必须包含标准大写列名：`Open`, `High`, `Low`, `Close`, `Volume`，索引需为 `Date` 并为 `DatetimeIndex`。
+   - `fetch_prices` 返回字典格式必须兼容 `{symbol: {"name": str, "price": float, "prev_close": float, "change_pct": float}}`。
+
+3. **运行回归测试确保没有 lookahead bias**：
+   ```bash
+   uv run pytest tests/test_search_popup.py tests/test_akshare_cache.py tests/test_backtest_no_lookahead.py
+   ```
+
 ---
 
 ## 3. 加新 agent 角色

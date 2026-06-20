@@ -1,4 +1,4 @@
-﻿"""Investment Committee 编排 - 4 角色（Quant / Macro / Risk Officer / CIO）
+"""Investment Committee 编排 - 4 角色（Quant / Macro / Risk Officer / CIO）
 
 设计要点：
 - 信息分隔（每个 agent 只看自己领域的数据）
@@ -906,8 +906,8 @@ def _capture_macro_context(as_of_date: Optional[str] = None) -> Dict[str, Any]:
         "captured_at": as_of_date if as_of_date else datetime.now().isoformat(timespec="seconds"),
     }
     try:
-        from utils.akshare_data import get_macro_snapshot
-        snap = get_macro_snapshot()
+        from utils.market_data_provider import get_macro_snapshot
+        snap = get_macro_snapshot(as_of_date=as_of_date)
         snapshot["sh_index"] = snap.get("sh_index")
         snapshot["sh_index_change_pct"] = snap.get("sh_index_change_pct")
         snapshot["usdcny"] = snap.get("usdcny")
