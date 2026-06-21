@@ -2,9 +2,9 @@
 type: Reference
 title: openInvest Unified Market Data Layer
 description: Specifications of the unified intermediate data provider layer utils/market_data_provider.py.
-resource: file:///d:/Documents/Code/OpenInvest/docs/okf/market_data.md
+resource: ../../utils/market_data_provider.py
 tags: [market-data, akshare, yfinance, connector]
-timestamp: 2026-06-20T17:40:00Z
+timestamp: 2026-06-21T20:46:00Z
 ---
 
 # Unified Market Data Layer

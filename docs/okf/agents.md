@@ -2,9 +2,8 @@
 type: Concept
 title: openInvest Multi-Agent System
 description: Explains the roles, prompts, and debate consensus mechanisms of the 4 investment agents.
-resource: file:///d:/Documents/Code/OpenInvest/docs/okf/agents.md
 tags: [agents, llm, consensus]
-timestamp: 2026-06-20T17:40:00Z
+timestamp: 2026-06-21T20:46:00Z
 ---
 
 # openInvest Multi-Agent System

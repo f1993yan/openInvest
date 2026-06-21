@@ -6,7 +6,7 @@ import queue
 import threading
 import tkinter as tk
 from datetime import datetime
-from tkinter import ttk
+from tkinter import messagebox, ttk
 from typing import Any, Dict, List, Optional
 
 from scripts.monitor_window_constants import *
@@ -172,6 +172,8 @@ class MonitorTradeMixin:
                 self.status_text.set(message)
                 self.refresh()
                 self._close_trade_popover()
+                if messagebox.askyesno("上传数据", "买卖操作执行成功，是否上传最新的持仓数据到远程服务器？"):
+                    self.upload_data()
                 return "break"
             except Exception as exc:  # noqa: BLE001
                 status_var.set("失败")

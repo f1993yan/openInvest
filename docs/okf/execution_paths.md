@@ -1,10 +1,9 @@
 ---
-type: Reference
+type: Guide
 title: openInvest Execution Paths
 description: Explains the dual paths of execution in openInvest.
-resource: file:///d:/Documents/Code/OpenInvest/docs/okf/execution_paths.md
 tags: [execution, paths, skill, cron]
-timestamp: 2026-06-20T17:40:00Z
+timestamp: 2026-06-21T20:46:00Z
 ---
 
 # openInvest Execution Paths

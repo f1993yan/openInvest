@@ -2,9 +2,8 @@
 type: Architecture
 title: openInvest Architecture Overview
 description: High-level overview of the 4-layer pipeline of openInvest.
-resource: file:///d:/Documents/Code/OpenInvest/docs/okf/architecture.md
 tags: [architecture, design, pipeline]
-timestamp: 2026-06-20T17:40:00Z
+timestamp: 2026-06-21T20:46:00Z
 ---
 
 # openInvest Architecture Overview

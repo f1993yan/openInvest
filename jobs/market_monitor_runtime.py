@@ -34,12 +34,13 @@ from jobs.market_monitor_quotes import call_committee, fetch_sina_prices
 from jobs.market_monitor_snapshot import build_monitor_window_snapshot, write_monitor_window_snapshot, write_report
 
 def is_trading_time() -> bool:
-    """判断当前是否在交易时段内（周一至周五 9:30-11:30, 13:00-15:00）"""
+    """判断当前是否在交易时段内（交易日 9:30-15:00）"""
+    from utils.market_calendar import is_trading_day
     now = datetime.now()
-    if now.weekday() >= 5:  # 周六日
+    if not is_trading_day("XSHG", now.date()):
         return False
     t = now.time()
-    return (TRADING_START <= t <= LUNCH_START) or (LUNCH_END <= t <= TRADING_END)
+    return TRADING_START <= t <= TRADING_END
 
 
 def wait_until_next_round():
@@ -107,6 +108,12 @@ def _sync_config_account_fields(config: Dict, account_stocks: List[Dict]) -> Dic
 
 def run_monitor_round():
     """执行一轮监控"""
+    from jobs.market_monitor_common import load_crawler_settings
+    settings = load_crawler_settings()
+    if not settings.get("target_refresh_enabled", True):
+        log.info("标的刷新被设置关闭，跳过本轮监控。")
+        return
+
     round_dt = datetime.now()
     round_time = round_dt.strftime("%H:%M")
     log.info(f"=== 开始监控轮次 {round_time} ===")

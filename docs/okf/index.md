@@ -1,10 +1,6 @@
 ---
-type: Index
-title: openInvest OKF Index
-description: Entry point and index for the openInvest Open Knowledge Format bundle.
-resource: file:///d:/Documents/Code/OpenInvest/docs/okf/index.md
-tags: [openinvest, okf, documentation]
-timestamp: 2026-06-20T17:40:00Z
+okf_version: "0.1"
+timestamp: 2026-06-21T20:46:00Z
 ---
 
 # openInvest Knowledge Catalog

@@ -27,6 +27,7 @@ log = logging.getLogger(__name__)
 _STORE = MarketStore()
 _CACHE_MAX_STALE_DAYS = int(os.getenv("INVEST_AKSHARE_HISTORY_CACHE_STALE_DAYS", "3"))
 os.environ.setdefault("TQDM_DISABLE", "1")
+RUNNING_ON_PHONE = os.getenv("INVEST_RUNNING_ON_PHONE") == "1"
 
 # ==========================================
 # 内部：akshare 行情拉取
@@ -255,20 +256,29 @@ def get_history_data(
     period: str = "2y",
     as_of_date: Optional[str] = None,
 ) -> pd.DataFrame:
-    """拉行情历史数据（替代 yfinance 的 get_history_data）
+    """拉行情历史数据（替代 yfinance 的 get_history_data）"""
+    if RUNNING_ON_PHONE:
+        import requests
+        try:
+            server_ip = os.getenv("INVEST_SERVER_IP")
+            if not server_ip:
+                raise ValueError("INVEST_SERVER_IP environment variable is not set")
+            server_port = os.getenv("INVEST_SERVER_PORT", "8765")
+            url = f"http://{server_ip}:{server_port}/api/stock/history?symbol={symbol}&period={period}"
+            resp = requests.get(url, timeout=15)
+            if resp.status_code == 200:
+                res = resp.json()
+                if res.get("success") and res.get("data"):
+                    df = pd.DataFrame(res["data"])
+                    if not df.empty:
+                        df["Date"] = pd.to_datetime(df["Date"])
+                        df = df.set_index("Date")
+                        return df
+            log.warning(f"Phone fetch history failed: {resp.text if resp else 'No response'}")
+        except Exception as e:
+            log.error(f"Phone fetch history error: {e}")
+        return pd.DataFrame()
 
-    Args:
-        symbol: 股票代码
-            - A股：6 位数字，如 '300476'（深市创业板）、'600900'（沪市主板）
-            - 港股：5 位数字，如 '00700'（腾讯）
-            - 指数：如 '000001'（上证指数）
-        period: 时间窗口 '1mo'|'3mo'|'6mo'|'1y'|'2y'
-        as_of_date: 回测用截止日期（ISO YYYY-MM-DD），正常调用不传
-
-    Returns:
-        pd.DataFrame with columns: Open, High, Low, Close, Volume, index=Date
-        失败返回空 DataFrame
-    """
     symbol = symbol.strip().upper()
 
     # 0. SQLite cache first. This prevents each monitor round from re-fetching
@@ -302,17 +312,31 @@ def get_history_data(
 _MACRO_CACHE: dict = {}
 
 def get_macro_snapshot(as_of_date: Optional[str] = None) -> dict:
-    """返回国内宏观指标快照（替代原有 VIX/TNX/USDCNY/AUDCNY）
+    if RUNNING_ON_PHONE:
+        import requests
+        try:
+            server_ip = os.getenv("INVEST_SERVER_IP")
+            if not server_ip:
+                raise ValueError("INVEST_SERVER_IP environment variable is not set")
+            server_port = os.getenv("INVEST_SERVER_PORT", "8765")
+            url = f"http://{server_ip}:{server_port}/api/stock/macro"
+            resp = requests.get(url, timeout=15)
+            if resp.status_code == 200:
+                res = resp.json()
+                if res.get("success") and isinstance(res.get("macro_data"), dict):
+                    return res["macro_data"]
+            log.warning(f"Phone fetch macro snapshot failed: {resp.text if resp else 'No response'}")
+        except Exception as e:
+            log.error(f"Phone fetch macro snapshot error: {e}")
+        return {
+            "as_of": as_of_date if as_of_date else datetime.now().isoformat(timespec="seconds"),
+            "cn_10y_bond": None,
+            "usdcny": None,
+            "sh_index": None,
+            "sh_index_change_pct": None,
+            "north_flow": None
+        }
 
-    Returns:
-        dict with keys:
-          - cn_10y_bond: 中国10年期国债收益率
-          - usdcny: 在岸人民币即期汇率
-          - sh_index: 上证指数收盘价
-          - sh_index_change_pct: 上证指数涨跌幅
-          - north_flow: 北向资金最近交易日净流入（亿元）
-          - as_of: 数据时间戳
-    """
     # 5 分钟缓存：同一轮监控里 17 只股票不用每只都拉一遍国债+北向（耗时 16s×17）
     global _MACRO_CACHE
     now = datetime.now()

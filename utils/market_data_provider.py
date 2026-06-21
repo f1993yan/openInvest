@@ -9,6 +9,26 @@ import requests
 
 log = logging.getLogger(__name__)
 
+_PRICE_CACHE: Dict[str, Dict[str, Any]] = {}
+
+def is_trading_time() -> bool:
+    """判断当前是否在交易时段内（交易日 9:30-15:00）"""
+    try:
+        from utils.market_calendar import is_trading_day
+        from datetime import datetime, time as dt_time
+        now = datetime.now()
+        if not is_trading_day("XSHG", now.date()):
+            return False
+        t = now.time()
+        return dt_time(9, 30) <= t <= dt_time(15, 0)
+    except Exception:
+        from datetime import datetime, time as dt_time
+        now = datetime.now()
+        if now.weekday() >= 5:
+            return False
+        t = now.time()
+        return dt_time(9, 30) <= t <= dt_time(15, 0)
+
 def fetch_prices(symbols: List[str]) -> Dict[str, Dict[str, Any]]:
     """获取标的最新价格行情。
     
@@ -17,6 +37,20 @@ def fetch_prices(symbols: List[str]) -> Dict[str, Dict[str, Any]]:
     """
     if not symbols:
         return {}
+
+    # 如果不在交易时间，尝试完全使用缓存
+    if not is_trading_time():
+        cached_results = {}
+        all_cached = True
+        for s in symbols:
+            s_upper = s.upper()
+            if s_upper in _PRICE_CACHE:
+                cached_results[s] = _PRICE_CACHE[s_upper]
+            else:
+                all_cached = False
+                break
+        if all_cached:
+            return cached_results
 
     # 自动补充新浪前缀（sz/sh/hk）
     def _to_sina(sym):
@@ -45,7 +79,13 @@ def fetch_prices(symbols: List[str]) -> Dict[str, Dict[str, Any]]:
             
     if not text or 'hq_str_' not in text:
         log.error(f"新浪行情3次重试均失败")
-        return {}
+        # 降级：如果获取失败，尽最大努力返回能拿到的缓存
+        fallback_results = {}
+        for s in symbols:
+            s_upper = s.upper()
+            if s_upper in _PRICE_CACHE:
+                fallback_results[s] = _PRICE_CACHE[s_upper]
+        return fallback_results
 
     results = {}
     for line in text.strip().split("\n"):
@@ -85,14 +125,24 @@ def fetch_prices(symbols: List[str]) -> Dict[str, Dict[str, Any]]:
                 else:
                     continue
 
-            results[symbol] = {
+            item = {
                 "name": name,
                 "price": price,
                 "prev_close": prev_close,
                 "change_pct": round(change_pct, 2),
             }
+            results[symbol] = item
+            # 更新缓存
+            _PRICE_CACHE[symbol.upper()] = item
         except Exception as e:
             log.warning(f"解析行情行失败: {line[:60]}... {e}")
+
+    # 对于没能成功获取的 symbol，用旧缓存补齐
+    for s in symbols:
+        if s not in results:
+            s_upper = s.upper()
+            if s_upper in _PRICE_CACHE:
+                results[s] = _PRICE_CACHE[s_upper]
 
     return results
 

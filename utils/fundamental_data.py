@@ -20,6 +20,7 @@ log = logging.getLogger(__name__)
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 FUNDAMENTAL_CACHE_DIR = _PROJECT_ROOT / "data" / "fundamentals_cache"
 DEFAULT_STALE_DAYS = int(os.getenv("INVEST_FUNDAMENTAL_CACHE_STALE_DAYS", "30"))
+RUNNING_ON_PHONE = os.getenv("INVEST_RUNNING_ON_PHONE") == "1"
 
 
 def _safe_float(value: Any) -> Optional[float]:
@@ -292,6 +293,30 @@ def _fetch_a_share_fundamentals(symbol: str) -> Tuple[Dict[str, float], Dict[str
 
     if "pe_ttm" not in metrics or "pb" not in metrics:
         try:
+            # Fallback 1: Baidu Stock Valuation (very reliable for cloud IPs)
+            if "pe_ttm" not in metrics:
+                try:
+                    df_pe = ak.stock_zh_valuation_baidu(symbol=symbol, indicator="市盈率(TTM)")
+                    if not df_pe.empty and "value" in df_pe.columns:
+                        val = df_pe["value"].iloc[-1]
+                        _put_metric(metrics, sources, "pe_ttm", val, "baidu_valuation:市盈率(TTM)")
+                except Exception as e:
+                    warnings.append(f"baidu_valuation_pe_failed:{type(e).__name__}")
+            
+            if "pb" not in metrics:
+                try:
+                    df_pb = ak.stock_zh_valuation_baidu(symbol=symbol, indicator="市净率")
+                    if not df_pb.empty and "value" in df_pb.columns:
+                        val = df_pb["value"].iloc[-1]
+                        _put_metric(metrics, sources, "pb", val, "baidu_valuation:市净率")
+                except Exception as e:
+                    warnings.append(f"baidu_valuation_pb_failed:{type(e).__name__}")
+        except Exception:
+            pass
+
+    if "pe_ttm" not in metrics or "pb" not in metrics:
+        try:
+            # Fallback 2: Eastmoney spot A-share
             spot = ak.stock_zh_a_spot_em()
             row = spot.loc[spot["代码"].astype(str).str.zfill(6) == symbol].iloc[0]
             if "pe_ttm" not in metrics:
@@ -302,7 +327,7 @@ def _fetch_a_share_fundamentals(symbol: str) -> Tuple[Dict[str, float], Dict[str
             if "pb" not in metrics and "市净率" in spot.columns:
                 _put_metric(metrics, sources, "pb", row.get("市净率"), "spot:市净率")
         except Exception:
-            # 东方财富现货接口偶发限流；PE/PB 已由乐咕等接口兜底，失败不作为可操作 warning。
+            # 东方财富现货接口偶发限流；PE/PB 已由乐咕/百度等接口兜底，失败不作为可操作 warning。
             pass
 
     return metrics, sources, warnings
@@ -388,11 +413,35 @@ def get_fundamental_snapshot(
     stale_days: int = DEFAULT_STALE_DAYS,
     force_refresh: bool = False,
 ) -> Dict[str, Any]:
-    """Return cached-or-fetched fundamental metrics.
+    """Return cached-or-fetched fundamental metrics."""
+    if RUNNING_ON_PHONE:
+        import requests
+        try:
+            server_ip = os.getenv("INVEST_SERVER_IP")
+            if not server_ip:
+                raise ValueError("INVEST_SERVER_IP environment variable is not set")
+            server_port = os.getenv("INVEST_SERVER_PORT", "8765")
+            url = f"http://{server_ip}:{server_port}/api/stock/fundamental?symbol={symbol}&market={market}"
+            resp = requests.get(url, timeout=15)
+            if resp.status_code == 200:
+                res = resp.json()
+                if res.get("success") and res.get("snapshot"):
+                    return res["snapshot"]
+            log.warning(f"Phone fetch fundamental failed: {resp.text if resp else 'No response'}")
+        except Exception as e:
+            log.error(f"Phone fetch fundamental error: {e}")
+        return {
+            "symbol": symbol,
+            "market": (market or "a").lower(),
+            "fetched_at": datetime.now().isoformat(timespec="seconds"),
+            "metrics": {},
+            "metric_sources": {},
+            "warnings": ["phone_fetch_failed"],
+            "source": "remote_fallback",
+            "cache_hit": False,
+            "cache_stale": False,
+        }
 
-    If live fetch fails, stale cache is returned with cache_stale=True. If both
-    live fetch and cache are unavailable, returns an empty metrics snapshot.
-    """
     symbol = symbol.strip().upper()
     cached = _read_cache(symbol)
     if cached and not force_refresh and _cache_fresh(cached, stale_days):

@@ -80,7 +80,7 @@ def test_holding_cost_stop_loss_triggers_before_dynamic_stop():
 def test_monitor_summary_popup_schedule_rules():
     assert is_scheduled_monitor_popup_time(datetime(2026, 6, 9, 10, 0))
     assert is_scheduled_monitor_popup_time(datetime(2026, 6, 9, 10, 30))
-    assert is_scheduled_monitor_popup_time(datetime(2026, 6, 9, 14, 50))
+    assert is_scheduled_monitor_popup_time(datetime(2026, 6, 9, 15, 0))
     assert not is_scheduled_monitor_popup_time(datetime(2026, 6, 9, 10, 10))
 
     assert not should_send_monitor_summary_popup(

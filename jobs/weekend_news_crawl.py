@@ -666,6 +666,12 @@ def run_committee_on_leaders(symbols: List[str],
 
 def run() -> Dict[str, Any]:
     """调度器入口"""
+    from jobs.market_monitor_common import load_crawler_settings
+    settings = load_crawler_settings()
+    if not settings.get("news_refresh_enabled", True):
+        log.info("周末新闻抓取被设置关闭，退出抓取。")
+        return {"status": "disabled", "message": "Weekend news refresh is disabled"}
+
     now = _now_local()
     weekday = now.weekday()  # Mon=0, Sun=6
     hour = now.hour

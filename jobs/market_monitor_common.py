@@ -33,12 +33,61 @@ logging.basicConfig(
     ],
 )
 
+from datetime import time as dt_time
+
 CONFIG_PATH = Path(__file__).with_name("market_monitor_config.json")
 TRADING_START = dt_time(9, 30)
 LUNCH_START = dt_time(11, 30)
 LUNCH_END = dt_time(13, 0)
-TRADING_END = dt_time(14, 50)
-INTERVAL_MINUTES = max(1, int(os.getenv("INVEST_MONITOR_INTERVAL_MINUTES", "10")))
+TRADING_END = dt_time(15, 0)
+
+class DynamicInterval:
+    def __int__(self): return self.get_value()
+    def __index__(self): return self.get_value()
+    def __repr__(self): return str(self.get_value())
+    def __add__(self, other): return self.get_value() + other
+    def __radd__(self, other): return other + self.get_value()
+    def __mul__(self, other): return self.get_value() * other
+    def __rmul__(self, other): return other * self.get_value()
+    def __truediv__(self, other): return self.get_value() / other
+    def __rtruediv__(self, other): return other / self.get_value()
+    def __floordiv__(self, other): return self.get_value() // other
+    def __rfloordiv__(self, other): return other // self.get_value()
+    def __lt__(self, other): return self.get_value() < other
+    def __le__(self, other): return self.get_value() <= other
+    def __eq__(self, other): return self.get_value() == other
+    def __ne__(self, other): return self.get_value() != other
+    def __gt__(self, other): return self.get_value() > other
+    def __ge__(self, other): return self.get_value() >= other
+
+    def get_value(self) -> int:
+        try:
+            settings_path = _PROJECT_ROOT / "jobs" / "crawler_settings.json"
+            if settings_path.exists():
+                data = json.loads(settings_path.read_text(encoding="utf-8"))
+                val = int(data.get("frequency_minutes", 60))
+                return max(1, val)
+        except Exception:
+            pass
+        return max(1, int(os.getenv("INVEST_MONITOR_INTERVAL_MINUTES", "10")))
+
+
+def load_crawler_settings() -> Dict[str, Any]:
+    settings_path = _PROJECT_ROOT / "jobs" / "crawler_settings.json"
+    defaults = {
+        "frequency_minutes": 60,
+        "target_refresh_enabled": True,
+        "news_refresh_enabled": True
+    }
+    if not settings_path.exists():
+        return defaults
+    try:
+        return {**defaults, **json.loads(settings_path.read_text(encoding="utf-8"))}
+    except Exception:
+        return defaults
+
+
+INTERVAL_MINUTES = DynamicInterval()
 ENTRY_EXIT_ALERT_STATE_PATH = REPORT_DIR / "entry_exit_alert_state.json"
 LATEST_WINDOW_PATH = REPORT_DIR / "latest_window.json"
 MONITOR_POPUPS_ENABLED = os.getenv("INVEST_MONITOR_POPUPS", "0") == "1"

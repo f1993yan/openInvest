@@ -1,4 +1,4 @@
-﻿"""openInvest 后端服务 — FastAPI + akshare 国内数据源
+"""openInvest 后端服务 — FastAPI + akshare 国内数据源
 
 启动: uv run uvicorn backend.server:app --host 0.0.0.0 --port <port>
 
@@ -751,10 +751,211 @@ def run_committee_direct(req: CommitteeRequest) -> CommitteeResponse:
         )
 
 
+class CrawlerSettings(BaseModel):
+    frequency_minutes: int = Field(60, ge=1, description="爬网频率（分钟）")
+    target_refresh_enabled: bool = Field(True, description="开启标的刷新")
+    news_refresh_enabled: bool = Field(True, description="开启周末新闻")
+
 @app.post("/api/committee", response_model=CommitteeResponse)
 async def run_committee_api(req: CommitteeRequest):
     """跑投资委员会分析（HTTP 端点，委托给 run_committee_direct）"""
     return run_committee_direct(req)
+
+
+@app.get("/api/monitor/snapshot")
+async def get_monitor_snapshot():
+    """获取标的监控快照数据"""
+    try:
+        from scripts.monitor_window_services import _load_snapshot
+        from scripts.monitor_window_constants import DEFAULT_SNAPSHOT
+        return _load_snapshot(DEFAULT_SNAPSHOT)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to load snapshot: {str(e)}")
+
+
+@app.get("/api/monitor/selection")
+async def get_monitor_selection():
+    """获取日度选股快照数据"""
+    try:
+        from scripts.monitor_window_services import _load_daily_selection
+        from scripts.monitor_window_constants import DAILY_SELECTION_LATEST
+        return _load_daily_selection(DAILY_SELECTION_LATEST)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to load daily selection: {str(e)}")
+
+
+@app.get("/api/monitor/news")
+async def get_monitor_news():
+    """获取周末新闻卡片数据"""
+    try:
+        from scripts.monitor_window_services import _load_weekend_news_cards
+        cards, filename = _load_weekend_news_cards()
+        return {"cards": cards, "filename": filename}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to load news: {str(e)}")
+
+@app.post("/api/config/crawler")
+async def update_crawler_config(settings: CrawlerSettings):
+    """更新远程数据获取配置"""
+    try:
+        settings_path = _PROJECT_ROOT / "jobs" / "crawler_settings.json"
+        settings_path.parent.mkdir(parents=True, exist_ok=True)
+        settings_path.write_text(json.dumps(settings.model_dump(), ensure_ascii=False, indent=2), encoding="utf-8")
+        return {"ok": True, "settings": settings.model_dump()}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to save settings: {str(e)}")
+
+
+@app.get("/api/config/crawler")
+async def get_crawler_config():
+    """获取远程数据获取配置"""
+    try:
+        settings_path = _PROJECT_ROOT / "jobs" / "crawler_settings.json"
+        if settings_path.exists():
+            return json.loads(settings_path.read_text(encoding="utf-8"))
+        return {
+            "frequency_minutes": 60,
+            "target_refresh_enabled": True,
+            "news_refresh_enabled": True
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to load settings: {str(e)}")
+
+
+@app.post("/api/config/monitor_config")
+async def import_monitor_config(config: Dict[str, Any] = Body(...)):
+    """导入/覆盖仓位及自选标的配置文件 (market_monitor_config.json)"""
+    try:
+        MONITOR_CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
+        MONITOR_CONFIG_PATH.write_text(json.dumps(config, ensure_ascii=False, indent=2), encoding="utf-8")
+        try:
+            # Re-initialize account ledger dynamically
+            from db.account_ledger import get_account_ledger
+            _ledger = get_account_ledger()
+            _ledger.ensure_initialized(config)
+            log.info("Ledger re-initialized with new imported monitor config")
+        except Exception as le:
+            log.warning(f"Failed to re-initialize ledger after import: {le}")
+        return {"ok": True, "message": "Monitor configuration imported successfully"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to save monitor config: {str(e)}")
+
+
+@app.get("/api/config/monitor_config")
+async def get_monitor_config():
+    """获取当前的仓位配置文件内容"""
+    try:
+        if MONITOR_CONFIG_PATH.exists():
+            return json.loads(MONITOR_CONFIG_PATH.read_text(encoding="utf-8"))
+        raise HTTPException(status_code=404, detail="Monitor config file not found")
+    except Exception as e:
+        if isinstance(e, HTTPException):
+            raise e
+        raise HTTPException(status_code=500, detail=f"Failed to read monitor config: {str(e)}")
+
+
+@app.post("/api/config/exit_params")
+async def import_exit_params(params: Dict[str, Any] = Body(...)):
+    """导入/覆盖每周止盈参数配置文件 (weekly_exit_param_optimization.json)"""
+    try:
+        exit_path = _PROJECT_ROOT / "reports" / "weekly_exit_param_optimization.json"
+        exit_path.parent.mkdir(parents=True, exist_ok=True)
+        exit_path.write_text(json.dumps(params, ensure_ascii=False, indent=2), encoding="utf-8")
+        return {"ok": True, "message": "Weekly exit parameter optimization file imported successfully"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to save exit parameters: {str(e)}")
+
+
+@app.get("/api/config/exit_params")
+async def get_exit_params():
+    """获取每周止盈参数配置文件内容"""
+    try:
+        exit_path = _PROJECT_ROOT / "reports" / "weekly_exit_param_optimization.json"
+        if exit_path.exists():
+            return json.loads(exit_path.read_text(encoding="utf-8"))
+        raise HTTPException(status_code=404, detail="Exit parameters file not found")
+    except Exception as e:
+        if isinstance(e, HTTPException):
+            raise e
+        raise HTTPException(status_code=500, detail=f"Failed to read exit parameters: {str(e)}")
+
+
+@app.get("/api/stock/history")
+async def get_stock_history(symbol: str, period: str = "2y"):
+    """获取股票的历史OHLC行情数据，供手机端本地分析"""
+    try:
+        from utils.akshare_data import get_history_data
+        df = get_history_data(symbol, period)
+        if df.empty:
+            return {"success": False, "error": "No history data found"}
+        df_reset = df.reset_index()
+        if "Date" in df_reset.columns:
+            df_reset["Date"] = df_reset["Date"].dt.strftime("%Y-%m-%d")
+        data = df_reset.to_dict(orient="records")
+        return {"success": True, "symbol": symbol, "data": data}
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
+@app.get("/api/stock/fundamental")
+async def get_stock_fundamental(symbol: str, market: str = "a"):
+    """获取股票基本面数据，供手机端本地分析"""
+    try:
+        from utils.fundamental_data import get_fundamental_snapshot
+        snapshot = get_fundamental_snapshot(symbol, market)
+        return {"success": True, "symbol": symbol, "snapshot": snapshot}
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
+@app.get("/api/stock/macro")
+async def get_macro_snapshot_api():
+    """获取宏观行情数据快照，供手机端本地分析"""
+    try:
+        from utils.akshare_data import get_macro_snapshot
+        snap = get_macro_snapshot()
+        return {"success": True, "macro_data": snap}
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
+def cleanup_old_data():
+    """清理两个月（60天）以上的价格缓存和监控快照文件"""
+    try:
+        from datetime import datetime, timedelta
+        cutoff_date = (datetime.now() - timedelta(days=60)).strftime("%Y-%m-%d")
+        
+        # 1. 清理 SQLite 数据价格缓存
+        from db.market_store import MarketStore
+        store = MarketStore()
+        with store._lock:
+            cursor = store.conn.cursor()
+            cursor.execute("DELETE FROM daily_prices WHERE date < ?", (cutoff_date,))
+            deleted_rows = cursor.rowcount
+            store.conn.commit()
+            log.info(f"数据库清理：已删除 {deleted_rows} 行 {cutoff_date} 之前的价格缓存。")
+            
+        # 2. 清理临时委员会缓存文件
+        cache_dir = _PROJECT_ROOT / "data" / "committee_cache"
+        if cache_dir.exists():
+            for date_dir in cache_dir.iterdir():
+                if date_dir.is_dir():
+                    try:
+                        dir_date = datetime.strptime(date_dir.name, "%Y-%m-%d")
+                        if datetime.now() - dir_date > timedelta(days=60):
+                            import shutil
+                            shutil.rmtree(date_dir)
+                            log.info(f"文件清理：已删除超过2个月的委员会缓存目录 {date_dir.name}")
+                    except ValueError:
+                        pass
+    except Exception as e:
+        log.error(f"清理旧数据失败: {e}")
+
+
+@app.on_event("startup")
+async def startup_event():
+    """服务启动时触发清理逻辑"""
+    cleanup_old_data()
 
 
 # ==========================================
@@ -764,4 +965,4 @@ async def run_committee_api(req: CommitteeRequest):
 if __name__ == "__main__":
     import uvicorn
     port = int(_os.getenv("INVEST_BACKEND_PORT", "0"))
-    uvicorn.run(app, host="127.0.0.1", port=port, log_level="info")
+    uvicorn.run(app, host="0.0.0.0", port=port, log_level="info")

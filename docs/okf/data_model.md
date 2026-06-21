@@ -1,10 +1,9 @@
 ---
-type: Reference
+type: Schema
 title: openInvest Data Model
 description: Persistence schemas for cash, holdings, and transaction registers.
-resource: file:///d:/Documents/Code/OpenInvest/docs/okf/data_model.md
 tags: [data-model, schema, pydantic]
-timestamp: 2026-06-20T17:40:00Z
+timestamp: 2026-06-21T20:46:00Z
 ---
 
 # openInvest Data Model

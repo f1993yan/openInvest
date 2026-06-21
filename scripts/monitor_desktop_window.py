@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import queue
 import sys
 import threading
@@ -17,6 +18,7 @@ from datetime import datetime
 from pathlib import Path
 from tkinter import messagebox, ttk
 from typing import Any, Dict, List, Optional
+from dotenv import load_dotenv
 
 
 _IMPORT_ROOT = Path(__file__).resolve().parents[1]
@@ -85,6 +87,8 @@ class MonitorWindow(MonitorNewsMixin, MonitorSelectionMixin, MonitorTradeMixin, 
         self.card_widgets: Dict[str, tk.Frame] = {}
         self.dialogs: Dict[str, tk.Toplevel] = {}
         self.analysis_queue: queue.Queue[tuple[str, str, Optional[Dict[str, Any]]]] = queue.Queue()
+        load_dotenv(ROOT / ".env")
+        self.remote_server_url = os.getenv("INVEST_REMOTE_SERVER_URL")
         self._build_ui()
 
     def _set_initial_geometry(self) -> None:
@@ -258,6 +262,28 @@ class MonitorWindow(MonitorNewsMixin, MonitorSelectionMixin, MonitorTradeMixin, 
             font=("Segoe UI Symbol", 12, "bold"),
         )
         self.refresh_fab.pack(side=tk.RIGHT, padx=(6, 0))
+
+        self.upload_fab = CircleButton(
+            self.selection_bar,
+            text="↑",
+            command=self.upload_data,
+            size=32,
+            color="#10b981",
+            hover_color="#059669",
+            font=("Segoe UI", 12, "bold"),
+        )
+        self.upload_fab.pack(side=tk.RIGHT, padx=(6, 0))
+
+        self.sync_fab = CircleButton(
+            self.selection_bar,
+            text="↓",
+            command=self.sync_data,
+            size=32,
+            color="#f59e0b",
+            hover_color="#d97706",
+            font=("Segoe UI", 12, "bold"),
+        )
+        self.sync_fab.pack(side=tk.RIGHT, padx=(6, 0))
 
         self.trade_fab = CircleButton(
             self.selection_bar,
@@ -439,6 +465,85 @@ class MonitorWindow(MonitorNewsMixin, MonitorSelectionMixin, MonitorTradeMixin, 
         self._maybe_alert(rows)
         self._refresh_open_news_popover()
         self._render_selection_buttons()
+
+    def upload_data(self) -> None:
+        if not self.remote_server_url:
+            messagebox.showerror("错误", "未配置远程服务器地址 (INVEST_REMOTE_SERVER_URL)")
+            return
+        
+        config_path = ROOT / "jobs" / "market_monitor_config.json"
+        exit_path = ROOT / "reports" / "weekly_exit_param_optimization.json"
+        
+        if not config_path.exists():
+            messagebox.showerror("错误", f"配置文件不存在: {config_path}")
+            return
+            
+        import requests
+        try:
+            with open(config_path, "r", encoding="utf-8") as f:
+                config_data = json.load(f)
+            
+            url = f"{self.remote_server_url.rstrip('/')}/api/config/monitor_config"
+            resp = requests.post(url, json=config_data, timeout=10)
+            if resp.status_code != 200:
+                messagebox.showerror("错误", f"上传监控配置失败: HTTP {resp.status_code}\n{resp.text}")
+                return
+                
+            if exit_path.exists():
+                with open(exit_path, "r", encoding="utf-8") as f:
+                    exit_data = json.load(f)
+                url_exit = f"{self.remote_server_url.rstrip('/')}/api/config/exit_params"
+                resp_exit = requests.post(url_exit, json=exit_data, timeout=10)
+                if resp_exit.status_code != 200:
+                    messagebox.showerror("错误", f"上传每周止盈参数失败: HTTP {resp_exit.status_code}\n{resp_exit.text}")
+                    return
+            
+            messagebox.showinfo("成功", "数据上传成功！")
+        except Exception as e:
+            messagebox.showerror("错误", f"上传过程中发生异常: {str(e)}")
+
+    def sync_data(self) -> None:
+        if not self.remote_server_url:
+            messagebox.showerror("错误", "未配置远程服务器地址 (INVEST_REMOTE_SERVER_URL)")
+            return
+            
+        if not messagebox.askyesno("确认同步", "确认从服务器同步持仓/关注/参数数据？这将覆盖本地的相同数据！"):
+            return
+            
+        import requests
+        try:
+            url_config = f"{self.remote_server_url.rstrip('/')}/api/config/monitor_config"
+            resp_config = requests.get(url_config, timeout=10)
+            if resp_config.status_code == 200:
+                config_data = resp_config.json()
+                config_path = ROOT / "jobs" / "market_monitor_config.json"
+                config_path.parent.mkdir(parents=True, exist_ok=True)
+                with open(config_path, "w", encoding="utf-8") as f:
+                    json.dump(config_data, f, ensure_ascii=False, indent=2)
+            elif resp_config.status_code == 404:
+                pass
+            else:
+                messagebox.showerror("错误", f"同步监控配置失败: HTTP {resp_config.status_code}\n{resp_config.text}")
+                return
+                
+            url_exit = f"{self.remote_server_url.rstrip('/')}/api/config/exit_params"
+            resp_exit = requests.get(url_exit, timeout=10)
+            if resp_exit.status_code == 200:
+                exit_data = resp_exit.json()
+                exit_path = ROOT / "reports" / "weekly_exit_param_optimization.json"
+                exit_path.parent.mkdir(parents=True, exist_ok=True)
+                with open(exit_path, "w", encoding="utf-8") as f:
+                    json.dump(exit_data, f, ensure_ascii=False, indent=2)
+            elif resp_exit.status_code == 404:
+                pass
+            else:
+                messagebox.showerror("错误", f"同步每周止盈参数失败: HTTP {resp_exit.status_code}\n{resp_exit.text}")
+                return
+                
+            messagebox.showinfo("成功", "数据同步成功！")
+            self.refresh()
+        except Exception as e:
+            messagebox.showerror("错误", f"同步过程中发生异常: {str(e)}")
 
     def _resize_to_rows(self, row_count: int) -> None:
         screen_h = self.root.winfo_screenheight()
