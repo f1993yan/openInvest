@@ -260,6 +260,60 @@ uv run pytest tests/test_gold_price.py tests/test_backtest_no_lookahead.py tests
    & "C:\Users\f1993\AppData\Local\Android\Sdk\platform-tools\adb.exe" install -r app\build\outputs\apk\debug\app-debug.apk
    ```
 
+### 业务时序流程 (Sequence Diagram)
+在“周末新闻与机会”中，用户点击龙头股票名，启动本地 Chaquopy 异步分析与多角色投委会辩论的完整时序图如下：
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor User as 用户
+    participant UI as MainActivity / NewsDialog (Kotlin)
+    participant Runner as LocalCommitteeRunner (Kotlin)
+    participant Py as phone_committee.py (Python/Chaquopy)
+    participant Serv as 远程服务器 (FastAPI Backend)
+
+    %% 阶段 1: 新闻气泡交互
+    User->>UI: 点击“周末新闻”图标
+    UI->>UI: 渲染 NewsDialog 并展示新闻机会列表
+    User->>UI: 点击龙头建议中的股票名称
+    UI->>UI: 寻找 Snapshot 匹配价格数据
+    UI->>User: 弹出气泡 AlertDialog (展示现价/涨跌幅/原因/查看详情)
+    
+    %% 阶段 2: 详情分析与决策链启动
+    User->>UI: 点击“查看分析详情”
+    alt 标的在监视列表中 (Tracked)
+        UI->>Runner: 传入现有 HoldingRow 启动分析
+    else 标的未在监视列表中 (Untracked)
+        UI->>UI: 创建具有 _is_resolving = true 的临时 dummy 标的行
+        UI->>Runner: 传入 dummy 标的行启动分析
+    end
+    UI->>UI: 打开 CommitteeAnalysisDialog 展示“分析中...”加载动画
+
+    %% 阶段 3: 本地异步多角色辩论执行 (Chaquopy 线程)
+    Runner->>Py: 异步调用 run_committee_local(symbol, _is_resolving...)
+    
+    alt _is_resolving == true (未追踪标的)
+        Py->>Serv: 1. 请求 /api/stock/fundamental (拉取解析该股基本面)
+        Serv-->>Py: 返回基本面数据结构
+        Py->>Py: 2. 调用 akshare 抓取近两年历史行情 (OHLCV)
+    else 已追踪标的
+        Py->>Py: 直接读取传入的本地数据
+    end
+
+    Py->>Py: 调用 OpenAI/Gemini 兼容的接口跑多角色辩论
+    Note over Py: 1. Macro 角色判定宏观趋势<br/>2. Quant 角色审视价格指标<br/>3. Risk 角色过滤硬规则阻拦<br/>4. CIO 综合输出终审决议与期望收益
+    
+    Py->>Py: 调用优化器决策与买卖点模型 (计算回调/突破买点、止损/止盈线)
+    Py->>Py: 缓存辩论结果到本地目录 (pkl 序列化)
+    Py->>Py: 格式化投资建议文本
+    Py-->>Runner: 返回 JSON 结果字符串
+
+    %% 阶段 4: 返回 UI 渲染展示
+    Runner-->>UI: 投递 Result.success(finishedResponse) 消息
+    UI->>UI: 停止加载动画，渲染最终的“富文本投资委员会建议”
+    UI-->>User: 界面更新展示 (买卖评级、置信度、推荐手数、下一步操作等)
+```
+
 ## 双账户账本
 
 `db/account_ledger.py` 维护两个账户：
