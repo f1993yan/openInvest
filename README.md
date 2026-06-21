@@ -237,6 +237,29 @@ uv run pytest tests/test_gold_price.py tests/test_backtest_no_lookahead.py tests
 
 窗口状态字段尽量使用通俗中文：收益路径表示“1/5/20 日可能涨跌范围”，风险提示表示“ATR 波动、下行风险和防守惩罚”，校准信息表示“历史相似样本命中率和样本数量”。
 
+## 移动客户端 (Android App)
+
+项目提供了一个现代化的 Android 移动客户端（位于 `app/` 目录），其核心特点与流程如下：
+
+### 核心功能
+- **同步服务器配置**：支持从远程服务器一键同步/同步云端或备份上传本地的持仓、自选列表与每周止盈参数配置。
+- **周末新闻机会标的互动**：在“周末新闻与机会”中，标的建议的龙头股名称可点击，点击后弹出悬浮气泡，展示当前价格、今日涨跌（如已在监视列表中）或研判原因。
+- **移动端本地 AI 投委会辩论**：点击气泡或详情中的“查看分析详情”，对未追踪的股票会自动通过网络接口解析 symbol，并在手机本地的 Chaquopy Python 环境下调用 LLM（Gemini/DeepSeek）异步执行多角色辩论与优化仓位策略。
+- **账户划转动画**：支持 A 股/港股 T+2 待交收资金一键确认可用，并伴随流畅的划转与可用金额递增计数动画，自动更新本地持仓配置及同步云端。
+- **选股推荐底栏**：以白底阴影精美卡片（`Card`）和薄边框形式融入整体视觉设计，并使用红/橙/灰状态点标识推荐个股的分值高低（$\ge 80$ 分为红，$\ge 60$ 分为橙）。
+
+### 编译与安装步骤
+1. **编译环境**：需要 Android SDK 以及 JDK 17 (推荐使用 Android Studio 的 `jbr` 目录)。
+2. **执行编译**（在 `app/` 目录下运行）：
+   ```powershell
+   $env:JAVA_HOME="D:\Program Files\Android Studio\jbr"
+   .\gradlew.bat assembleDebug
+   ```
+3. **部署安装**（确保手机 USB 调试已开启且通过 `adb devices` 识别）：
+   ```powershell
+   & "C:\Users\f1993\AppData\Local\Android\Sdk\platform-tools\adb.exe" install -r app\build\outputs\apk\debug\app-debug.apk
+   ```
+
 ## 双账户账本
 
 `db/account_ledger.py` 维护两个账户：
