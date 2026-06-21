@@ -449,9 +449,73 @@ def _path_mtime(path: Path) -> Optional[float]:
         return None
 
 
+def _find_latest_cached_committee_result(symbol: str) -> Optional[Dict[str, Any]]:
+    import pickle
+    try:
+        cache_dir = ROOT / "data" / "committee_cache"
+        if not cache_dir.exists():
+            return None
+        # Sort subdirectories YYYY-MM-DD descending
+        date_dirs = sorted([d for d in cache_dir.iterdir() if d.is_dir()], key=lambda x: x.name, reverse=True)
+        for date_dir in date_dirs:
+            # Find any pkl matching *_<symbol>.pkl (ignoring case)
+            matching_files = sorted(date_dir.glob(f"*_{symbol.upper()}.pkl"), key=lambda x: x.name, reverse=True)
+            if matching_files:
+                with open(matching_files[0], "rb") as f:
+                    return pickle.load(f)
+    except Exception:
+        pass
+    return None
+
+
 def _config_stock_row(stock: Dict[str, Any], price_info: Dict[str, Any]) -> Dict[str, Any]:
     symbol = str(stock.get("symbol") or "").strip()
     position_pct = _safe_num(stock.get("position_pct"))
+    
+    # Try to load cached committee result to populate indicators
+    cached = _find_latest_cached_committee_result(symbol)
+    
+    buy_criteria = {"pullback_price": 0.0, "breakout_price": 0.0, "reentry_price": 0.0, "reward_risk_ratio": 0.0, "reason": ""}
+    exit_points = {"stop_loss_price": 0.0, "take_profit_price": 0.0, "trim_price": 0.0}
+    verdict = "HOLD" if position_pct > 0 else "WAIT"
+    confidence = 0.0
+    suggested_alloc_cny = 0.0
+    
+    fundamental_score = 50.0
+    technical_regime = "等待交易时段监控刷新"
+    technical_quant_view = "当前显示本地持仓配置"
+    
+    if cached:
+        # Populate buy_criteria
+        ee = cached.get("entry_exit_points") or {}
+        buy_criteria["pullback_price"] = _safe_num(ee.get("buy_pullback_price"))
+        buy_criteria["breakout_price"] = _safe_num(ee.get("buy_breakout_price"))
+        buy_criteria["reentry_price"] = _safe_num(ee.get("reentry_price"))
+        buy_criteria["reward_risk_ratio"] = _safe_num(ee.get("reward_risk_ratio"))
+        buy_criteria["reason"] = ee.get("reason", "")
+        
+        # Populate exit_points
+        pe = cached.get("position_exit_policy") or {}
+        if position_pct > 0 and pe:
+            exit_points["stop_loss_price"] = _safe_num(
+                pe.get("effective_stop_price"),
+                _safe_num(pe.get("hard_stop_price"), _safe_num(ee.get("stop_loss_price")))
+            )
+            exit_points["take_profit_price"] = _safe_num(pe.get("take_profit_1_price"), _safe_num(ee.get("take_profit_price")))
+            exit_points["trim_price"] = _safe_num(pe.get("trim_price"), _safe_num(ee.get("trim_price")))
+        else:
+            exit_points["stop_loss_price"] = _safe_num(ee.get("stop_loss_price"))
+            exit_points["take_profit_price"] = _safe_num(ee.get("take_profit_price"))
+            exit_points["trim_price"] = _safe_num(ee.get("trim_price"))
+            
+        verdict = cached.get("verdict") or verdict
+        confidence = _safe_num(cached.get("confidence"))
+        suggested_alloc_cny = _safe_num(cached.get("suggested_alloc"))
+        
+        fundamental_score = _safe_num(cached.get("fundamental_score"), 50.0)
+        technical_regime = cached.get("regime") or technical_regime
+        technical_quant_view = cached.get("quant_signal") or technical_quant_view
+
     return {
         "symbol": symbol,
         "name": stock.get("name") or price_info.get("name") or symbol,
@@ -471,12 +535,12 @@ def _config_stock_row(stock: Dict[str, Any], price_info: Dict[str, Any]) -> Dict
             "name": price_info.get("name", ""),
         },
         "state": "monitoring" if position_pct > 0 else "candidate",
-        "buy_criteria": {"pullback_price": 0.0, "breakout_price": 0.0, "reentry_price": 0.0, "reward_risk_ratio": 0.0, "reason": ""},
-        "exit_points": {"stop_loss_price": 0.0, "take_profit_price": 0.0, "trim_price": 0.0},
-        "fundamental": {"model": "", "score": 50.0, "coverage": 0.0, "anchor_multiplier": 1.0},
+        "buy_criteria": buy_criteria,
+        "exit_points": exit_points,
+        "fundamental": {"model": "", "score": fundamental_score, "coverage": 0.0, "anchor_multiplier": 1.0},
         "technical": {
-            "regime": "等待交易时段监控刷新",
-            "quant_view": "当前显示本地持仓配置",
+            "regime": technical_regime,
+            "quant_view": technical_quant_view,
             "market_data_excerpt": "",
             "entry_exit_model": "",
             "low_confidence": True,
@@ -486,9 +550,9 @@ def _config_stock_row(stock: Dict[str, Any], price_info: Dict[str, Any]) -> Dict
         "operation": {
             "status": "monitoring" if position_pct > 0 else "candidate",
             "reason": "local_config_snapshot",
-            "verdict": "HOLD" if position_pct > 0 else "WAIT",
-            "confidence": 0.0,
-            "suggested_alloc_cny": 0.0,
+            "verdict": verdict,
+            "confidence": confidence,
+            "suggested_alloc_cny": suggested_alloc_cny,
             "optimizer_lots": None,
             "llm_review_lots": None,
             "llm_position_scale": "",
@@ -501,7 +565,7 @@ def _config_stock_row(stock: Dict[str, Any], price_info: Dict[str, Any]) -> Dict
             "llm_conflict": False,
             "execution_blocked": False,
         },
-        "llm_review": {"conclusion": "", "one_line": "等待下一次交易时段监控刷新", "risk_note": "", "execution_plan": "", "raw_excerpt": ""},
+        "llm_review": {"conclusion": "", "one_line": "从本地缓存载入上一次委员会分析结果", "risk_note": "", "execution_plan": "", "raw_excerpt": ""},
         "suppressed_reasons": [],
         "error": "",
         "success": True,
