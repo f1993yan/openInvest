@@ -308,14 +308,25 @@ def _short(text: Any, limit: int = 100) -> str:
 def _load_snapshot(path: Path) -> Dict[str, Any]:
     fallback = _load_config_snapshot(f"暂无监控快照: {path}", source_path=path)
     if not path.exists():
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps(fallback, ensure_ascii=False, indent=2), encoding="utf-8")
+        except Exception:
+            pass
         return fallback
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
         if _looks_like_sample_snapshot(payload):
-            return _load_config_snapshot("忽略旧示例快照，已改用本地持仓配置", source_path=path)
+            clean_snap = _load_config_snapshot("忽略旧示例快照，已改用本地持仓配置", source_path=path)
+            try:
+                path.write_text(json.dumps(clean_snap, ensure_ascii=False, indent=2), encoding="utf-8")
+            except Exception:
+                pass
+            return clean_snap
         return payload
     except Exception as exc:  # noqa: BLE001
         return _load_config_snapshot(f"读取监控快照失败: {type(exc).__name__}: {exc}", source_path=path)
+
 
 
 def _looks_like_sample_snapshot(payload: Dict[str, Any]) -> bool:
@@ -348,7 +359,8 @@ def _load_config_snapshot(message: str = "", *, source_path: Optional[Path] = No
         prices = {}
         timestamp_path = source_path
 
-    rows = [_config_stock_row(stock, prices.get(str(stock.get("symbol") or "").strip()) or {}) for stock in stocks]
+    total_assets = _safe_num(config.get("total_assets"))
+    rows = [_config_stock_row(stock, prices.get(str(stock.get("symbol") or "").strip()) or {}, total_assets) for stock in stocks]
     cash = _safe_num(config.get("cash"))
     t2_pending_cash = _safe_num(config.get("t2_pending_cash"))
     try:
@@ -468,9 +480,15 @@ def _find_latest_cached_committee_result(symbol: str) -> Optional[Dict[str, Any]
     return None
 
 
-def _config_stock_row(stock: Dict[str, Any], price_info: Dict[str, Any]) -> Dict[str, Any]:
+def _config_stock_row(stock: Dict[str, Any], price_info: Dict[str, Any], total_assets: float = 0.0) -> Dict[str, Any]:
     symbol = str(stock.get("symbol") or "").strip()
     position_pct = _safe_num(stock.get("position_pct"))
+    units = _safe_num(stock.get("units"))
+    cost = _safe_num(stock.get("cost"))
+    if units <= 0.0 and position_pct > 0.0 and cost > 0.0 and total_assets > 0.0:
+        units = (total_assets * position_pct / 100.0) / cost
+    elif position_pct <= 0.0 and units > 0.0 and cost > 0.0 and total_assets > 0.0:
+        position_pct = (units * cost) / total_assets * 100.0
     
     # Try to load cached committee result to populate indicators
     cached = _find_latest_cached_committee_result(symbol)
@@ -523,8 +541,8 @@ def _config_stock_row(stock: Dict[str, Any], price_info: Dict[str, Any]) -> Dict
         "sector": stock.get("sector", ""),
         "industry": stock.get("industry", ""),
         "min_lot_size": int(_safe_num(stock.get("min_lot_size"), 100) or 100),
-        "units": round(_safe_num(stock.get("units")), 4),
-        "is_holding": position_pct > 0 or _safe_num(stock.get("units")) > 0,
+        "units": round(units, 4),
+        "is_holding": position_pct > 0 or units > 0,
         "position_pct": round(position_pct, 4),
         "target_position_pct": stock.get("target_position_pct", stock.get("target_pct")),
         "cost": _safe_num(stock.get("cost")),

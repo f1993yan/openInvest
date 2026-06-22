@@ -832,13 +832,24 @@ async def import_monitor_config(config: Dict[str, Any] = Body(...)):
             # Re-initialize account ledger dynamically
             from db.account_ledger import get_account_ledger
             _ledger = get_account_ledger()
-            _ledger.ensure_initialized(config)
-            log.info("Ledger re-initialized with new imported monitor config")
+            _ledger.initialize_from_monitor_config(config, reset=True)
+            log.info("Ledger re-initialized with new imported monitor config (reset=True)")
         except Exception as le:
             log.warning(f"Failed to re-initialize ledger after import: {le}")
+            
+        try:
+            # Delete stale snapshot so that it is rebuilt from the new config
+            from scripts.monitor_window_constants import DEFAULT_SNAPSHOT
+            if DEFAULT_SNAPSHOT.exists():
+                DEFAULT_SNAPSHOT.unlink()
+                log.info("Stale snapshot file deleted after config import")
+        except Exception as se:
+            log.warning(f"Failed to delete stale snapshot file: {se}")
+            
         return {"ok": True, "message": "Monitor configuration imported successfully"}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to save monitor config: {str(e)}")
+
 
 
 @app.get("/api/config/monitor_config")

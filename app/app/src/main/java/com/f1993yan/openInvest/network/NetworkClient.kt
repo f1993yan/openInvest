@@ -85,7 +85,18 @@ object NetworkClient {
                         val bodyString = response.body?.string() ?: ""
                         Log.d(TAG, "fetchSnapshot success: length = ${bodyString.length}")
                         val snapshot = gson.fromJson(bodyString, SnapshotResponse::class.java)
-                        runOnMain(onResult, Result.success(snapshot))
+                        
+                        // Client-side fix: calculate/infer units if missing/0.0 on server response
+                        val processedRows = snapshot.rows?.map { row ->
+                            if (row.units <= 0.0 && kotlin.math.abs(row.position_pct) > 0.0 && kotlin.math.abs(row.cost) > 0.0 && snapshot.total_assets_cny > 0.0) {
+                                val calcUnits = (snapshot.total_assets_cny * kotlin.math.abs(row.position_pct) / 100.0) / kotlin.math.abs(row.cost)
+                                row.copy(units = calcUnits)
+                            } else {
+                                row
+                            }
+                        }
+                        val processedSnapshot = snapshot.copy(rows = processedRows)
+                        runOnMain(onResult, Result.success(processedSnapshot))
                     } else {
                         Log.w(TAG, "fetchSnapshot failure: HTTP ${response.code}")
                         runOnMain(onResult, Result.failure(IOException("HTTP error: ${response.code}")))

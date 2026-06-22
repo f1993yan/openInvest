@@ -354,6 +354,8 @@ fun MainScreen(modifier: Modifier = Modifier, onSaveUrl: (String) -> Unit) {
                             "name" to r.name,
                             "cost" to r.cost,
                             "position_pct" to r.position_pct,
+                            "units" to r.units,
+                            "min_lot_size" to r.min_lot_size,
                             "sector" to (r.sector ?: ""),
                             "industry" to (r.industry ?: "")
                         )
@@ -575,6 +577,8 @@ fun MainScreen(modifier: Modifier = Modifier, onSaveUrl: (String) -> Unit) {
                         "name" to r.name,
                         "cost" to r.cost,
                         "position_pct" to r.position_pct,
+                        "units" to r.units,
+                        "min_lot_size" to r.min_lot_size,
                         "sector" to (r.sector ?: ""),
                         "industry" to (r.industry ?: "")
                     )
@@ -658,6 +662,126 @@ fun MainScreen(modifier: Modifier = Modifier, onSaveUrl: (String) -> Unit) {
                 val resultsCacheJson = gson.toJson(localCommitteeResults.toMap())
                 saveLocalFile(context, "committee_results_cache.json", resultsCacheJson)
             }
+        }
+    }
+
+    val rebuildSnapshotFromConfig: (String) -> Unit = { configStr: String ->
+        try {
+            val configObj = org.json.JSONObject(configStr)
+            val cash = configObj.optDouble("cash", 0.0)
+            val totalAssets = configObj.optDouble("total_assets", 0.0)
+            val t2PendingCash = configObj.optDouble("t2_pending_cash", 0.0)
+            
+            val holdingsArr = configObj.optJSONArray("holdings")
+            val watchlistArr = configObj.optJSONArray("watchlist")
+            
+            val newRows = mutableListOf<HoldingRow>()
+            
+            fun findExistingRow(sym: String): HoldingRow? {
+                return snapshot?.rows?.find { it.symbol.equals(sym, ignoreCase = true) }
+            }
+            
+            if (holdingsArr != null) {
+                for (i in 0 until holdingsArr.length()) {
+                    val item = holdingsArr.getJSONObject(i)
+                    val sym = item.getString("symbol")
+                    val name = item.optString("name", sym)
+                    val market = item.optString("market", "a")
+                    val sector = item.optString("sector", "")
+                    val industry = item.optString("industry", "")
+                    val minLot = item.optInt("min_lot_size", 100)
+                    var units = item.optDouble("units", 0.0)
+                    val cost = item.optDouble("cost", 0.0)
+                    var posPct = item.optDouble("position_pct", 0.0)
+                    
+                    if (units <= 0.0 && kotlin.math.abs(posPct) > 0.0 && kotlin.math.abs(cost) > 0.0 && totalAssets > 0.0) {
+                        units = (totalAssets * kotlin.math.abs(posPct) / 100.0) / kotlin.math.abs(cost)
+                    } else if (kotlin.math.abs(posPct) <= 0.0 && units > 0.0 && kotlin.math.abs(cost) > 0.0 && totalAssets > 0.0) {
+                        posPct = (units * kotlin.math.abs(cost)) / totalAssets * 100.0
+                    }
+                    
+                    val existing = findExistingRow(sym)
+                    val price = existing?.price ?: HoldingRowPrice(cost, cost, 0.0)
+                    
+                    newRows.add(
+                        HoldingRow(
+                            symbol = sym,
+                            name = name,
+                            market = market,
+                            sector = sector,
+                            industry = industry,
+                            min_lot_size = minLot,
+                            units = units,
+                            is_holding = true,
+                            position_pct = posPct,
+                            cost = cost,
+                            price = price,
+                            state = "monitoring",
+                            buy_criteria = existing?.buy_criteria,
+                            exit_points = existing?.exit_points,
+                            fundamental = existing?.fundamental,
+                            technical = existing?.technical,
+                            operation = existing?.operation,
+                            llm_review = existing?.llm_review
+                        )
+                    )
+                }
+            }
+            
+            if (watchlistArr != null) {
+                for (i in 0 until watchlistArr.length()) {
+                    val item = watchlistArr.getJSONObject(i)
+                    val sym = item.getString("symbol")
+                    val name = item.optString("name", sym)
+                    val market = item.optString("market", "a")
+                    val sector = item.optString("sector", "")
+                    val industry = item.optString("industry", "")
+                    
+                    val existing = findExistingRow(sym)
+                    val price = existing?.price ?: HoldingRowPrice(0.0, 0.0, 0.0)
+                    
+                    newRows.add(
+                        HoldingRow(
+                            symbol = sym,
+                            name = name,
+                            market = market,
+                            sector = sector,
+                            industry = industry,
+                            min_lot_size = 100,
+                            units = 0.0,
+                            is_holding = false,
+                            position_pct = 0.0,
+                            cost = 0.0,
+                            price = price,
+                            state = "candidate",
+                            buy_criteria = existing?.buy_criteria,
+                            exit_points = existing?.exit_points,
+                            fundamental = existing?.fundamental,
+                            technical = existing?.technical,
+                            operation = existing?.operation,
+                            llm_review = existing?.llm_review
+                        )
+                    )
+                }
+            }
+            
+            val newSnapshot = SnapshotResponse(
+                version = snapshot?.version ?: 1,
+                generated_at = java.text.SimpleDateFormat("yyyy-MM-dd HH:mm:ss", java.util.Locale.getDefault()).format(java.util.Date()),
+                round_time = "local_sync",
+                cash_cny = cash,
+                total_assets_cny = totalAssets,
+                t2_pending_cash_cny = t2PendingCash,
+                total_cash_cny = cash + t2PendingCash,
+                counts = mapOf("symbols" to newRows.size),
+                rows = newRows
+            )
+            
+            snapshot = newSnapshot
+            saveLocalFile(context, "resolved_snapshot.json", gson.toJson(newSnapshot))
+            Log.d("MainActivity", "Successfully rebuilt snapshot from config with ${newRows.size} rows")
+        } catch (e: Exception) {
+            Log.e("MainActivity", "Failed to rebuild snapshot from config", e)
         }
     }
 
@@ -1358,7 +1482,8 @@ fun MainScreen(modifier: Modifier = Modifier, onSaveUrl: (String) -> Unit) {
             },
             onRefresh = {
                 refreshData()
-            }
+            },
+            onImportConfig = rebuildSnapshotFromConfig
         )
     }
 
@@ -1731,7 +1856,13 @@ fun StockCard(row: HoldingRow, onClick: () -> Unit, onLongClick: (() -> Unit)? =
 
 // --- Settings Dialog ---
 @Composable
-fun SettingsDialog(currentUrl: String, onClose: () -> Unit, onSave: (String) -> Unit, onRefresh: () -> Unit = {}) {
+fun SettingsDialog(
+    currentUrl: String,
+    onClose: () -> Unit,
+    onSave: (String) -> Unit,
+    onRefresh: () -> Unit = {},
+    onImportConfig: (String) -> Unit = {}
+) {
     val context = LocalContext.current
     val prefs = remember { context.getSharedPreferences("open_invest_prefs", Context.MODE_PRIVATE) }
 
@@ -1788,6 +1919,7 @@ fun SettingsDialog(currentUrl: String, onClose: () -> Unit, onSave: (String) -> 
             val content = readTextFromUri(context, it)
             if (content != null) {
                 saveLocalFile(context, "market_monitor_config.json", content)
+                onImportConfig(content)
                 NetworkClient.uploadMonitorConfig(content) { res ->
                     res.fold(
                         onSuccess = {
@@ -2327,6 +2459,7 @@ fun SettingsDialog(currentUrl: String, onClose: () -> Unit, onSave: (String) -> 
                                                 res.fold(
                                                     onSuccess = { content ->
                                                         saveLocalFile(context, "market_monitor_config.json", content)
+                                                        onImportConfig(content)
                                                         onSyncComplete()
                                                     },
                                                     onFailure = { err ->

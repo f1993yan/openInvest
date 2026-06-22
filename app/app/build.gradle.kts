@@ -62,14 +62,14 @@ tasks.register("copyPythonSources") {
     val srcDir = projectRootDir.parentFile
     val destDir = File(appProjectDir, "src/main/python")
     
-    inputs.files(listOf("core", "utils", "agents", "db").map { File(srcDir, it) })
+    inputs.files(listOf("core", "utils", "agents", "db", "jobs").map { File(srcDir, it) })
     outputs.dir(destDir)
 
     doLast {
         destDir.deleteRecursively()
         destDir.mkdirs()
         
-        val dirsToCopy = listOf("core", "utils", "agents", "db")
+        val dirsToCopy = listOf("core", "utils", "agents", "db", "jobs")
         dirsToCopy.forEach { dirName ->
             val fromDir = File(srcDir, dirName)
             if (fromDir.exists()) {

@@ -116,7 +116,15 @@ def build_monitor_window_snapshot(
         position_exit_plan = row.get("position_exit_plan") or (
             (result.get("position_exit_plan") or {}) if isinstance(result, dict) else {}
         )
-        is_holding = _safe_num(stock.get("position_pct")) > 0 or _safe_num(stock.get("units")) > 0
+        units = _safe_num(stock.get("units"))
+        pos_pct = _safe_num(stock.get("position_pct"))
+        cost = _safe_num(stock.get("cost"))
+        if units <= 0.0 and pos_pct > 0.0 and cost > 0.0 and total_assets > 0.0:
+            units = (total_assets * pos_pct / 100.0) / cost
+        elif pos_pct <= 0.0 and units > 0.0 and cost > 0.0 and total_assets > 0.0:
+            pos_pct = (units * cost) / total_assets * 100.0
+
+        is_holding = pos_pct > 0 or units > 0
         if is_holding and position_exit_plan:
             exit_points = {
                 "stop_loss_price": _safe_num(
@@ -150,9 +158,9 @@ def build_monitor_window_snapshot(
             "sector": stock.get("sector", ""),
             "industry": stock.get("industry", ""),
             "min_lot_size": int(_safe_num(stock.get("min_lot_size"), 100) or 100),
-            "units": round(_safe_num(stock.get("units")), 4),
+            "units": round(units, 4),
             "is_holding": is_holding,
-            "position_pct": round(_safe_num(stock.get("position_pct")), 4),
+            "position_pct": round(pos_pct, 4),
             "target_position_pct": stock.get("target_position_pct", stock.get("target_pct")),
             "cost": _safe_num(stock.get("cost")),
             "entry_exit_points": ee,
