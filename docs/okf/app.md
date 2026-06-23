@@ -17,7 +17,7 @@ To improve codebase maintainability and readability, the app is split into funct
 - **`MainScreen.kt`**: The dashboard controller that manages global states, connects with the refresh service, triggers background committee evaluations, and routes actions to appropriate dialog panels.
 - **`Helpers.kt`**: Houses global utility functions, extension functions, file I/O caching, and system notification handlers.
 - **`StockCard.kt`**: Contains the visual representations of holding and watchlist cards, complete with swipe-to-dismiss actions for trade execution and deletion.
-- **`SettingsDialog.kt`**: Manages server connection settings, crawler schedules, auto-refresh triggers, and backup imports/exports.
+- **`SettingsDialog.kt`**: Manages server connection settings, crawler schedules, auto-refresh triggers, account cash/T+2 cash corrections, and exit parameter optimizations backup imports.
 - **`NewsDialog.kt`**: Renders weekend news summaries fetched from the backend server.
 - **`SelectionStockDialog.kt`**: Lists daily screened candidates with options to track or buy.
 - **`CommitteeAnalysisDialog.kt`**: Visualizes local or remote multi-agent debate tabs (Macro, Quant, Risk, CIO) and triggers live Server-Sent Events (SSE) updates.
