@@ -1,6 +1,6 @@
 ---
 okf_version: "0.1"
-timestamp: 2026-06-21T20:46:00Z
+timestamp: 2026-06-23T07:58:00Z
 ---
 
 # openInvest Knowledge Catalog
@@ -14,3 +14,4 @@ Welcome to the openInvest Open Knowledge Format (OKF) catalog. This catalog prov
 - [Unified Market Data Layer](market_data.md)
 - [System Execution Paths](execution_paths.md)
 - [Data Model & Memory](data_model.md)
+- [Android App Client](app.md)
