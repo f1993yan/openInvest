@@ -865,6 +865,248 @@ async def get_monitor_config():
         raise HTTPException(status_code=500, detail=f"Failed to read monitor config: {str(e)}")
 
 
+# ============ Holdings / Watchlist CRUD ============
+
+@app.post("/api/holdings")
+async def add_holding_api(body: Dict[str, Any] = Body(...)):
+    """新增持仓或自选标的。如果 is_tracking_only=True 则放入 watchlist，否则放入 holdings。"""
+    try:
+        symbol = str(body.get("symbol") or "").strip().upper()
+        if not symbol:
+            raise HTTPException(status_code=400, detail="symbol 不能为空")
+        
+        name = str(body.get("display_name") or body.get("name") or symbol).strip()
+        is_tracking_only = bool(body.get("is_tracking_only", True))
+        sector = str(body.get("channel") or body.get("sector") or "").strip()
+        market = str(body.get("market") or "a").strip().lower()
+        units = float(body.get("units") or 0.0)
+        cost = float(body.get("avg_cost") or body.get("cost") or 0.0)
+        
+        if not MONITOR_CONFIG_PATH.exists():
+            raise HTTPException(status_code=500, detail="配置文件不存在")
+        
+        config = json.loads(MONITOR_CONFIG_PATH.read_text(encoding="utf-8"))
+        holdings = config.get("holdings", [])
+        watchlist = config.get("watchlist", [])
+        
+        # Check if already exists (case-insensitive)
+        in_holdings = any(str(h.get("symbol")).strip().upper() == symbol for h in holdings)
+        in_watchlist = any(str(w.get("symbol")).strip().upper() == symbol for w in watchlist)
+        
+        if in_holdings or in_watchlist:
+            return {"ok": True, "message": "已在持仓或自选列表中", "duplicate": True}
+        
+        if is_tracking_only:
+            # Add to watchlist
+            watchlist.append({
+                "symbol": symbol,
+                "name": name,
+                "market": market,
+                "sector": sector,
+                "industry": sector,
+                "position_pct": 0.0,
+                "cost": 0.0
+            })
+        else:
+            # Add to holdings
+            holdings.append({
+                "symbol": symbol,
+                "name": name,
+                "market": market,
+                "sector": sector,
+                "industry": sector,
+                "position_pct": 0.0,
+                "cost": cost,
+                "units": units,
+                "min_lot_size": 100
+            })
+            
+        config["holdings"] = holdings
+        config["watchlist"] = watchlist
+        
+        # Save config
+        MONITOR_CONFIG_PATH.write_text(json.dumps(config, ensure_ascii=False, indent=2), encoding="utf-8")
+        
+        # Re-initialize ledger
+        try:
+            from db.account_ledger import get_account_ledger
+            _ledger = get_account_ledger()
+            _ledger.initialize_from_monitor_config(config, reset=True)
+            log.info(f"Ledger re-initialized after adding symbol: {symbol}")
+        except Exception as le:
+            log.warning(f"Failed to re-initialize ledger: {le}")
+            
+        # Delete stale snapshot
+        try:
+            from scripts.monitor_window_constants import DEFAULT_SNAPSHOT
+            if DEFAULT_SNAPSHOT.exists():
+                DEFAULT_SNAPSHOT.unlink()
+                log.info("Stale snapshot deleted after adding symbol")
+        except Exception as se:
+            log.warning(f"Failed to delete snapshot: {se}")
+            
+        return {"ok": True, "message": "已加入关注列表" if is_tracking_only else "已加入持仓列表"}
+    except Exception as e:
+        if isinstance(e, HTTPException):
+            raise e
+        raise HTTPException(status_code=500, detail=f"Failed to add holding: {str(e)}")
+
+
+@app.put("/api/holdings/{symbol}")
+async def update_holding_api(symbol: str, body: Dict[str, Any] = Body(...)):
+    """更新持仓或自选状态。如果 is_tracking_only=True 则将标的移入/保留在 watchlist，否则移入/保留在 holdings。"""
+    try:
+        symbol = symbol.strip().upper()
+        units = float(body.get("units") or 0.0)
+        cost = float(body.get("avg_cost") or body.get("cost") or 0.0)
+        is_tracking_only = bool(body.get("is_tracking_only", True))
+        
+        if not MONITOR_CONFIG_PATH.exists():
+            raise HTTPException(status_code=500, detail="配置文件不存在")
+            
+        config = json.loads(MONITOR_CONFIG_PATH.read_text(encoding="utf-8"))
+        holdings = config.get("holdings", [])
+        watchlist = config.get("watchlist", [])
+        
+        # Find item in either list
+        target_item = None
+        found_in_holdings = False
+        
+        for h in holdings:
+            if str(h.get("symbol")).strip().upper() == symbol:
+                target_item = h
+                found_in_holdings = True
+                break
+        
+        if not target_item:
+            for w in watchlist:
+                if str(w.get("symbol")).strip().upper() == symbol:
+                    target_item = w
+                    found_in_holdings = False
+                    break
+                    
+        if not target_item:
+            raise HTTPException(status_code=404, detail=f"未找到标的: {symbol}")
+            
+        # Remove target_item from its current list
+        if found_in_holdings:
+            holdings = [h for h in holdings if str(h.get("symbol")).strip().upper() != symbol]
+        else:
+            watchlist = [w for w in watchlist if str(w.get("symbol")).strip().upper() != symbol]
+            
+        # Update fields
+        target_item["units"] = units
+        target_item["cost"] = cost
+        
+        # Calculate position_pct if moving to holdings and we have total assets
+        total_assets = config.get("total_assets", 0.0)
+        if not is_tracking_only and total_assets > 0:
+            target_item["position_pct"] = (units * cost) / total_assets * 100.0
+        else:
+            target_item["position_pct"] = 0.0
+            
+        if is_tracking_only:
+            # Move to / keep in watchlist
+            target_item.pop("units", None)
+            target_item["cost"] = 0.0
+            target_item["position_pct"] = 0.0
+            watchlist.append(target_item)
+        else:
+            # Move to / keep in holdings
+            if "min_lot_size" not in target_item:
+                target_item["min_lot_size"] = 100
+            holdings.append(target_item)
+            
+        config["holdings"] = holdings
+        config["watchlist"] = watchlist
+        
+        # Save config
+        MONITOR_CONFIG_PATH.write_text(json.dumps(config, ensure_ascii=False, indent=2), encoding="utf-8")
+        
+        # Re-initialize ledger
+        try:
+            from db.account_ledger import get_account_ledger
+            _ledger = get_account_ledger()
+            _ledger.initialize_from_monitor_config(config, reset=True)
+            log.info(f"Ledger re-initialized after updating symbol: {symbol}")
+        except Exception as le:
+            log.warning(f"Failed to re-initialize ledger: {le}")
+            
+        # Delete stale snapshot
+        try:
+            from scripts.monitor_window_constants import DEFAULT_SNAPSHOT
+            if DEFAULT_SNAPSHOT.exists():
+                DEFAULT_SNAPSHOT.unlink()
+                log.info("Stale snapshot deleted after updating symbol")
+        except Exception as se:
+            log.warning(f"Failed to delete snapshot: {se}")
+            
+        return {"ok": True, "message": "持仓数据更新成功"}
+    except Exception as e:
+        if isinstance(e, HTTPException):
+            raise e
+        raise HTTPException(status_code=500, detail=f"Failed to update holding: {str(e)}")
+
+
+@app.delete("/api/holdings/{symbol}")
+async def delete_holding_api(symbol: str):
+    """删除持仓或自选标的。"""
+    try:
+        symbol = symbol.strip().upper()
+        if not MONITOR_CONFIG_PATH.exists():
+            raise HTTPException(status_code=500, detail="配置文件不存在")
+            
+        config = json.loads(MONITOR_CONFIG_PATH.read_text(encoding="utf-8"))
+        holdings = config.get("holdings", [])
+        watchlist = config.get("watchlist", [])
+        
+        # Find item in either list
+        in_holdings = any(str(h.get("symbol")).strip().upper() == symbol for h in holdings)
+        in_watchlist = any(str(w.get("symbol")).strip().upper() == symbol for w in watchlist)
+        
+        if not in_holdings and not in_watchlist:
+            raise HTTPException(status_code=404, detail=f"标的 {symbol} 不存在")
+            
+        if in_holdings:
+            # Check if units > 0 (avoid deleting real assets with units)
+            target = next(h for h in holdings if str(h.get("symbol")).strip().upper() == symbol)
+            if float(target.get("units", 0) or 0) > 0:
+                raise HTTPException(status_code=400, detail="持仓股数大于0，不能直接删除。请先平仓或设股数为0")
+            holdings = [h for h in holdings if str(h.get("symbol")).strip().upper() != symbol]
+        else:
+            watchlist = [w for w in watchlist if str(w.get("symbol")).strip().upper() != symbol]
+            
+        config["holdings"] = holdings
+        config["watchlist"] = watchlist
+        
+        # Save config
+        MONITOR_CONFIG_PATH.write_text(json.dumps(config, ensure_ascii=False, indent=2), encoding="utf-8")
+        
+        # Re-initialize ledger
+        try:
+            from db.account_ledger import get_account_ledger
+            _ledger = get_account_ledger()
+            _ledger.initialize_from_monitor_config(config, reset=True)
+            log.info(f"Ledger re-initialized after deleting symbol: {symbol}")
+        except Exception as le:
+            log.warning(f"Failed to re-initialize ledger: {le}")
+            
+        # Delete stale snapshot
+        try:
+            from scripts.monitor_window_constants import DEFAULT_SNAPSHOT
+            if DEFAULT_SNAPSHOT.exists():
+                DEFAULT_SNAPSHOT.unlink()
+                log.info("Stale snapshot deleted after deleting symbol")
+        except Exception as se:
+            log.warning(f"Failed to delete snapshot: {se}")
+            
+        return {"ok": True, "message": "已删除关注"}
+    except Exception as e:
+        if isinstance(e, HTTPException):
+            raise e
+        raise HTTPException(status_code=500, detail=f"Failed to delete holding: {str(e)}")
+
+
 @app.post("/api/config/exit_params")
 async def import_exit_params(params: Dict[str, Any] = Body(...)):
     """导入/覆盖每周止盈参数配置文件 (weekly_exit_param_optimization.json)"""

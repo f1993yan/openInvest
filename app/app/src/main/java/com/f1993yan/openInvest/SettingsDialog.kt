@@ -81,6 +81,23 @@ fun SettingsDialog(
     var testingConnection by remember { mutableStateOf(false) }
     var clearingCache by remember { mutableStateOf(false) }
     var showSyncConfirmDialog by remember { mutableStateOf(false) }
+    var cashStr by remember { mutableStateOf("") }
+    var t2CashStr by remember { mutableStateOf("") }
+
+    LaunchedEffect(Unit) {
+        val configStr = readLocalFile(context, "market_monitor_config.json")
+        if (configStr != null) {
+            try {
+                val json = org.json.JSONObject(configStr)
+                val cash = json.optDouble("cash", 0.0)
+                val t2 = json.optDouble("t2_pending_cash", 0.0)
+                cashStr = cash.toString()
+                t2CashStr = t2.toString()
+            } catch (e: Exception) {
+                Log.e("SettingsDialog", "Failed to parse cash/t2_pending_cash from config", e)
+            }
+        }
+    }
 
     val permissionLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.RequestPermission()
@@ -91,30 +108,6 @@ fun SettingsDialog(
         }
     }
 
-    val monitorConfigPicker = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.GetContent()
-    ) { uri ->
-        uri?.let {
-            val content = readTextFromUri(context, it)
-            if (content != null) {
-                saveLocalFile(context, "market_monitor_config.json", content)
-                onImportConfig(content)
-                NetworkClient.uploadMonitorConfig(content) { res ->
-                    res.fold(
-                        onSuccess = {
-                            Toast.makeText(context, "仓位配置文件导入且上传成功！", Toast.LENGTH_LONG).show()
-                            onRefresh()
-                        },
-                        onFailure = { err ->
-                            Toast.makeText(context, "仓位配置已保存至本地，但上传失败: ${err.message}", Toast.LENGTH_LONG).show()
-                        }
-                    )
-                }
-            } else {
-                Toast.makeText(context, "读取仓位配置文件失败", Toast.LENGTH_SHORT).show()
-            }
-        }
-    }
 
     val exitParamsPicker = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.GetContent()
@@ -513,37 +506,17 @@ fun SettingsDialog(
 
                     Text("导入配置文件", fontSize = 13.sp, fontWeight = FontWeight.Bold, color = IndigoPrimary)
                     Spacer(modifier = Modifier.height(6.dp))
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(10.dp)
+                    Button(
+                        onClick = {
+                            exitParamsPicker.launch("application/json")
+                        },
+                        colors = ButtonDefaults.buttonColors(containerColor = IndigoPrimary),
+                        shape = RoundedCornerShape(10.dp),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(40.dp)
                     ) {
-                        Button(
-                            onClick = {
-                                monitorConfigPicker.launch("application/json")
-                            },
-                            colors = ButtonDefaults.buttonColors(containerColor = IndigoPrimary),
-                            shape = RoundedCornerShape(10.dp),
-                            contentPadding = PaddingValues(horizontal = 4.dp, vertical = 2.dp),
-                            modifier = Modifier
-                                .weight(1f)
-                                .height(40.dp)
-                        ) {
-                            Text("导入仓位配置", color = Color.White, fontSize = 11.sp, fontWeight = FontWeight.Bold)
-                        }
-
-                        Button(
-                            onClick = {
-                                exitParamsPicker.launch("application/json")
-                            },
-                            colors = ButtonDefaults.buttonColors(containerColor = IndigoPrimary),
-                            shape = RoundedCornerShape(10.dp),
-                            contentPadding = PaddingValues(horizontal = 4.dp, vertical = 2.dp),
-                            modifier = Modifier
-                                .weight(1f)
-                                .height(40.dp)
-                        ) {
-                            Text("导入每周止盈配置", color = Color.White, fontSize = 11.sp, fontWeight = FontWeight.Bold)
-                        }
+                        Text("导入每周止盈配置", color = Color.White, fontSize = 11.sp, fontWeight = FontWeight.Bold)
                     }
 
                     Spacer(modifier = Modifier.height(14.dp))
@@ -675,6 +648,90 @@ fun SettingsDialog(
                         ) {
                             Text("同步云端配置", color = Color.White, fontSize = 11.sp, fontWeight = FontWeight.Bold)
                         }
+                    }
+
+                    Spacer(modifier = Modifier.height(14.dp))
+                    HorizontalDivider(color = SlateBorder, thickness = 1.dp)
+                    Spacer(modifier = Modifier.height(14.dp))
+
+                    Text("账户资金修正", fontSize = 13.sp, fontWeight = FontWeight.Bold, color = IndigoPrimary)
+                    Spacer(modifier = Modifier.height(6.dp))
+                    OutlinedTextField(
+                        value = cashStr,
+                        onValueChange = { cashStr = it },
+                        modifier = Modifier.fillMaxWidth(),
+                        label = { Text("可用现金 (CNY)") },
+                        singleLine = true,
+                        shape = RoundedCornerShape(10.dp),
+                        colors = OutlinedTextFieldDefaults.colors(
+                            focusedBorderColor = IndigoPrimary,
+                            focusedLabelColor = IndigoPrimary,
+                            focusedTextColor = TextPrimary,
+                            unfocusedTextColor = TextPrimary
+                        )
+                    )
+                    Spacer(modifier = Modifier.height(8.dp))
+                    OutlinedTextField(
+                        value = t2CashStr,
+                        onValueChange = { t2CashStr = it },
+                        modifier = Modifier.fillMaxWidth(),
+                        label = { Text("T+2 待交收资金 (CNY)") },
+                        singleLine = true,
+                        shape = RoundedCornerShape(10.dp),
+                        colors = OutlinedTextFieldDefaults.colors(
+                            focusedBorderColor = IndigoPrimary,
+                            focusedLabelColor = IndigoPrimary,
+                            focusedTextColor = TextPrimary,
+                            unfocusedTextColor = TextPrimary
+                        )
+                    )
+                    Spacer(modifier = Modifier.height(8.dp))
+                    var savingCash by remember { mutableStateOf(false) }
+                    Button(
+                        onClick = {
+                            val cashVal = cashStr.toDoubleOrNull()
+                            val t2Val = t2CashStr.toDoubleOrNull()
+                            if (cashVal == null || t2Val == null) {
+                                Toast.makeText(context, "请输入有效的数字金额", Toast.LENGTH_SHORT).show()
+                                return@Button
+                            }
+                            savingCash = true
+                            val configStr = readLocalFile(context, "market_monitor_config.json")
+                            if (configStr != null) {
+                                try {
+                                    val json = org.json.JSONObject(configStr)
+                                    json.put("cash", cashVal)
+                                    json.put("t2_pending_cash", t2Val)
+                                    val newContent = json.toString(2)
+                                    saveLocalFile(context, "market_monitor_config.json", newContent)
+                                    onImportConfig(newContent)
+                                    NetworkClient.uploadMonitorConfig(newContent) { res ->
+                                        savingCash = false
+                                        res.fold(
+                                            onSuccess = {
+                                                Toast.makeText(context, "账户资金已更新并同步到服务器！", Toast.LENGTH_SHORT).show()
+                                                onRefresh()
+                                            },
+                                            onFailure = { err ->
+                                                Toast.makeText(context, "资金已保存至本地，但同步服务器失败: ${err.message}", Toast.LENGTH_LONG).show()
+                                            }
+                                        )
+                                    }
+                                } catch (e: Exception) {
+                                    savingCash = false
+                                    Toast.makeText(context, "更新资金配置失败: ${e.message}", Toast.LENGTH_LONG).show()
+                                }
+                            } else {
+                                savingCash = false
+                                Toast.makeText(context, "未找到本地配置文件，请先从云端同步", Toast.LENGTH_LONG).show()
+                            }
+                        },
+                        enabled = !savingCash,
+                        colors = ButtonDefaults.buttonColors(containerColor = IndigoPrimary),
+                        shape = RoundedCornerShape(10.dp),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Text(if (savingCash) "正在更新..." else "确认修正账户资金", color = Color.White, fontWeight = FontWeight.Bold)
                     }
 
                     Spacer(modifier = Modifier.height(14.dp))
