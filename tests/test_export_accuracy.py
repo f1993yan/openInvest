@@ -203,3 +203,40 @@ def test_build_summary_writes_file(tmp_path):
     raw = out.read_text(encoding="utf-8")
     for forbidden in ("symbol", "threshold", "NDQ", "GC=F"):
         assert forbidden not in raw
+
+
+def test_suppress_small_samples():
+    """测试小样本命中率抹去逻辑"""
+    from scripts.export_accuracy import _suppress_small_samples
+
+    # 场景 1: sample_size < 30 -> 整体和各方向 rate 均置为 None
+    window_small = {
+        "direction_hit_rate": 0.8,
+        "sample_size": 25,
+        "by_direction": {
+            "bullish": {"hit": 10, "total": 15, "rate": 0.6667},
+            "bearish": {"hit": 10, "total": 10, "rate": 1.0}
+        }
+    }
+    res_small = _suppress_small_samples(window_small)
+    assert res_small["direction_hit_rate"] is None
+    assert res_small["by_direction"]["bullish"]["rate"] is None
+    assert res_small["by_direction"]["bearish"]["rate"] is None
+    # 校验计数未被破坏
+    assert res_small["sample_size"] == 25
+    assert res_small["by_direction"]["bullish"]["total"] == 15
+    assert res_small["by_direction"]["bearish"]["total"] == 10
+
+    # 场景 2: sample_size >= 30, 但某方向 total < 30 -> 整体保留，小样本方向置为 None
+    window_mixed = {
+        "direction_hit_rate": 0.9,
+        "sample_size": 35,
+        "by_direction": {
+            "bullish": {"hit": 30, "total": 30, "rate": 1.0},
+            "bearish": {"hit": 2, "total": 5, "rate": 0.4}
+        }
+    }
+    res_mixed = _suppress_small_samples(window_mixed)
+    assert res_mixed["direction_hit_rate"] == 0.9
+    assert res_mixed["by_direction"]["bullish"]["rate"] == 1.0
+    assert res_mixed["by_direction"]["bearish"]["rate"] is None

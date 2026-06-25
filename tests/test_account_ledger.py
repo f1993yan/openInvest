@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta
+import json
 
 import pytest
 
@@ -180,12 +181,13 @@ def test_hk_sell_proceeds_are_t2_pending_not_available_cash(tmp_path):
     db = AccountLedger(str(tmp_path / "accounts.db"))
     db.initialize_from_monitor_config(_hk_config())
 
+    trade_date_str = datetime.today().date().isoformat()
     trade = db.apply_user_trade(
         symbol="09988",
         direction="SELL",
         units=100,
         price=90,
-        trade_date="2026-06-19",
+        trade_date=trade_date_str,
     )
     assert trade.cash_delta == pytest.approx(0)
 
@@ -195,7 +197,7 @@ def test_hk_sell_proceeds_are_t2_pending_not_available_cash(tmp_path):
     assert summary["t2_pending_cash_cny"] == pytest.approx(9000)
     assert summary["total_cash_cny"] == pytest.approx(19000)
 
-    rows = db.snapshot_daily_pnl(prices={"09988": 90}, trade_date="2026-06-19")
+    rows = db.snapshot_daily_pnl(prices={"09988": 90}, trade_date=trade_date_str)
     real = next(r for r in rows if r["account"] == "real")
     assert real["cash_cny"] == pytest.approx(10000)
     assert real["t2_pending_cash_cny"] == pytest.approx(9000)
@@ -203,7 +205,7 @@ def test_hk_sell_proceeds_are_t2_pending_not_available_cash(tmp_path):
 
 
 def test_due_hk_t2_cash_is_released_to_available_cash(tmp_path):
-    trade_date = "2026-06-19"
+    trade_date = datetime.today().date().isoformat()
     settle_date = _settlement_date(trade_date, sessions=2, calendar_code="XHKG")
     before_settle_date = (datetime.strptime(settle_date, "%Y-%m-%d") - timedelta(days=1)).date().isoformat()
     db = AccountLedger(str(tmp_path / "accounts.db"))
@@ -223,3 +225,22 @@ def test_due_hk_t2_cash_is_released_to_available_cash(tmp_path):
     summary = db.account_summary("real")
     assert summary["cash_cny"] == pytest.approx(19000)
     assert summary["t2_pending_cash_cny"] == pytest.approx(0)
+
+
+def test_temp_ledger_does_not_sync_project_config(tmp_path, monkeypatch):
+    project_root = tmp_path / "project"
+    config_dir = project_root / "jobs"
+    config_dir.mkdir(parents=True)
+    config_path = config_dir / "market_monitor_config.json"
+    original = _config()
+    config_path.write_text(json.dumps(original, ensure_ascii=False), encoding="utf-8")
+
+    import db.account_ledger as account_ledger
+
+    monkeypatch.setattr(account_ledger, "__file__", str(project_root / "db" / "account_ledger.py"))
+    db = AccountLedger(str(tmp_path / "isolated_accounts.db"))
+    db.initialize_from_monitor_config(_config())
+    db.apply_user_trade(symbol="000063", direction="BUY", units=100, price=30)
+
+    persisted = json.loads(config_path.read_text(encoding="utf-8"))
+    assert persisted == original

@@ -325,6 +325,13 @@ sequenceDiagram
 
 `sync_real_account_from_config` 只用于初始化和刷新元数据，不会覆盖已有真实账户的股数、均价或现金。这样可以长期比较：委员会指标是否真的优于用户真实执行。
 
+当前真实持仓的单一可信源是 `AccountLedger` 的 `real` 账户：
+
+- 桌面窗口“我已遵循买入/卖出”、手动交易面板、加入/取消关注和 `/api/accounts/real/trades` 都先写 ledger。
+- 默认生产 ledger 写入后会立刻同步 `jobs/market_monitor_config.json` 和 `data/market_monitor/latest_window.json`，让旧配置读取路径和主窗口快照跟账本保持一致。
+- 临时测试账本或工具脚本自定义 DB 路径时不会同步真实配置，避免测试数据污染本地持仓。
+- 盘中监控每个标的一次委员会调用会同时传入 `real` 和 `committee` 的账户上下文，分别得到两套独立评估；窗口和 HTTP `/api/committee` 只展示真实账户结果，影子账户结果只用于 `committee` 账本自动执行和后续胜率复盘。
+
 ## 新闻机会发现
 
 `jobs.weekend_news_crawl` 的目标是寻找下一个可能的热门股票，而不是只评估当前持仓。它会：

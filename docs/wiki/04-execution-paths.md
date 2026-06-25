@@ -152,6 +152,8 @@ start-invest-backend.bat
 核心原则：
 
 - `jobs.market_monitor_quotes.call_committee()` 直接调用 `backend.server.run_committee_direct()`，不通过 `http://127.0.0.1:8766`。
+- 每个标的一次 Direct 调用可以同时携带真实账户和影子账户上下文：`position_pct/cash/holdings` 属于 `real`，`shadow_position_pct/shadow_cash/shadow_holdings` 属于 `committee`。
+- 返回给主窗口、报告和 HTTP `/api/committee` 的是真实账户评估；`shadow_result` 只在 Python 内部给 `jobs.market_monitor_runtime` 执行影子账户，不展示给用户。
 - `jobs.market_monitor_runtime.run_monitor_round()` 是一轮盘中监控的唯一编排入口，负责行情、委员会、账本、新闻、告警和快照输出。
 - `scripts/monitor_desktop_window.py` 只消费 `data/market_monitor/latest_window.json`，窗口跟随委员会/选股/新闻输出文件变化刷新，不再单独定义业务刷新频率。
 - 弹框默认关闭，稳定窗口是主交互面；只有显式开启相关环境变量时才恢复旧 Windows 弹框。
@@ -175,6 +177,7 @@ start-invest-backend.bat
 - 持仓止盈止损来自 `position_exit_plan`，服务于“已经持有后如何守纪律”，锚定成本和板块参数，不能拿来反推买入点。
 - `policy_quality_score` 是 risk-adjusted expected utility，不是裸胜率：胜率先用 Wilson 下界保守化，再按卖出样本数可靠性收缩；监控只把它作为已持仓 `TRIM/SELL` 的小幅 likelihood-ratio 校准。
 - 周度参数优化的行业映射会先用更像浏览器的东方财富直连，失败后尝试 AkShare，再读 `data/sector_cache.json`；缓存仍缺失时才使用本地配置里的 `sector`/`industry`。
+- `AccountLedger(real)` 是持仓单一可信源；ledger 更新后同步 config/snapshot，config 只作为旧路径兼容和新标的首次播种来源。
 
 ---
 

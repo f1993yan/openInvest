@@ -257,18 +257,26 @@ def _remove_from_watchlist(symbol: str) -> str:
     symbol = str(symbol or "").strip()
     if not symbol:
         raise ValueError("缺少标的代码")
-    from jobs.market_monitor import CONFIG_PATH, load_config
+    from jobs.market_monitor import load_config
+    from db.account_ledger import AccountLedger, REAL_ACCOUNT
 
     config = load_config()
-    holdings = list(config.get("holdings") or [])
-    if any(str(item.get("symbol") or "").strip() == symbol for item in holdings):
-        raise ValueError("当前标的是持仓，不能从主窗口取消关注")
-    watchlist = list(config.get("watchlist") or [])
-    remaining = [item for item in watchlist if str(item.get("symbol") or "").strip() != symbol]
-    if len(remaining) == len(watchlist):
+    ledger = AccountLedger()
+    ledger.ensure_initialized(config)
+    target = next(
+        (
+            item
+            for item in ledger.list_holdings(REAL_ACCOUNT)
+            if str(item.get("symbol") or "").strip() == symbol
+        ),
+        None,
+    )
+    if not target:
         return "该标的不在关注列表"
-    config["watchlist"] = remaining
-    CONFIG_PATH.write_text(json.dumps(config, ensure_ascii=False, indent=2), encoding="utf-8")
+    if _safe_num(target.get("units")) > 0:
+        raise ValueError("当前标的是持仓，不能从主窗口取消关注")
+    if not ledger.delete_holding(REAL_ACCOUNT, symbol):
+        raise ValueError("取消关注失败")
     return f"已取消关注: {symbol}"
 
 

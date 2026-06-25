@@ -43,6 +43,8 @@ class ExecutedTrade:
 class AccountLedger:
     def __init__(self, db_path: Optional[str] = None) -> None:
         path = db_path or DB_PATH
+        self.db_path = os.path.abspath(path)
+        self._external_sync_enabled = self.db_path == os.path.abspath(DB_PATH)
         os.makedirs(os.path.dirname(path), exist_ok=True)
         self.conn = sqlite3.connect(path, check_same_thread=False, timeout=5.0)
         self.conn.row_factory = sqlite3.Row
@@ -188,6 +190,7 @@ class AccountLedger:
                         ),
                     )
             self.conn.commit()
+            self.sync_to_config_and_snapshot()
             return True
 
     def ensure_initialized(self, config: Dict[str, Any]) -> None:
@@ -323,6 +326,8 @@ class AccountLedger:
                     (now, row["id"]),
                 )
             self.conn.commit()
+            if account == REAL_ACCOUNT or account is None:
+                self.sync_to_config_and_snapshot()
             return released
 
     def stocks_for_committee_input(self, config: Dict[str, Any], account: str = REAL_ACCOUNT) -> List[Dict[str, Any]]:
@@ -623,6 +628,8 @@ class AccountLedger:
                  source, verdict, confidence, note),
             )
             self.conn.commit()
+            if account == REAL_ACCOUNT:
+                self.sync_to_config_and_snapshot()
         return ExecutedTrade(
             account=account,
             symbol=symbol,
@@ -697,6 +704,199 @@ class AccountLedger:
     def _has_accounts(self) -> bool:
         row = self.conn.execute("SELECT COUNT(*) AS n FROM accounts").fetchone()
         return bool(row and row["n"] >= 2)
+
+    def add_holding(
+        self,
+        account: str,
+        symbol: str,
+        name: str,
+        market: str,
+        sector: str,
+        industry: str,
+        units: float,
+        cost: float,
+        min_lot_size: int = 100,
+    ) -> bool:
+        _validate_account(account)
+        symbol = symbol.strip().upper()
+        with self._lock:
+            existing = self.conn.execute(
+                "SELECT 1 FROM holdings WHERE account = ? AND UPPER(symbol) = ?",
+                (account, symbol),
+            ).fetchone()
+            if existing:
+                return False
+            self.conn.execute(
+                """INSERT INTO holdings
+                   (account, symbol, name, market, sector, industry, units, avg_cost,
+                    cost_currency, min_lot_size)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'CNY', ?)""",
+                (account, symbol, name, market, sector, industry, units, cost, min_lot_size),
+            )
+            self.conn.commit()
+            if account == REAL_ACCOUNT:
+                self.sync_to_config_and_snapshot()
+            return True
+
+    def update_holding(
+        self,
+        account: str,
+        symbol: str,
+        units: float,
+        cost: float,
+        is_tracking_only: bool = False,
+    ) -> bool:
+        _validate_account(account)
+        symbol = symbol.strip().upper()
+        if is_tracking_only:
+            units = 0.0
+            cost = 0.0
+        with self._lock:
+            existing = self.conn.execute(
+                "SELECT 1 FROM holdings WHERE account = ? AND UPPER(symbol) = ?",
+                (account, symbol),
+            ).fetchone()
+            if not existing:
+                return False
+            self.conn.execute(
+                "UPDATE holdings SET units = ?, avg_cost = ? WHERE account = ? AND UPPER(symbol) = ?",
+                (units, cost, account, symbol),
+            )
+            self.conn.commit()
+            if account == REAL_ACCOUNT:
+                self.sync_to_config_and_snapshot()
+            return True
+
+    def delete_holding(self, account: str, symbol: str) -> bool:
+        _validate_account(account)
+        symbol = symbol.strip().upper()
+        with self._lock:
+            existing = self.conn.execute(
+                "SELECT 1 FROM holdings WHERE account = ? AND UPPER(symbol) = ?",
+                (account, symbol),
+            ).fetchone()
+            if not existing:
+                return False
+            self.conn.execute(
+                "DELETE FROM holdings WHERE account = ? AND UPPER(symbol) = ?",
+                (account, symbol),
+            )
+            self.conn.commit()
+            if account == REAL_ACCOUNT:
+                self.sync_to_config_and_snapshot()
+            return True
+
+    def correct_cash(self, account: str, cash: float, t2_pending: Optional[float] = None) -> None:
+        """Directly correct available cash and optionally T+2 pending cash in the ledger."""
+        _validate_account(account)
+        with self._lock:
+            now = _now()
+            self.conn.execute(
+                "UPDATE accounts SET cash_cny = ?, updated_at = ? WHERE account = ?",
+                (cash, now, account),
+            )
+            if t2_pending is not None:
+                self.conn.execute(
+                    "DELETE FROM cash_settlements WHERE account = ? AND status = 'pending'",
+                    (account,),
+                )
+                if t2_pending > 0:
+                    today = date.today().isoformat()
+                    settle_date = _settlement_date(today, sessions=2, calendar_code="XHKG")
+                    self.conn.execute(
+                        """INSERT INTO cash_settlements
+                           (account, symbol, amount_cny, trade_date, settle_date, source, status, created_at)
+                           VALUES (?, 'CASH_CORRECTION', ?, ?, ?, 'cash_correction', 'pending', ?)""",
+                        (account, t2_pending, today, settle_date, now),
+                    )
+            self.conn.commit()
+            if account == REAL_ACCOUNT:
+                self.sync_to_config_and_snapshot()
+
+    def sync_to_config_and_snapshot(self) -> None:
+        """Sync real account cash, pending cash, holdings, and watchlist to config and snapshot."""
+        if not self._external_sync_enabled:
+            return
+        # Paths
+        project_root = Path(os.path.dirname(__file__)).parent
+        config_path = project_root / "jobs" / "market_monitor_config.json"
+        snapshot_path = project_root / "data" / "market_monitor" / "latest_window.json"
+
+        if not config_path.exists():
+            return
+
+        with self._lock:
+            try:
+                config = json.loads(config_path.read_text(encoding="utf-8"))
+            except Exception:
+                return
+
+            total_assets = float(config.get("total_assets", 0.0) or 0.0)
+
+            # Get cash from ledger
+            summary = self.account_summary(REAL_ACCOUNT)
+            config["cash"] = round(float(summary.get("available_cash_cny", 0.0) or 0.0), 2)
+            config["t2_pending_cash"] = round(float(summary.get("t2_pending_cash_cny", 0.0) or 0.0), 2)
+
+            # Create map of existing config details (holdings & watchlist) to preserve target_position_pct, sector_source, etc.
+            existing_details = {}
+            for s in list(config.get("holdings", []) or []) + list(config.get("watchlist", []) or []):
+                sym = str(s.get("symbol")).strip().upper()
+                if sym:
+                    existing_details[sym] = s
+
+            # Construct new holdings and watchlist lists from ledger
+            new_holdings = []
+            new_watchlist = []
+
+            ledger_holdings = self.list_holdings(REAL_ACCOUNT)
+            for h in ledger_holdings:
+                sym = str(h["symbol"]).strip().upper()
+                # Start with existing config item details if present to preserve other keys
+                item = dict(existing_details.get(sym, {}))
+
+                item["symbol"] = h["symbol"]
+                item["name"] = h["name"] or item.get("name", h["symbol"])
+                item["market"] = h["market"] or item.get("market", "a")
+                item["sector"] = h["sector"] or item.get("sector", "")
+                item["industry"] = h["industry"] or item.get("industry", "")
+                item["min_lot_size"] = int(h["min_lot_size"] or 100)
+
+                units = float(h["units"] or 0.0)
+                cost = float(h["avg_cost"] or 0.0)
+
+                if units > 0:
+                    item["units"] = units
+                    item["cost"] = cost
+                    item["position_pct"] = round((units * cost) / total_assets * 100.0, 4) if total_assets > 0 else 0.0
+                    new_holdings.append(item)
+                else:
+                    # watchlist item
+                    item.pop("units", None)
+                    item["cost"] = 0.0
+                    item["position_pct"] = 0.0
+                    new_watchlist.append(item)
+
+            config["holdings"] = new_holdings
+            config["watchlist"] = new_watchlist
+
+            # Write config to disk
+            config_path.write_text(json.dumps(config, ensure_ascii=False, indent=2), encoding="utf-8")
+
+            # Update snapshot
+            try:
+                from scripts.monitor_window_services import _load_config_snapshot
+                from jobs.market_monitor_snapshot import write_monitor_window_snapshot
+
+                snapshot = _load_config_snapshot("实时同步账本数据", source_path=snapshot_path)
+                write_monitor_window_snapshot(snapshot, snapshot_path)
+            except Exception:
+                # If it fails, delete snapshot so it's rebuilt on next load
+                if snapshot_path.exists():
+                    try:
+                        snapshot_path.unlink()
+                    except Exception:
+                        pass
 
 
 def _validate_account(account: str) -> None:

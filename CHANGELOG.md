@@ -2,20 +2,30 @@
 
 ## Unreleased (2026-06-19)
 
+### Improvements
+
+* **committee:** 盘中监控每个标的一次调用同时生成真实账户和委员会影子账户两套独立评估；真实账户结果用于窗口展示和用户决策，影子账户结果只给账本自动执行与后验胜率复盘使用。
+* **accuracy:** 吸收上游 2026-06-16 到 2026-06-23 的公开命中率红线：样本数低于 30 时保留 hit/total，但不公开具体 hit rate，避免小样本胜率被误读为稳定模型能力。
+
 ### Refactor
 
 * **market-monitor:** 将 `jobs/market_monitor.py` 从单文件大模块拆成入口 facade + 行情、通知、买卖点、风控护栏、告警优化、窗口快照和运行编排等职责模块，保留旧 `jobs.market_monitor` 导入路径兼容。
 * **exit-policy:** A 股止盈止损周度优化改为风险调整期望效用目标，卖出胜率使用 Wilson 下界和样本可靠性收缩，避免小样本裸胜率误导参数选择。
+* **account-ledger:** `db.account_ledger.AccountLedger` 成为真实持仓的单一可信源；用户交易、手动增删关注、现金/T+2修正优先写 `real` 账本，再由默认生产账本即时同步 `jobs/market_monitor_config.json` 和 `data/market_monitor/latest_window.json`。
 
 ### Bug Fixes
 
 * **market-monitor:** 修复 A 股持仓纪律止损的边界触发，持仓止损改为跌破锁定止损线才触发，避免价格刚好等于止损价时误报；止盈仍按达到目标价触发。
 * **exit-policy:** 东方财富行业映射新增浏览器请求头直连和 `data/sector_cache.json` 本地缓存；接口断连时先读缓存，再回退本地配置板块。
+* **committee:** 修复双账户重构时漏掉 regime 概率/条件收益统计导致优化器引用未定义变量的问题，并移除重复 asset 构造。
+* **monitor-window:** 选股加入关注和主窗口取消关注改为写入 `real` 账本，不再绕过账本直接改配置文件。
+* **account-ledger:** 临时/测试账本禁用外部 config/snapshot 同步，避免测试数据库或工具脚本污染真实持仓配置。
 
 ### Docs
 
 * **wiki:** 更新架构和执行路径文档，补充盘中监控的数据流、模块职责和止盈止损/入场出场边界，方便新对话快速定位代码逻辑。
 * **exit-policy:** 补充 `policy_quality_score`、保守卖出胜率、行业映射缓存和委员会影响边界说明。
+* **accounts:** 补充真实账户单源同步、影子账户评估隔离和上游 changelog 可借鉴的胜率数学纪律。
 
 ## Unreleased (2026-06-14)
 

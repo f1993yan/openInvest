@@ -134,6 +134,12 @@ def run_monitor_round():
     total_assets = config["total_assets"]
     cash = config["cash"]
     t2_pending_cash = float(config.get("t2_pending_cash", 0) or 0)
+
+    shadow_stocks = []
+    shadow_cash = cash
+    shadow_available_cash = cash
+    shadow_t2_pending = t2_pending_cash
+
     if ledger is not None:
         try:
             real_summary = ledger.account_summary("real")
@@ -141,6 +147,14 @@ def run_monitor_round():
             t2_pending_cash = float(real_summary.get("t2_pending_cash_cny", t2_pending_cash) or 0)
         except Exception:
             pass
+        try:
+            shadow_stocks = ledger.stocks_for_committee_input(config, account="committee")
+            committee_summary = ledger.account_summary("committee")
+            shadow_cash = float(committee_summary.get("cash_cny", cash) or cash)
+            shadow_available_cash = shadow_cash
+            shadow_t2_pending = float(committee_summary.get("t2_pending_cash_cny", 0) or 0)
+        except Exception as e:
+            log.warning(f"获取影子账户持仓/现金失败: {e}")
 
     all_stocks = holdings + watchlist
     all_symbols = [s["symbol"] for s in all_stocks]
@@ -190,6 +204,12 @@ def run_monitor_round():
                         lines.append(f"- [{item.src_name}] {title}")
                 news_text = "\n".join(lines)
 
+        # Get shadow stock details
+        shadow_stock = next((s for s in shadow_stocks if s["symbol"] == sym), None)
+        shadow_pos_pct = shadow_stock.get("position_pct", 0) if shadow_stock else 0.0
+        shadow_cost = shadow_stock.get("cost", 0) if shadow_stock else 0.0
+        shadow_other_holdings = build_holdings_list(shadow_stocks, sym) if shadow_stocks else []
+
         result = call_committee(
             symbol=sym,
             name=stock["name"],
@@ -207,6 +227,12 @@ def run_monitor_round():
             industry=stock.get("industry", ""),
             fundamentals=stock.get("fundamentals", {}),
             optimizer_review_enabled=config.get("optimizer_review_enabled", True),
+            shadow_position_pct=shadow_pos_pct,
+            shadow_cost=shadow_cost,
+            shadow_cash=shadow_cash,
+            shadow_holdings=shadow_other_holdings,
+            shadow_available_cash=shadow_available_cash,
+            shadow_t2_pending=shadow_t2_pending,
         )
         if result and result.get("success"):
             result.setdefault("symbol", sym)
@@ -225,22 +251,42 @@ def run_monitor_round():
             # 涨停追高护栏必须在下单前：改写 verdict→HOLD，使 apply_committee_result
             # 真正拦下影子买单（仅在 select_optimal_actionable_alerts 抑制提醒不够）。
             result = apply_limit_up_guard(result, price_info=price_info)
-            if ledger is not None:
-                try:
-                    trade = ledger.apply_committee_result(result, price=price_info["price"])
-                    if trade:
-                        log.info(
-                            f"影子账户执行 {trade.direction} {trade.symbol} "
-                            f"{trade.units:.0f}股 @{trade.price:.2f}"
-                        )
-                    elif result.get("execution_blocked"):
-                        log.info(
-                            f"执行保护: {sym} {stock['name']} "
-                            f"{result.get('optimizer_verdict_before_guard')} "
-                            f"alloc=¥{result.get('optimizer_alloc_cny_before_guard', 0):,.0f} -> HOLD"
-                        )
-                except Exception as e:
-                    log.warning(f"影子账户执行委员会建议失败 {sym}: {e}")
+
+            # Apply shadow result to ledger if available
+            shadow_res = result.get("shadow_result")
+            if shadow_res and shadow_res.get("success"):
+                shadow_res.setdefault("symbol", sym)
+                shadow_res.setdefault("name", stock["name"])
+                shadow_res.setdefault("market", stock.get("market", "a"))
+
+                # Apply guards to shadow result
+                shadow_res = apply_repeated_trade_guard(
+                    shadow_res,
+                    stock=shadow_stock or stock,
+                    current_price=price_info["price"],
+                    ledger=ledger,
+                    entry_exit_state=entry_exit_state_before_round,
+                )
+                shadow_res = apply_limit_up_guard(shadow_res, price_info=price_info)
+
+                if ledger is not None:
+                    try:
+                        trade = ledger.apply_committee_result(shadow_res, price=price_info["price"])
+                        if trade:
+                            log.info(
+                                f"影子账户执行 {trade.direction} {trade.symbol} "
+                                f"{trade.units:.0f}股 @{trade.price:.2f}"
+                            )
+                        elif shadow_res.get("execution_blocked"):
+                            log.info(
+                                f"影子执行保护: {sym} {stock['name']} "
+                                f"{shadow_res.get('optimizer_verdict_before_guard')} "
+                                f"alloc=¥{shadow_res.get('optimizer_alloc_cny_before_guard', 0):,.0f} -> HOLD"
+                            )
+                    except Exception as e:
+                        log.warning(f"影子账户执行委员会建议失败 {sym}: {e}")
+            else:
+                log.warning(f"影子账户委员会评估未返回或失败，跳过影子交易执行: {sym}")
         results.append(result)
 
         # 打印简要结果

@@ -103,6 +103,13 @@ class CommitteeRequest(BaseModel):
     news_brief: str = Field("", description="当前新闻摘要，注入到宏观/CIO决策中")
     fundamentals: Dict[str, Any] = Field(default_factory=dict, description="基本面指标字典，如 roe/roic/revenue_growth/pe_ttm/pb 等")
     optimizer_review_enabled: bool = Field(True, description="是否让 LLM 对确定性优化器输出做审计评估")
+    # === 影子账户（Committee）字段 ===
+    shadow_position_pct: float = Field(0.0, description="影子账户该股仓位百分比")
+    shadow_cost: float = Field(0.0, description="影子账户成本均价")
+    shadow_cash: float = Field(0.0, description="影子账户可用现金(CNY)")
+    shadow_holdings: List[Holding] = Field(default_factory=list, description="影子账户其他持仓")
+    shadow_available_cash: float = Field(0.0, description="影子账户可用资金(CNY)")
+    shadow_t2_pending_cash: float = Field(0.0, description="影子账户港股通T+2待交收资金(CNY)")
 
 
 class CommitteeResponse(BaseModel):
@@ -133,6 +140,9 @@ class CommitteeResponse(BaseModel):
     optimizer_review: str = ""
     error: str = ""
     elapsed_sec: float = 0.0
+    # === 影子账户结果 ===
+    shadow_result: Optional[Dict[str, Any]] = Field(None, description="影子账户的独立评估结果（对用户隐藏）")
+
 
 
 class AccountTradeRequest(BaseModel):
@@ -147,6 +157,11 @@ class AccountTradeRequest(BaseModel):
 class AccountSnapshotRequest(BaseModel):
     prices: Dict[str, float] = Field(default_factory=dict)
     trade_date: Optional[str] = Field(None, pattern=r"^\d{4}-\d{2}-\d{2}$")
+
+
+class CashCorrectionRequest(BaseModel):
+    cash: float = Field(..., ge=0, description="可用现金(CNY)")
+    t2_pending_cash: Optional[float] = Field(None, ge=0, description="T+2 待交收现金(CNY)")
 
 
 # ==========================================
@@ -487,66 +502,6 @@ def run_committee_direct(req: CommitteeRequest) -> CommitteeResponse:
             "symbol": req.symbol,
             "display_name": req.name or req.symbol,
         }
-        portfolio_summary = _build_portfolio_summary(req)
-        from core.position_exit_policy import load_position_exit_policy
-        position_exit_policy = load_position_exit_policy(sector=req.sector)
-        position_exit_policy_text = position_exit_policy.audit_text(
-            symbol=req.symbol,
-            market=req.market,
-            is_holding=req.position_pct > 0,
-            cost=req.cost,
-            current_price=current_price or 0.0,
-        )
-        portfolio_summary += f"\n\n### 基本面数学模型锚点\n{fundamental_brief}"
-        portfolio_summary += f"\n\n### 已持仓A股止盈止损纪律（不要当作入场点）\n{position_exit_policy_text}"
-
-        # 构建 wealth_context_view stub（无 user.md 时用）
-        from core.committee import run_wealth_context_view
-        wealth_context = run_wealth_context_view(None, req.cash)
-
-        # 6. 跑委员会
-        log.info(f"启动委员会辩论 (max rounds={req.max_debate_rounds})...")
-        from core.committee import run_committee, parse_cio_memo
-
-        result = run_committee(
-            asset=asset,
-            market_data=market_data,
-            macro_view=macro_view,
-            portfolio_summary=portfolio_summary,
-            prior_insights="",
-            regime_brief=regime_brief,
-            wealth_context_view=wealth_context,
-            current_price=current_price or None,
-            persist_to_memory=False,
-            max_debate_rounds=min(req.max_debate_rounds, 4),
-        )
-
-        # 7. 解析 verdict
-        report = result.get("report")
-        if report is None:
-            return CommitteeResponse(
-                success=False,
-                symbol=req.symbol,
-                name=req.name,
-                error=f"委员会返回空 report: {result.get('error', 'unknown')}",
-                elapsed_sec=(datetime.now() - t0).total_seconds(),
-            )
-
-        cio_memo = report.cio_memo or ""
-        parsed = parse_cio_memo(cio_memo, current_price=current_price)
-
-        # 7.5 后端确定性执行优化：LLM 只给弱先验，最终动作/手数由期望效用决定
-        atr_pct = metrics.get("atr_pct") if metrics else None
-        if atr_pct and current_price and current_price > 0:
-            atr_amount = current_price * atr_pct / 100
-            # 2N止损 + 3N止盈（1.5:1盈亏比）
-            atr_sl = current_price - 2 * atr_amount
-            atr_tp = current_price + 3 * atr_amount
-            cio_memo += (
-                f"\n[ATR] ATR={atr_amount:.2f}({atr_pct:.1f}%) "
-                f"止损2N={atr_sl:.2f} 止盈3N={atr_tp:.2f}"
-            )
-
         regime_probability = None
         conditional_return_stats = None
         try:
@@ -572,170 +527,322 @@ def run_committee_direct(req: CommitteeRequest) -> CommitteeResponse:
         except Exception as e:  # noqa: BLE001
             log.warning(f"regime 概率表不可用，执行优化退化为指标模型: {type(e).__name__}: {e}")
 
-        from core.decision_optimizer import optimize_committee_decision
-        from core.entry_exit_points import compute_entry_exit_points
-
-        opt = optimize_committee_decision(
-            parsed=parsed,
-            metrics=metrics,
-            symbol=req.symbol,
-            regime_brief=regime_brief,
-            current_price=current_price,
-            total_assets=req.total_assets,
-            available_cash=req.available_cash if req.available_cash > 0 else req.cash,
-            position_pct=req.position_pct,
-            min_lot_size=req.min_lot_size,
-            bl_anchor_target_pct=req.target_position_pct if hasattr(req, 'target_position_pct') else None,
-            market=req.market,
-            risk_preference=req.risk_preference,
-            regime_probability=regime_probability,
-            conditional_return_stats=conditional_return_stats,
-            fundamental_assessment=fundamental_assessment,
-        )
-        entry_exit_plan = compute_entry_exit_points(
-            symbol=req.symbol,
-            current_price=current_price,
-            metrics=metrics,
-            regime_brief=regime_brief,
-            market=req.market,
-            conditional_return_stats=conditional_return_stats,
-            expected_return_pct=opt.expected_return_pct,
-        )
-        from core.right_side_trend_gate import evaluate_right_side_trend_gate
-
-        right_side_gate = evaluate_right_side_trend_gate(
-            metrics=metrics,
-            regime_brief=regime_brief,
-            optimizer_expected_return_pct=opt.expected_return_pct,
-            entry_exit_points=entry_exit_plan.as_dict(),
-            conditional_return_stats=conditional_return_stats,
-            quant_view=report.quant_view or "",
-            risk_view=report.risk_view or "",
-            cio_memo=cio_memo,
-            market=req.market,
-            is_holding=req.position_pct > 0,
-        )
-        opt_audit_text = opt.audit_text()
-        entry_exit_audit_text = entry_exit_plan.audit_text()
-        right_side_gate_text = right_side_gate.audit_text()
-        optimizer_review = ""
-        if req.optimizer_review_enabled:
-            try:
-                from core.committee import run_optimizer_review_view
-                optimizer_review = run_optimizer_review_view(
-                    asset=asset,
-                    optimizer_audit=opt_audit_text,
-                    entry_exit_audit=entry_exit_audit_text,
-                    right_side_gate_audit=right_side_gate_text,
-                    position_exit_policy_audit=position_exit_policy_text,
-                    regime_brief=regime_brief,
-                    fundamental_brief=fundamental_brief,
-                )
-            except Exception as e:  # noqa: BLE001
-                optimizer_review = (
-                    "[WORKER_UNAVAILABLE] "
-                    f"reason=optimizer_review_failed exc_type={type(e).__name__}"
-                )
-        # 浮亏保护：持仓亏损时，优化器SELL/TRIM不自动覆盖LLM
-        has_loss = (
-            req.position_pct > 0
-            and req.cost > 0
-            and current_price
-            and current_price < req.cost
-        )
-        if has_loss and opt.verdict in ("SELL", "TRIM"):
-            cio_memo += (
-                f"\n[FLOATING_LOSS_PROTECT] 持仓浮亏({(current_price/req.cost-1)*100:.1f}%)，"
-                f"优化器{opt.verdict}→保留LLM裁决，需人工判断"
-                f"\n[OPTIMAL_DECISION]"
-                f"\nside=hold verdict=HOLD lots=0 alloc_cny=0"
-                f"\nreason=floating_loss_protected_optimizer_sell_blocked"
-                f"\nblack_litterman_anchor_target={req.position_pct:.1f}%"
+        # 嵌套评估函数，供真实账户和影子账户重用
+        def _evaluate_portfolio(
+            cash_val: float,
+            available_cash_val: float,
+            t2_pending_val: float,
+            position_pct_val: float,
+            cost_val: float,
+            holdings_list: List[Holding],
+        ) -> Dict[str, Any]:
+            temp_req = CommitteeRequest(
+                symbol=req.symbol,
+                name=req.name,
+                market=req.market,
+                sector=req.sector,
+                industry=req.industry,
+                position_pct=position_pct_val,
+                target_position_pct=req.target_position_pct,
+                cost=cost_val,
+                current_price=current_price,
+                total_assets=req.total_assets,
+                cash=cash_val,
+                holdings=holdings_list,
+                risk_preference=req.risk_preference,
+                max_debate_rounds=req.max_debate_rounds,
+                min_lot_size=req.min_lot_size,
+                t_plus_1=req.t_plus_1,
+                available_cash=available_cash_val,
+                t2_pending_cash=t2_pending_val,
+                news_brief=req.news_brief,
+                fundamentals=req.fundamentals,
+                optimizer_review_enabled=req.optimizer_review_enabled,
             )
-            parsed["alloc_cny"] = 0
-            # 让LLM分析技术面给出target_position_pct
-            parsed["target_position_pct"] = max(5.0, min(req.position_pct, 35.0))
-        else:
-            right_side_blocked = (
-                req.position_pct <= 0
-                and opt.verdict in {"BUY", "ACCUMULATE"}
-                and not right_side_gate.allow
+            p_summary = _build_portfolio_summary(temp_req)
+
+            from core.position_exit_policy import load_position_exit_policy
+            p_exit_policy = load_position_exit_policy(sector=req.sector)
+            p_exit_policy_text = p_exit_policy.audit_text(
+                symbol=req.symbol,
+                market=req.market,
+                is_holding=position_pct_val > 0,
+                cost=cost_val,
+                current_price=current_price or 0.0,
             )
-            if right_side_blocked:
-                cio_memo += (
-                    f"\n[RIGHT_SIDE_GATE_BLOCK] {opt.verdict} -> HOLD "
-                    f"reason={right_side_gate.reason}"
+            p_summary += f"\n\n### 基本面数学模型锚点\n{fundamental_brief}"
+            p_summary += f"\n\n### 已持仓A股止盈止损纪律（不要当作入场点）\n{p_exit_policy_text}"
+
+            from core.committee import run_wealth_context_view
+            w_context = run_wealth_context_view(None, cash_val)
+
+            from core.committee import run_committee, parse_cio_memo
+
+            res = run_committee(
+                asset=asset,
+                market_data=market_data,
+                macro_view=macro_view,
+                portfolio_summary=p_summary,
+                prior_insights="",
+                regime_brief=regime_brief,
+                wealth_context_view=w_context,
+                current_price=current_price or None,
+                persist_to_memory=False,
+                max_debate_rounds=min(req.max_debate_rounds, 4),
+            )
+
+            report = res.get("report")
+            if report is None:
+                return {"success": False, "error": f"委员会返回空 report: {res.get('error', 'unknown')}"}
+
+            c_memo = report.cio_memo or ""
+            parsed = parse_cio_memo(c_memo, current_price=current_price)
+
+            atr_pct = metrics.get("atr_pct") if metrics else None
+            if atr_pct and current_price and current_price > 0:
+                atr_amount = current_price * atr_pct / 100
+                atr_sl = current_price - 2 * atr_amount
+                atr_tp = current_price + 3 * atr_amount
+                c_memo += (
+                    f"\n[ATR] ATR={atr_amount:.2f}({atr_pct:.1f}%) "
+                    f"止损2N={atr_sl:.2f} 止盈3N={atr_tp:.2f}"
                 )
-                parsed["verdict"] = "HOLD"
-                parsed["confidence"] = min(opt.confidence, 0.55)
-                parsed["alloc_cny"] = 0
-            else:
-                if (
-                    parsed.get("verdict") != opt.verdict
-                    or int(parsed.get("alloc_cny", 0) or 0) != opt.alloc_cny
-                ):
-                    cio_memo += (
-                        f"\n[OPTIMIZER_OVERRIDE] LLM={parsed.get('verdict')} "
-                        f"alloc={parsed.get('alloc_cny', 0)} -> {opt.verdict} alloc={opt.alloc_cny}"
+
+            from core.decision_optimizer import optimize_committee_decision
+            from core.entry_exit_points import compute_entry_exit_points
+            from core.right_side_trend_gate import evaluate_right_side_trend_gate
+
+            opt = optimize_committee_decision(
+                parsed=parsed,
+                metrics=metrics,
+                symbol=req.symbol,
+                regime_brief=regime_brief,
+                current_price=current_price,
+                total_assets=req.total_assets,
+                available_cash=available_cash_val if available_cash_val > 0 else cash_val,
+                position_pct=position_pct_val,
+                min_lot_size=req.min_lot_size,
+                bl_anchor_target_pct=req.target_position_pct,
+                market=req.market,
+                risk_preference=req.risk_preference,
+                regime_probability=regime_probability,
+                conditional_return_stats=conditional_return_stats,
+                fundamental_assessment=fundamental_assessment,
+            )
+
+            entry_exit_plan = compute_entry_exit_points(
+                symbol=req.symbol,
+                current_price=current_price,
+                metrics=metrics,
+                regime_brief=regime_brief,
+                market=req.market,
+                conditional_return_stats=conditional_return_stats,
+                expected_return_pct=opt.expected_return_pct,
+            )
+
+            right_side_gate = evaluate_right_side_trend_gate(
+                metrics=metrics,
+                regime_brief=regime_brief,
+                optimizer_expected_return_pct=opt.expected_return_pct,
+                entry_exit_points=entry_exit_plan.as_dict(),
+                conditional_return_stats=conditional_return_stats,
+                quant_view=report.quant_view or "",
+                risk_view=report.risk_view or "",
+                cio_memo=c_memo,
+                market=req.market,
+                is_holding=position_pct_val > 0,
+            )
+
+            opt_audit_text = opt.audit_text()
+            entry_exit_audit_text = entry_exit_plan.audit_text()
+            right_side_gate_text = right_side_gate.audit_text()
+
+            optimizer_review = ""
+            if req.optimizer_review_enabled:
+                try:
+                    from core.committee import run_optimizer_review_view
+                    optimizer_review = run_optimizer_review_view(
+                        asset=asset,
+                        optimizer_audit=opt_audit_text,
+                        entry_exit_audit=entry_exit_audit_text,
+                        right_side_gate_audit=right_side_gate_text,
+                        position_exit_policy_audit=p_exit_policy_text,
+                        regime_brief=regime_brief,
+                        fundamental_brief=fundamental_brief,
                     )
-                parsed["verdict"] = opt.verdict
-                parsed["confidence"] = opt.confidence
-                parsed["alloc_cny"] = opt.alloc_cny
-            cio_memo += opt_audit_text
-        cio_memo += entry_exit_audit_text
-        cio_memo += right_side_gate_text
-        cio_memo += position_exit_policy_text
-        if optimizer_review:
-            cio_memo += f"\n\n[OPTIMIZER_LLM_REVIEW]\n{optimizer_review}"
+                except Exception as e:
+                    optimizer_review = (
+                        "[WORKER_UNAVAILABLE] "
+                        f"reason=optimizer_review_failed exc_type={type(e).__name__}"
+                    )
 
-        elapsed = (datetime.now() - t0).total_seconds()
-        log.info(f"委员会完成: verdict={parsed['verdict']} confidence={parsed['confidence']:.2f} elapsed={elapsed:.1f}s")
+            has_loss = (
+                position_pct_val > 0
+                and cost_val > 0
+                and current_price
+                and current_price < cost_val
+            )
+            if has_loss and opt.verdict in ("SELL", "TRIM"):
+                c_memo += (
+                    f"\n[FLOATING_LOSS_PROTECT] 持仓浮亏({(current_price/cost_val-1)*100:.1f}%)，"
+                    f"优化器{opt.verdict}→保留LLM裁决，需人工判断"
+                    f"\n[OPTIMAL_DECISION]"
+                    f"\nside=hold verdict=HOLD lots=0 alloc_cny=0"
+                    f"\nreason=floating_loss_protected_optimizer_sell_blocked"
+                    f"\nblack_litterman_anchor_target={position_pct_val:.1f}%"
+                )
+                parsed["alloc_cny"] = 0
+                parsed["target_position_pct"] = max(5.0, min(position_pct_val, 35.0))
+            else:
+                right_side_blocked = (
+                    position_pct_val <= 0
+                    and opt.verdict in {"BUY", "ACCUMULATE"}
+                    and not right_side_gate.allow
+                )
+                if right_side_blocked:
+                    c_memo += (
+                        f"\n[RIGHT_SIDE_GATE_BLOCK] {opt.verdict} -> HOLD "
+                        f"reason={right_side_gate.reason}"
+                    )
+                    parsed["verdict"] = "HOLD"
+                    parsed["confidence"] = min(opt.confidence, 0.55)
+                    parsed["alloc_cny"] = 0
+                else:
+                    if (
+                        parsed.get("verdict") != opt.verdict
+                        or int(parsed.get("alloc_cny", 0) or 0) != opt.alloc_cny
+                    ):
+                        c_memo += (
+                            f"\n[OPTIMIZER_OVERRIDE] LLM={parsed.get('verdict')} "
+                            f"alloc={parsed.get('alloc_cny', 0)} -> {opt.verdict} alloc={opt.alloc_cny}"
+                        )
+                    parsed["verdict"] = opt.verdict
+                    parsed["confidence"] = opt.confidence
+                    parsed["alloc_cny"] = opt.alloc_cny
+                c_memo += opt_audit_text
+            c_memo += entry_exit_audit_text
+            c_memo += right_side_gate_text
+            c_memo += p_exit_policy_text
+            if optimizer_review:
+                c_memo += f"\n\n[OPTIMIZER_LLM_REVIEW]\n{optimizer_review}"
 
-        # 8. 缓存到本地（二进制 pickle）
+            return {
+                "success": True,
+                "verdict": parsed.get("verdict", "UNCLEAR"),
+                "confidence": parsed.get("confidence", 0.0),
+                "dominant_view": parsed.get("dominant_view", "tie"),
+                "suggested_alloc_cny": parsed.get("alloc_cny", 0),
+                "cio_memo": c_memo,
+                "report": report,
+                "entry_exit_plan": entry_exit_plan,
+                "position_exit_policy": p_exit_policy,
+                "right_side_gate": right_side_gate,
+                "optimizer_review": optimizer_review,
+            }
+
+        # 6. 跑真实账户（Real）的评估
+        log.info(f"启动真实账户委员会辩论 (max rounds={req.max_debate_rounds})...")
+        real_res = _evaluate_portfolio(
+            cash_val=req.cash,
+            available_cash_val=req.available_cash,
+            t2_pending_val=req.t2_pending_cash,
+            position_pct_val=req.position_pct,
+            cost_val=req.cost,
+            holdings_list=req.holdings,
+        )
+        if not real_res.get("success"):
+            return CommitteeResponse(
+                success=False,
+                symbol=req.symbol,
+                name=req.name,
+                error=real_res.get("error", "unknown"),
+                elapsed_sec=(datetime.now() - t0).total_seconds(),
+            )
+
+        # 7. 跑影子账户（Shadow）的评估（若传入相关数据）
+        shadow_result_dict = None
+        if req.shadow_cash > 0 or req.shadow_position_pct > 0 or len(req.shadow_holdings) > 0 or req.shadow_available_cash > 0:
+            log.info("启动影子账户（Committee）的独立委员会辩论...")
+            shadow_res = _evaluate_portfolio(
+                cash_val=req.shadow_cash,
+                available_cash_val=req.shadow_available_cash,
+                t2_pending_val=req.shadow_t2_pending_cash,
+                position_pct_val=req.shadow_position_pct,
+                cost_val=req.shadow_cost,
+                holdings_list=req.shadow_holdings,
+            )
+            if shadow_res.get("success"):
+                shadow_report = shadow_res["report"]
+                shadow_result_dict = {
+                    "success": True,
+                    "symbol": req.symbol,
+                    "name": req.name or req.symbol,
+                    "market": req.market,
+                    "verdict": shadow_res["verdict"],
+                    "confidence": shadow_res["confidence"],
+                    "suggested_alloc_cny": shadow_res["suggested_alloc_cny"],
+                    "cio_memo": shadow_res["cio_memo"],
+                    "macro_view": shadow_report.macro_view or "",
+                    "quant_view": shadow_report.quant_view or "",
+                    "risk_view": shadow_report.risk_view or "",
+                    "entry_exit_points": shadow_res["entry_exit_plan"].as_dict(),
+                    "position_exit_policy": shadow_res["position_exit_policy"].as_dict(),
+                    "right_side_trend_gate": shadow_res["right_side_gate"].as_dict(),
+                    "optimizer_review": shadow_res["optimizer_review"],
+                }
+            else:
+                log.warning(f"影子账户委员会评估失败: {shadow_res.get('error')}")
+
+        # 8. 缓存真实账户（Real）结果到本地二进制 pickle
+        real_report = real_res["report"]
         _save_committee_cache(
             symbol=req.symbol,
             name=req.name or req.symbol,
             current_price=current_price or 0,
-            verdict=parsed.get("verdict", "UNCLEAR"),
-            confidence=parsed.get("confidence", 0),
-            suggested_alloc=parsed.get("alloc_cny", 0),
-            quant_signal=report.quant_view[:200] if report.quant_view else "",
+            verdict=real_res["verdict"],
+            confidence=real_res["confidence"],
+            suggested_alloc=real_res["suggested_alloc_cny"],
+            quant_signal=real_report.quant_view[:200] if real_report.quant_view else "",
             regime=regime_brief[:500],
             fundamental_model=fundamental_assessment.model_key,
             fundamental_score=fundamental_assessment.score,
-            entry_exit_points=entry_exit_plan.as_dict(),
-            position_exit_policy=position_exit_policy.as_dict(),
-            right_side_trend_gate=right_side_gate.as_dict(),
-            optimizer_review=optimizer_review[:500],
-            cio_note=cio_memo[:500],
+            entry_exit_points=real_res["entry_exit_plan"].as_dict(),
+            position_exit_policy=real_res["position_exit_policy"].as_dict(),
+            right_side_trend_gate=real_res["right_side_gate"].as_dict(),
+            optimizer_review=real_res["optimizer_review"][:500],
+            cio_note=real_res["cio_memo"][:500],
         )
+
+        elapsed = (datetime.now() - t0).total_seconds()
+        log.info(f"委员会完成: verdict={real_res['verdict']} confidence={real_res['confidence']:.2f} elapsed={elapsed:.1f}s")
 
         return CommitteeResponse(
             success=True,
             symbol=req.symbol,
             name=req.name,
             market=req.market,
-            verdict=parsed.get("verdict", "UNCLEAR"),
-            confidence=parsed.get("confidence", 0.0),
-            dominant_view=parsed.get("dominant_view", "tie"),
-            suggested_alloc_cny=parsed.get("alloc_cny", 0),
-            cio_memo=cio_memo,
-            macro_view=report.macro_view or "",
-            quant_view=report.quant_view or "",
-            risk_view=report.risk_view or "",
-            quant_adjusted=report.quant_adjusted or "",
-            risk_adjusted=report.risk_adjusted or "",
+            verdict=real_res["verdict"],
+            confidence=real_res["confidence"],
+            dominant_view=real_res["dominant_view"],
+            suggested_alloc_cny=real_res["suggested_alloc_cny"],
+            cio_memo=real_res["cio_memo"],
+            macro_view=real_report.macro_view or "",
+            quant_view=real_report.quant_view or "",
+            risk_view=real_report.risk_view or "",
+            quant_adjusted=real_report.quant_adjusted or "",
+            risk_adjusted=real_report.risk_adjusted or "",
             market_data=market_data[:2000],
             regime=regime_brief[:500],
             fundamental_model=fundamental_assessment.model_key,
             fundamental_score=fundamental_assessment.score,
             fundamental_coverage=fundamental_assessment.coverage,
             fundamental_anchor_multiplier=fundamental_assessment.anchor_multiplier,
-            entry_exit_points=entry_exit_plan.as_dict(),
-            position_exit_policy=position_exit_policy.as_dict(),
-            right_side_trend_gate=right_side_gate.as_dict(),
-            optimizer_review=optimizer_review,
+            entry_exit_points=real_res["entry_exit_plan"].as_dict(),
+            position_exit_policy=real_res["position_exit_policy"].as_dict(),
+            right_side_trend_gate=real_res["right_side_gate"].as_dict(),
+            optimizer_review=real_res["optimizer_review"],
             elapsed_sec=round(elapsed, 1),
+            shadow_result=shadow_result_dict,
         )
 
     except Exception as e:
@@ -759,7 +866,9 @@ class CrawlerSettings(BaseModel):
 @app.post("/api/committee", response_model=CommitteeResponse)
 async def run_committee_api(req: CommitteeRequest):
     """跑投资委员会分析（HTTP 端点，委托给 run_committee_direct）"""
-    return run_committee_direct(req)
+    res = run_committee_direct(req)
+    res.shadow_result = None
+    return res
 
 
 @app.get("/api/monitor/snapshot")
@@ -829,9 +938,7 @@ async def import_monitor_config(config: Dict[str, Any] = Body(...)):
         MONITOR_CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
         MONITOR_CONFIG_PATH.write_text(json.dumps(config, ensure_ascii=False, indent=2), encoding="utf-8")
         try:
-            # Re-initialize account ledger dynamically
-            from db.account_ledger import get_account_ledger
-            _ledger = get_account_ledger()
+            _ledger = _get_account_ledger()
             _ledger.initialize_from_monitor_config(config, reset=True)
             log.info("Ledger re-initialized with new imported monitor config (reset=True)")
         except Exception as le:
@@ -882,68 +989,30 @@ async def add_holding_api(body: Dict[str, Any] = Body(...)):
         units = float(body.get("units") or 0.0)
         cost = float(body.get("avg_cost") or body.get("cost") or 0.0)
         
-        if not MONITOR_CONFIG_PATH.exists():
-            raise HTTPException(status_code=500, detail="配置文件不存在")
+        _ledger = _get_account_ledger()
+        from db.account_ledger import REAL_ACCOUNT
         
-        config = json.loads(MONITOR_CONFIG_PATH.read_text(encoding="utf-8"))
-        holdings = config.get("holdings", [])
-        watchlist = config.get("watchlist", [])
-        
-        # Check if already exists (case-insensitive)
-        in_holdings = any(str(h.get("symbol")).strip().upper() == symbol for h in holdings)
-        in_watchlist = any(str(w.get("symbol")).strip().upper() == symbol for w in watchlist)
-        
-        if in_holdings or in_watchlist:
+        # Check if already exists in ledger holdings
+        existing_holdings = _ledger.list_holdings(REAL_ACCOUNT)
+        if any(str(h.get("symbol")).strip().upper() == symbol for h in existing_holdings):
             return {"ok": True, "message": "已在持仓或自选列表中", "duplicate": True}
         
-        if is_tracking_only:
-            # Add to watchlist
-            watchlist.append({
-                "symbol": symbol,
-                "name": name,
-                "market": market,
-                "sector": sector,
-                "industry": sector,
-                "position_pct": 0.0,
-                "cost": 0.0
-            })
-        else:
-            # Add to holdings
-            holdings.append({
-                "symbol": symbol,
-                "name": name,
-                "market": market,
-                "sector": sector,
-                "industry": sector,
-                "position_pct": 0.0,
-                "cost": cost,
-                "units": units,
-                "min_lot_size": 100
-            })
-            
-        config["holdings"] = holdings
-        config["watchlist"] = watchlist
+        actual_units = 0.0 if is_tracking_only else units
+        actual_cost = 0.0 if is_tracking_only else cost
         
-        # Save config
-        MONITOR_CONFIG_PATH.write_text(json.dumps(config, ensure_ascii=False, indent=2), encoding="utf-8")
-        
-        # Re-initialize ledger
-        try:
-            from db.account_ledger import get_account_ledger
-            _ledger = get_account_ledger()
-            _ledger.initialize_from_monitor_config(config, reset=True)
-            log.info(f"Ledger re-initialized after adding symbol: {symbol}")
-        except Exception as le:
-            log.warning(f"Failed to re-initialize ledger: {le}")
-            
-        # Delete stale snapshot
-        try:
-            from scripts.monitor_window_constants import DEFAULT_SNAPSHOT
-            if DEFAULT_SNAPSHOT.exists():
-                DEFAULT_SNAPSHOT.unlink()
-                log.info("Stale snapshot deleted after adding symbol")
-        except Exception as se:
-            log.warning(f"Failed to delete snapshot: {se}")
+        success = _ledger.add_holding(
+            account=REAL_ACCOUNT,
+            symbol=symbol,
+            name=name,
+            market=market,
+            sector=sector,
+            industry=sector,
+            units=actual_units,
+            cost=actual_cost,
+            min_lot_size=100
+        )
+        if not success:
+            raise HTTPException(status_code=500, detail="Failed to add holding to ledger")
             
         return {"ok": True, "message": "已加入关注列表" if is_tracking_only else "已加入持仓列表"}
     except Exception as e:
@@ -961,85 +1030,23 @@ async def update_holding_api(symbol: str, body: Dict[str, Any] = Body(...)):
         cost = float(body.get("avg_cost") or body.get("cost") or 0.0)
         is_tracking_only = bool(body.get("is_tracking_only", True))
         
-        if not MONITOR_CONFIG_PATH.exists():
-            raise HTTPException(status_code=500, detail="配置文件不存在")
-            
-        config = json.loads(MONITOR_CONFIG_PATH.read_text(encoding="utf-8"))
-        holdings = config.get("holdings", [])
-        watchlist = config.get("watchlist", [])
+        _ledger = _get_account_ledger()
+        from db.account_ledger import REAL_ACCOUNT
         
-        # Find item in either list
-        target_item = None
-        found_in_holdings = False
-        
-        for h in holdings:
-            if str(h.get("symbol")).strip().upper() == symbol:
-                target_item = h
-                found_in_holdings = True
-                break
-        
-        if not target_item:
-            for w in watchlist:
-                if str(w.get("symbol")).strip().upper() == symbol:
-                    target_item = w
-                    found_in_holdings = False
-                    break
-                    
-        if not target_item:
+        # Check if exists
+        existing_holdings = _ledger.list_holdings(REAL_ACCOUNT)
+        if not any(str(h.get("symbol")).strip().upper() == symbol for h in existing_holdings):
             raise HTTPException(status_code=404, detail=f"未找到标的: {symbol}")
             
-        # Remove target_item from its current list
-        if found_in_holdings:
-            holdings = [h for h in holdings if str(h.get("symbol")).strip().upper() != symbol]
-        else:
-            watchlist = [w for w in watchlist if str(w.get("symbol")).strip().upper() != symbol]
-            
-        # Update fields
-        target_item["units"] = units
-        target_item["cost"] = cost
-        
-        # Calculate position_pct if moving to holdings and we have total assets
-        total_assets = config.get("total_assets", 0.0)
-        if not is_tracking_only and total_assets > 0:
-            target_item["position_pct"] = (units * cost) / total_assets * 100.0
-        else:
-            target_item["position_pct"] = 0.0
-            
-        if is_tracking_only:
-            # Move to / keep in watchlist
-            target_item.pop("units", None)
-            target_item["cost"] = 0.0
-            target_item["position_pct"] = 0.0
-            watchlist.append(target_item)
-        else:
-            # Move to / keep in holdings
-            if "min_lot_size" not in target_item:
-                target_item["min_lot_size"] = 100
-            holdings.append(target_item)
-            
-        config["holdings"] = holdings
-        config["watchlist"] = watchlist
-        
-        # Save config
-        MONITOR_CONFIG_PATH.write_text(json.dumps(config, ensure_ascii=False, indent=2), encoding="utf-8")
-        
-        # Re-initialize ledger
-        try:
-            from db.account_ledger import get_account_ledger
-            _ledger = get_account_ledger()
-            _ledger.initialize_from_monitor_config(config, reset=True)
-            log.info(f"Ledger re-initialized after updating symbol: {symbol}")
-        except Exception as le:
-            log.warning(f"Failed to re-initialize ledger: {le}")
-            
-        # Delete stale snapshot
-        try:
-            from scripts.monitor_window_constants import DEFAULT_SNAPSHOT
-            if DEFAULT_SNAPSHOT.exists():
-                DEFAULT_SNAPSHOT.unlink()
-                log.info("Stale snapshot deleted after updating symbol")
-        except Exception as se:
-            log.warning(f"Failed to delete snapshot: {se}")
+        success = _ledger.update_holding(
+            account=REAL_ACCOUNT,
+            symbol=symbol,
+            units=units,
+            cost=cost,
+            is_tracking_only=is_tracking_only
+        )
+        if not success:
+            raise HTTPException(status_code=500, detail="Failed to update holding in ledger")
             
         return {"ok": True, "message": "持仓数据更新成功"}
     except Exception as e:
@@ -1053,52 +1060,22 @@ async def delete_holding_api(symbol: str):
     """删除持仓或自选标的。"""
     try:
         symbol = symbol.strip().upper()
-        if not MONITOR_CONFIG_PATH.exists():
-            raise HTTPException(status_code=500, detail="配置文件不存在")
-            
-        config = json.loads(MONITOR_CONFIG_PATH.read_text(encoding="utf-8"))
-        holdings = config.get("holdings", [])
-        watchlist = config.get("watchlist", [])
+        _ledger = _get_account_ledger()
+        from db.account_ledger import REAL_ACCOUNT
         
-        # Find item in either list
-        in_holdings = any(str(h.get("symbol")).strip().upper() == symbol for h in holdings)
-        in_watchlist = any(str(w.get("symbol")).strip().upper() == symbol for w in watchlist)
-        
-        if not in_holdings and not in_watchlist:
+        # Find item in ledger holdings
+        existing_holdings = _ledger.list_holdings(REAL_ACCOUNT)
+        target = next((h for h in existing_holdings if str(h.get("symbol")).strip().upper() == symbol), None)
+        if not target:
             raise HTTPException(status_code=404, detail=f"标的 {symbol} 不存在")
             
-        if in_holdings:
-            # Check if units > 0 (avoid deleting real assets with units)
-            target = next(h for h in holdings if str(h.get("symbol")).strip().upper() == symbol)
-            if float(target.get("units", 0) or 0) > 0:
-                raise HTTPException(status_code=400, detail="持仓股数大于0，不能直接删除。请先平仓或设股数为0")
-            holdings = [h for h in holdings if str(h.get("symbol")).strip().upper() != symbol]
-        else:
-            watchlist = [w for w in watchlist if str(w.get("symbol")).strip().upper() != symbol]
+        # Check if units > 0 (avoid deleting real assets with units)
+        if float(target.get("units", 0) or 0) > 0:
+            raise HTTPException(status_code=400, detail="持仓股数大于0，不能直接删除。请先平仓或设股数为0")
             
-        config["holdings"] = holdings
-        config["watchlist"] = watchlist
-        
-        # Save config
-        MONITOR_CONFIG_PATH.write_text(json.dumps(config, ensure_ascii=False, indent=2), encoding="utf-8")
-        
-        # Re-initialize ledger
-        try:
-            from db.account_ledger import get_account_ledger
-            _ledger = get_account_ledger()
-            _ledger.initialize_from_monitor_config(config, reset=True)
-            log.info(f"Ledger re-initialized after deleting symbol: {symbol}")
-        except Exception as le:
-            log.warning(f"Failed to re-initialize ledger: {le}")
-            
-        # Delete stale snapshot
-        try:
-            from scripts.monitor_window_constants import DEFAULT_SNAPSHOT
-            if DEFAULT_SNAPSHOT.exists():
-                DEFAULT_SNAPSHOT.unlink()
-                log.info("Stale snapshot deleted after deleting symbol")
-        except Exception as se:
-            log.warning(f"Failed to delete snapshot: {se}")
+        success = _ledger.delete_holding(REAL_ACCOUNT, symbol)
+        if not success:
+            raise HTTPException(status_code=500, detail="Failed to delete holding from ledger")
             
         return {"ok": True, "message": "已删除关注"}
     except Exception as e:

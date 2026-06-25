@@ -1,7 +1,6 @@
 """Mixin methods for MonitorSelectionMixin."""
 from __future__ import annotations
 
-import json
 import queue
 import threading
 import tkinter as tk
@@ -241,29 +240,31 @@ class MonitorSelectionMixin:
         symbol = str(stock.get("symbol") or "").strip()
         if not symbol:
             raise ValueError("缺少股票代码")
-        from jobs.market_monitor import CONFIG_PATH, load_config
+        from jobs.market_monitor import load_config
+        from db.account_ledger import AccountLedger, REAL_ACCOUNT
 
         config = load_config()
-        watchlist = list(config.get("watchlist") or [])
         all_symbols = {
             str(item.get("symbol") or "").strip()
-            for item in list(config.get("holdings") or []) + watchlist
+            for item in list(config.get("holdings") or []) + list(config.get("watchlist") or [])
         }
         if symbol in all_symbols:
             return "已在持仓或关注列表"
-        watchlist.append(
-            {
-                "symbol": symbol,
-                "name": stock.get("name") or symbol,
-                "market": "a",
-                "sector": stock.get("sector") or "",
-                "industry": "",
-                "position_pct": 0,
-                "cost": 0,
-            }
+        ledger = AccountLedger()
+        ledger.ensure_initialized(config)
+        added = ledger.add_holding(
+            account=REAL_ACCOUNT,
+            symbol=symbol,
+            name=stock.get("name") or symbol,
+            market="a",
+            sector=stock.get("sector") or "",
+            industry=stock.get("industry") or "",
+            units=0,
+            cost=0,
+            min_lot_size=100,
         )
-        config["watchlist"] = watchlist
-        CONFIG_PATH.write_text(json.dumps(config, ensure_ascii=False, indent=2), encoding="utf-8")
+        if not added:
+            return "已在持仓或关注列表"
         return f"已加入关注列表: {stock.get('name') or symbol}"
 
 

@@ -77,10 +77,12 @@
 
 ```
 market_monitor_runtime.run_monitor_round()
-  → load_config() + AccountLedger 读取真实账户
+  → load_config() + AccountLedger 读取真实账户 / 委员会影子账户
   → fetch_sina_prices() 拉最新价
   → call_committee() 直接调用 backend.server.run_committee_direct()
+      ↳ 同一标的分别用 real 与 committee 账户上下文做独立评估
   → apply_repeated_trade_guard() / apply_limit_up_guard()
+  → ledger.apply_committee_result() 只执行 shadow_result 到 committee 账户
   → select_optimal_actionable_alerts()
   → update_entry_exit_alert_state()
   → build_monitor_window_snapshot()
@@ -94,6 +96,37 @@ market_monitor_runtime.run_monitor_round()
 - A 股持仓纪律止损在 `evaluate_position_exit_plan_triggers()` 中判断，价格**跌破**锁定止损线才触发；止盈目标价达到即可触发。
 - 每周 `jobs/weekly_exit_param_optimization.py` 会按板块回看最近数据，写入 `policy_quality_score`、`sell_win_rate_lower`、`profit_factor` 等质量字段；这些字段只用于校准已有持仓的减仓/卖出纪律，不参与买入点计算。
 - 板块映射顺序是：东方财富浏览器请求头直连 → AkShare → `data/sector_cache.json` 本地缓存 → `market_monitor_config.json` 的 `sector`/`industry`；`data/` 被 git 忽略，移植时可手动带走缓存。
+
+### 1.2 真实账户单源与影子账户隔离
+
+真实持仓以 `db/account_ledger.py:AccountLedger` 的 `real` 账户为单一可信源：
+
+- 用户确认交易、手动交易面板、加入关注、取消关注、现金/T+2 修正都先写 ledger。
+- 默认生产 ledger 每次更新 `real` 后立即同步 `jobs/market_monitor_config.json` 和 `data/market_monitor/latest_window.json`，兼容仍读取配置或快照的老路径。
+- 自定义 DB 路径的测试/临时账本禁用外部同步，避免测试持仓覆盖真实配置。
+- `sync_real_from_monitor_config()` 只刷新已有标的的 name/market/sector/industry/min_lot_size，并为 config 新标的做首次播种；不会覆盖已有真实股数、均价和现金。
+
+影子账户隔离规则：
+
+- `committee` 账户只由 `apply_committee_result()` 自动执行委员会建议，不读取或修改 `real` 持仓。
+- `backend.server.run_committee_direct()` 可以在一次 symbol 调用中返回 `shadow_result`，供 `jobs.market_monitor_runtime` 写入影子账本。
+- HTTP `/api/committee` 会清空 `shadow_result`；桌面窗口快照只使用真实账户结果，用户不会看到影子账户评估内容。
+- 两套评估共享行情、新闻、宏观、基本面和技术指标，但组合摘要、现金、T+2、已有仓位和可买手数分别来自各自账户，不能互相影响优化器输出。
+
+### 1.3 胜率数学参考
+
+上游 2026-06-16 到 2026-06-23 changelog 对本项目最有价值的数学纪律：
+
+- 公开命中率需要样本门槛：`n < 30` 时保留 hit/total 计数，但不展示具体 rate。
+- 账本写入要幂等：重复执行同一外部成交或状态 patch 不应重复改变现金和持仓。
+- 概率、回测和生产指标必须同源：forward return、行情窗口、FX/价格口径不能在训练、回测和生产之间漂移。
+- 集中度与偿付能力不要多处自动兜底：风险 lens 应作为单一控制面，避免多个规则相互覆盖导致胜率归因失真。
+
+当前落地位置：
+
+- `scripts/export_accuracy.py` 在生成公开 `docs/accuracy_summary.json` 前对小样本 rate 置空。
+- `core/position_exit_policy.py` / `jobs/weekly_exit_param_optimization.py` 对卖出胜率使用 Wilson 下界、样本可靠性收缩和风险调整期望效用。
+- `db/account_ledger.py` 的 dual-account PnL 和 trades 是后续验证委员会胜率的真实对照基座。
 
 ---
 
