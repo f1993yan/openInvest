@@ -19,6 +19,7 @@ from typing import Any, Dict, Iterable, List, Optional
 import math
 import pandas as pd
 
+from core.buy_signal_miner import BuySignalBacktestSummary, mine_historical_buy_signals
 from services.news_sources import RawNewsItem
 
 
@@ -158,6 +159,7 @@ class StockSelection:
     path_distribution: PathDistribution
     risk_defense: RiskDefense
     calibration: CalibrationSnapshot
+    buy_signal_backtest: BuySignalBacktestSummary
     model_edge_score: float
     fundamental_score: float = 50.0
     fundamental_model: str = ""
@@ -277,10 +279,16 @@ def build_daily_selection(
             trend=trend,
             trade_date=trade_date,
         )
+        buy_signal_backtest = mine_historical_buy_signals(
+            symbol,
+            history_by_symbol.get(symbol),
+            trade_date=trade_date,
+        )
         model_edge_score = _bounded(
             path_distribution.path_score * 0.42
             + (100.0 - risk_defense.risk_penalty) * 0.28
-            + calibration.confidence_multiplier * 100.0 * 0.30,
+            + calibration.confidence_multiplier * 100.0 * 0.22
+            + buy_signal_backtest.expected_score * 0.08,
             0.0,
             100.0,
         )
@@ -304,6 +312,13 @@ def build_daily_selection(
         reasons.append(path_distribution.interpretation)
         reasons.append(risk_defense.note)
         reasons.append(calibration.note)
+        if buy_signal_backtest.latest_signal is not None:
+            latest = buy_signal_backtest.latest_signal
+            hit = buy_signal_backtest.hit_rate_5d
+            hit_text = "样本不足" if hit is None else f"5日胜率{hit:.0%}"
+            reasons.append(f"系统回测信号: {latest.trade_date}出现{latest.signal_label}，历史{hit_text}")
+        elif buy_signal_backtest.warning:
+            reasons.append(buy_signal_backtest.warning)
         entry_plan = build_entry_plan(history_by_symbol.get(symbol), tape=tape, trade_date=trade_date)
         stocks.append(
             StockSelection(
@@ -324,6 +339,7 @@ def build_daily_selection(
                 path_distribution=path_distribution,
                 risk_defense=risk_defense,
                 calibration=calibration,
+                buy_signal_backtest=buy_signal_backtest,
                 model_edge_score=round(model_edge_score, 2),
                 fundamental_score=round(fundamental_score, 2),
                 fundamental_model=str(fundamental.get("model") or ""),

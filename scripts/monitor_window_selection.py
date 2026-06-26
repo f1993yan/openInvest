@@ -8,6 +8,7 @@ from datetime import datetime
 from tkinter import ttk
 from typing import Any, Dict, List, Optional
 
+from core.buy_signal_miner import buy_signal_summary_text
 from scripts.monitor_window_constants import *
 from scripts.monitor_window_services import *
 from scripts.monitor_window_text import *
@@ -158,6 +159,7 @@ class MonitorSelectionMixin:
         path = stock.get("path_distribution") or {}
         risk = stock.get("risk_defense") or {}
         calibration = stock.get("calibration") or {}
+        buy_signal = stock.get("buy_signal_backtest") or {}
         card = tk.Frame(body, bg=PANEL_BG)
         card.pack(fill=tk.BOTH, expand=True, pady=(8, 0))
         tk.Label(card, text=f"板块  {stock.get('sector', '-')}", bg=PANEL_BG, fg=MUTED, font=("Microsoft YaHei UI", 8, "bold"), anchor="w").pack(fill=tk.X)
@@ -189,6 +191,16 @@ class MonitorSelectionMixin:
             bg=PANEL_BG,
             fg=MUTED,
             font=("Microsoft YaHei UI", 8),
+            anchor="w",
+            justify=tk.LEFT,
+            wraplength=330,
+        ).pack(fill=tk.X, pady=(6, 0))
+        tk.Label(
+            card,
+            text=buy_signal_summary_text(buy_signal),
+            bg=PANEL_BG,
+            fg=BLUE,
+            font=("Microsoft YaHei UI", 8, "bold"),
             anchor="w",
             justify=tk.LEFT,
             wraplength=330,

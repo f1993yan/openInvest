@@ -4,6 +4,7 @@ from __future__ import annotations
 import re
 from typing import Any, Dict, List, Optional
 
+from core.buy_signal_miner import buy_signal_summary_text
 from scripts.monitor_window_constants import (
     ACTION_BG,
     ACTION_FG,
@@ -274,6 +275,13 @@ def _beginner_summary_lines(
     ee = (source or {}).get("entry_exit_points") or _entry_exit_from_row(row)
     right_gate = (source or {}).get("right_side_trend_gate") or row.get("right_side_trend_gate") or {}
     review = str((source or {}).get("optimizer_review") or (source or {}).get("cio_memo") or _review_text_from_row(row))
+    decision_synthesis = (source or {}).get("decision_synthesis") or row.get("decision_synthesis") or {}
+    buy_signal_backtest = (
+        (source or {}).get("buy_signal_backtest")
+        or row.get("buy_signal_backtest")
+        or (row.get("technical") or {}).get("buy_signal_backtest")
+        or {}
+    )
     one_line = _extract_one_line(review)
     risk_flags = _extract_risk_flags(review)
     regime_text = (source or {}).get("regime") or technical.get("regime") or technical.get("quant_view")
@@ -302,7 +310,11 @@ def _beginner_summary_lines(
         header = "结论（快照）"
         status_note = "下面是上次监控快照；最新分析完成后会自动刷新。"
     action = _verdict_label(verdict)
-    if str(verdict or "").upper() in {"BUY", "ACCUMULATE"} and current > 0 and _safe_num(pullback) > 0 and current > _safe_num(pullback) * 1.03:
+    if decision_synthesis:
+        action = str(decision_synthesis.get("action_label") or action)
+        primary_reason = str(decision_synthesis.get("primary_reason") or "")
+        decision = f"{action}，{primary_reason}" if primary_reason else f"{action}。"
+    elif str(verdict or "").upper() in {"BUY", "ACCUMULATE"} and current > 0 and _safe_num(pullback) > 0 and current > _safe_num(pullback) * 1.03:
         decision = f"{action}，但当前价离回调买点偏高，别急着追。"
     elif str(verdict or "").upper() in {"BUY", "ACCUMULATE"}:
         decision = f"{action}，先看是否接近买点。"
@@ -326,14 +338,27 @@ def _beginner_summary_lines(
         f"（{right_gate.get('reason') or '未提供'}）。",
         f"- 基本面: {_safe_num((source or {}).get('fundamental_score'), _safe_num(fundamental.get('score'), 50)):.0f} 分，属于{'偏强' if _safe_num((source or {}).get('fundamental_score'), _safe_num(fundamental.get('score'), 50)) >= 70 else '一般' if _safe_num((source or {}).get('fundamental_score'), _safe_num(fundamental.get('score'), 50)) >= 45 else '偏弱'}。",
     ]
+    if decision_synthesis:
+        for item in (decision_synthesis.get("evidence") or [])[:3]:
+            lines.append(f"- 决策证据: {item}")
+        for item in (decision_synthesis.get("conflicts") or [])[:2]:
+            lines.append(f"- 口径冲突: {item}；最终按确定性优化器执行。")
+    if buy_signal_backtest:
+        lines.append(f"- {buy_signal_summary_text(buy_signal_backtest)}")
     if one_line and one_line != "-":
         lines.append(f"- 模型提醒: {one_line}")
-    if risk_flags or low_confidence:
+    synthesis_warnings = list((decision_synthesis.get("risk_warnings") or [])[:3]) if decision_synthesis else []
+    signal_warning = str((buy_signal_backtest or {}).get("warning") or "")
+    if risk_flags or low_confidence or synthesis_warnings or signal_warning:
         lines.extend(["", "需要小心:"])
         if low_confidence:
             lines.append("- 买卖点模型置信度偏低，价格线只能当参考，不能机械下单。")
         if plan_type == "a_share_position_exit":
             lines.append("- 已持仓标的的止盈止损盘中不重算，只在收盘后按追踪规则上移风险线。")
+        for warning in synthesis_warnings:
+            lines.append(f"- {warning}")
+        if signal_warning:
+            lines.append(f"- {signal_warning}")
         for flag in risk_flags:
             lines.append(f"- {flag}")
     lines.extend(

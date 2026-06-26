@@ -138,6 +138,8 @@ class CommitteeResponse(BaseModel):
     position_exit_policy: Dict[str, Any] = Field(default_factory=dict)
     right_side_trend_gate: Dict[str, Any] = Field(default_factory=dict)
     optimizer_review: str = ""
+    decision_synthesis: Dict[str, Any] = Field(default_factory=dict)
+    buy_signal_backtest: Dict[str, Any] = Field(default_factory=dict)
     error: str = ""
     elapsed_sec: float = 0.0
     # === 影子账户结果 ===
@@ -471,6 +473,8 @@ def run_committee_direct(req: CommitteeRequest) -> CommitteeResponse:
         df_2y = get_history_data(req.symbol, "2y")
         metrics = compute_metrics(df_2y) if not df_2y.empty else {}
         regime_brief = format_regime_brief(metrics, symbol=req.symbol)
+        from core.buy_signal_miner import mine_historical_buy_signals
+        buy_signal_backtest = mine_historical_buy_signals(req.symbol, df_2y)
 
         from core.fundamental_model import assess_fundamentals
         from utils.fundamental_data import get_fundamental_snapshot
@@ -626,6 +630,7 @@ def run_committee_direct(req: CommitteeRequest) -> CommitteeResponse:
                 )
 
             from core.decision_optimizer import optimize_committee_decision
+            from core.decision_synthesis import synthesize_decision
             from core.entry_exit_points import compute_entry_exit_points
             from core.right_side_trend_gate import evaluate_right_side_trend_gate
 
@@ -742,6 +747,19 @@ def run_committee_direct(req: CommitteeRequest) -> CommitteeResponse:
             c_memo += p_exit_policy_text
             if optimizer_review:
                 c_memo += f"\n\n[OPTIMIZER_LLM_REVIEW]\n{optimizer_review}"
+            decision_synthesis = synthesize_decision(
+                symbol=req.symbol,
+                name=req.name,
+                optimizer=opt,
+                parsed=parsed,
+                entry_exit_points=entry_exit_plan.as_dict(),
+                right_side_gate=right_side_gate.as_dict(),
+                position_exit_policy=p_exit_policy.as_dict(),
+                optimizer_review=optimizer_review,
+                current_price=current_price,
+                is_holding=position_pct_val > 0,
+            )
+            c_memo += decision_synthesis.audit_text()
 
             return {
                 "success": True,
@@ -755,6 +773,8 @@ def run_committee_direct(req: CommitteeRequest) -> CommitteeResponse:
                 "position_exit_policy": p_exit_policy,
                 "right_side_gate": right_side_gate,
                 "optimizer_review": optimizer_review,
+                "decision_synthesis": decision_synthesis,
+                "buy_signal_backtest": buy_signal_backtest,
             }
 
         # 6. 跑真实账户（Real）的评估
@@ -806,6 +826,8 @@ def run_committee_direct(req: CommitteeRequest) -> CommitteeResponse:
                     "position_exit_policy": shadow_res["position_exit_policy"].as_dict(),
                     "right_side_trend_gate": shadow_res["right_side_gate"].as_dict(),
                     "optimizer_review": shadow_res["optimizer_review"],
+                    "decision_synthesis": shadow_res["decision_synthesis"].as_dict(),
+                    "buy_signal_backtest": shadow_res["buy_signal_backtest"].as_dict(),
                 }
             else:
                 log.warning(f"影子账户委员会评估失败: {shadow_res.get('error')}")
@@ -858,6 +880,8 @@ def run_committee_direct(req: CommitteeRequest) -> CommitteeResponse:
             position_exit_policy=real_res["position_exit_policy"].as_dict(),
             right_side_trend_gate=real_res["right_side_gate"].as_dict(),
             optimizer_review=real_res["optimizer_review"],
+            decision_synthesis=real_res["decision_synthesis"].as_dict(),
+            buy_signal_backtest=real_res["buy_signal_backtest"].as_dict(),
             elapsed_sec=round(elapsed, 1),
             shadow_result=shadow_result_dict,
         )
