@@ -79,7 +79,7 @@ fun NewsDialog(
                                 modifier = Modifier.padding(bottom = 4.dp)
                             )
                         }
-                        items(news.cards) { card ->
+                        items(news.cards ?: emptyList()) { card ->
                             Card(
                                 modifier = Modifier.fillMaxWidth(),
                                 colors = CardDefaults.cardColors(containerColor = Color.White),
@@ -231,7 +231,7 @@ fun NewsDialog(
                     if (!bubble.reason.isNullOrBlank()) {
                         Text("研判原因: ", fontSize = 12.sp, color = Color(0xFF64748B))
                         Text(
-                            text = bubble.reason,
+                            text = bubble.reason ?: "",
                             fontSize = 12.sp,
                             color = Color(0xFF1E293B)
                         )

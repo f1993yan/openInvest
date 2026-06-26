@@ -696,34 +696,41 @@ fun SettingsDialog(
                                 return@Button
                             }
                             savingCash = true
-                            val configStr = readLocalFile(context, "market_monitor_config.json")
-                            if (configStr != null) {
-                                try {
-                                    val json = org.json.JSONObject(configStr)
-                                    json.put("cash", cashVal)
-                                    json.put("t2_pending_cash", t2Val)
-                                    val newContent = json.toString(2)
-                                    saveLocalFile(context, "market_monitor_config.json", newContent)
-                                    onImportConfig(newContent)
-                                    NetworkClient.uploadMonitorConfig(newContent) { res ->
-                                        savingCash = false
-                                        res.fold(
-                                            onSuccess = {
-                                                Toast.makeText(context, "账户资金已更新并同步到服务器！", Toast.LENGTH_SHORT).show()
-                                                onRefresh()
-                                            },
-                                            onFailure = { err ->
-                                                Toast.makeText(context, "资金已保存至本地，但同步服务器失败: ${err.message}", Toast.LENGTH_LONG).show()
-                                            }
-                                        )
-                                    }
-                                } catch (e: Exception) {
+                            if (NetworkClient.getBaseUrl().isNotEmpty()) {
+                                NetworkClient.correctCash(cashVal, t2Val) { res ->
                                     savingCash = false
-                                    Toast.makeText(context, "更新资金配置失败: ${e.message}", Toast.LENGTH_LONG).show()
+                                    res.fold(
+                                        onSuccess = {
+                                            Toast.makeText(context, "账户资金已修正并同步到服务器！", Toast.LENGTH_SHORT).show()
+                                            onRefresh()
+                                        },
+                                        onFailure = { err ->
+                                            Toast.makeText(context, "同步服务器失败: ${err.message}", Toast.LENGTH_LONG).show()
+                                        }
+                                    )
                                 }
                             } else {
-                                savingCash = false
-                                Toast.makeText(context, "未找到本地配置文件，请先从云端同步", Toast.LENGTH_LONG).show()
+                                // Local offline fallback
+                                val configStr = readLocalFile(context, "market_monitor_config.json")
+                                if (configStr != null) {
+                                    try {
+                                        val json = org.json.JSONObject(configStr)
+                                        json.put("cash", cashVal)
+                                        json.put("t2_pending_cash", t2Val)
+                                        val newContent = json.toString(2)
+                                        saveLocalFile(context, "market_monitor_config.json", newContent)
+                                        onImportConfig(newContent)
+                                        savingCash = false
+                                        Toast.makeText(context, "本地账户资金修正成功！", Toast.LENGTH_SHORT).show()
+                                        onRefresh()
+                                    } catch (e: Exception) {
+                                        savingCash = false
+                                        Toast.makeText(context, "更新本地资金配置失败: ${e.message}", Toast.LENGTH_LONG).show()
+                                    }
+                                } else {
+                                    savingCash = false
+                                    Toast.makeText(context, "未找到本地配置文件，请先从云端同步", Toast.LENGTH_LONG).show()
+                                }
                             }
                         },
                         enabled = !savingCash,

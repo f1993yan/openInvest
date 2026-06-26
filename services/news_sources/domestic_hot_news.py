@@ -123,6 +123,111 @@ SECTOR_THEMES: Sequence[SectorTheme] = (
             {"symbol": "600760", "name": "中航沈飞", "market": "A股", "reason": "航空主机厂龙头"},
         ),
     ),
+    SectorTheme(
+        name="低空经济",
+        keywords=("低空", "eVTOL", "飞行汽车", "通航", "空域管理"),
+        concept_names=("低空经济", "飞行汽车", "通用航空"),
+        leaders=(
+            {"symbol": "002097", "name": "山河智能", "market": "A股", "reason": "通航飞机制造"},
+            {"symbol": "688076", "name": "诺泰生物", "market": "A股", "reason": "低空经济概念"},
+        ),
+    ),
+    SectorTheme(
+        name="固态电池",
+        keywords=("固态电池", "全固态", "硫化物电解质", "氧化物电解质"),
+        concept_names=("固态电池",),
+        leaders=(
+            {"symbol": "300750", "name": "宁德时代", "market": "A股", "reason": "动力电池龙头布局固态"},
+            {"symbol": "603659", "name": "璞泰来", "market": "A股", "reason": "负极材料龙头"},
+        ),
+    ),
+    SectorTheme(
+        name="算力租赁",
+        keywords=("算力租赁", "算力服务", "GPU租赁", "AI服务器租赁"),
+        concept_names=("算力租赁",),
+        leaders=(
+            {"symbol": "600845", "name": "宝信软件", "market": "A股", "reason": "IDC算力龙头"},
+            {"symbol": "300738", "name": "奥飞数据", "market": "A股", "reason": "IDC运营"},
+        ),
+    ),
+    SectorTheme(
+        name="创新药",
+        keywords=("创新药", "PD-1", "ADC", "双抗", "GLP-1", "减重药", "FDA获批", "出海", "license-out"),
+        concept_names=("创新药", "生物医药", "CXO概念"),
+        leaders=(
+            {"symbol": "600276", "name": "恒瑞医药", "market": "A股", "reason": "创新药龙头"},
+            {"symbol": "300760", "name": "迈瑞医疗", "market": "A股", "reason": "医疗器械龙头"},
+        ),
+    ),
+    SectorTheme(
+        name="量子计算",
+        keywords=("量子计算", "量子通信", "量子芯片", "量子纠缠"),
+        concept_names=("量子科技",),
+        leaders=(
+            {"symbol": "002222", "name": "福晶科技", "market": "A股", "reason": "量子通信概念"},
+        ),
+    ),
+    SectorTheme(
+        name="光通信",
+        keywords=("光通信", "光模块", "光纤", "光缆", "400G", "800G", "1.6T"),
+        concept_names=("光通信", "CPO概念"),
+        leaders=(
+            {"symbol": "600487", "name": "亨通光电", "market": "A股", "reason": "光通信龙头"},
+            {"symbol": "300308", "name": "中际旭创", "market": "A股", "reason": "光模块龙头"},
+        ),
+    ),
+    SectorTheme(
+        name="卫星互联网",
+        keywords=("卫星", "星链", "6G", "天地一体化", "卫星通信"),
+        concept_names=("卫星互联网", "6G概念"),
+        leaders=(
+            {"symbol": "600118", "name": "中国卫星", "market": "A股", "reason": "卫星制造龙头"},
+            {"symbol": "002115", "name": "三维通信", "market": "A股", "reason": "卫星通信设备"},
+        ),
+    ),
+    SectorTheme(
+        name="商业航天",
+        keywords=("商业航天", "火箭", "可回收", "发射", "星座组网"),
+        concept_names=("商业航天",),
+        leaders=(
+            {"symbol": "688501", "name": "航天晨光", "market": "A股", "reason": "航天装备"},
+        ),
+    ),
+    SectorTheme(
+        name="黄金",
+        keywords=("黄金", "金价", "避险", "央行购金", "贵金属"),
+        concept_names=("黄金概念", "贵金属"),
+        leaders=(
+            {"symbol": "600547", "name": "山东黄金", "market": "A股", "reason": "黄金采选龙头"},
+            {"symbol": "002155", "name": "湖南黄金", "market": "A股", "reason": "黄金开采"},
+        ),
+    ),
+    SectorTheme(
+        name="猪肉养殖",
+        keywords=("猪价", "养殖", "猪肉", "生猪", "非洲猪瘟", "能繁母猪"),
+        concept_names=("猪肉概念",),
+        leaders=(
+            {"symbol": "002714", "name": "牧原股份", "market": "A股", "reason": "生猪养殖龙头"},
+        ),
+    ),
+    SectorTheme(
+        name="房地产",
+        keywords=("房地产", "楼市", "保交楼", "限购", "首付", "房贷", "土地", "城中村"),
+        concept_names=("房地产开发",),
+        leaders=(
+            {"symbol": "001979", "name": "招商蛇口", "market": "A股", "reason": "地产龙头"},
+            {"symbol": "600048", "name": "保利发展", "market": "A股", "reason": "央企地产"},
+        ),
+    ),
+    SectorTheme(
+        name="金融",
+        keywords=("券商", "银行", "保险", "降息", "降准", "MLF", "LPR", "金融"),
+        concept_names=("券商概念", "银行"),
+        leaders=(
+            {"symbol": "601318", "name": "中国平安", "market": "A股", "reason": "保险龙头"},
+            {"symbol": "600036", "name": "招商银行", "market": "A股", "reason": "零售银行龙头"},
+        ),
+    ),
 )
 
 
@@ -224,13 +329,55 @@ def infer_sectors(text: str, *, limit: int = 3) -> List[SectorTheme]:
     return [theme for _, theme in scored[:limit]]
 
 
-def find_sector_leaders(theme: SectorTheme, *, max_leaders: int = 3) -> List[Dict[str, Any]]:
+def find_sector_leaders(theme: SectorTheme, *, max_leaders: int = 5) -> List[Dict[str, Any]]:
     """Use akshare concept constituents when available, otherwise fallback."""
-    if os.getenv("INVEST_NEWS_AKSHARE_LEADERS", "0") == "1":
+    if os.getenv("INVEST_NEWS_AKSHARE_LEADERS", "1") == "1":  # 默认开启
         ak_leaders = _find_akshare_leaders(theme, max_leaders=max_leaders)
         if ak_leaders:
             return ak_leaders
     return [dict(item, source="fallback_theme_map") for item in theme.leaders[:max_leaders]]
+
+
+# 股票代码提取：从新闻标题/正文中找 A股代码（6位数字）和港股代码（5位数字）
+_STOCK_CODE_RE = re.compile(r'(?:^|[^\d])(\d{6})(?:[^\d]|$)')
+# 公司简称映射 → 股票代码
+_COMPANY_NAME_TO_SYMBOL: Dict[str, str] = {
+    "宁德时代": "300750", "比亚迪": "002594", "中芯国际": "688981",
+    "华天科技": "002185", "工业富联": "601138", "亨通光电": "600487",
+    "中际旭创": "300308", "胜宏科技": "300476", "恒瑞医药": "600276",
+    "迈瑞医疗": "300760", "腾讯": "00700", "阿里巴巴": "09988",
+    "贵州茅台": "600519", "招商银行": "600036", "中国平安": "601318",
+    "中兴通讯": "000063", "长江电力": "600900", "中国西电": "601179",
+    "应流股份": "603308", "中航沈飞": "600760", "鼎泰高科": "301377",
+    "菲利华": "300395", "晶晨股份": "688099", "沪电股份": "002463",
+    "中兴": "000063", "茅台": "600519", "平安": "601318",
+    "牧原股份": "002714", "山东黄金": "600547", "中国卫星": "600118",
+    "宝信软件": "600845", "新莱应材": "300260",
+}
+
+
+def extract_stock_symbols_from_text(text: str) -> List[Dict[str, str]]:
+    """从新闻文本中提取股票代码和公司名称"""
+    results = []
+    seen = set()
+
+    # 1. 直接6位代码匹配
+    for m in _STOCK_CODE_RE.finditer(text):
+        code = m.group(1)
+        if code not in seen and len(code) == 6:
+            # A股代码范围：60/68/00/30开头
+            if code[:2] in ("60", "68", "00", "30"):
+                seen.add(code)
+                results.append({"symbol": code, "name": "", "market": "A股", "source": "regex_code"})
+
+    # 2. 公司简称匹配
+    text_lower = text.lower()
+    for name, sym in _COMPANY_NAME_TO_SYMBOL.items():
+        if sym not in seen and name in text:
+            seen.add(sym)
+            results.append({"symbol": sym, "name": name, "market": "A股", "source": "regex_name"})
+
+    return results
 
 
 def format_sector_brief(items: Iterable[RawNewsItem], *, max_items: int = 8) -> str:

@@ -24,6 +24,12 @@ openInvest 有三个调用层，每层服务不同对象：
 - CLI 子命令缺写操作时，**优先补 CLI 子命令**而不是只让 agent 调 web API curl
 - 不要在 SKILL.md 写"CLI 只读 / 写操作走 web API"——这是反产品哲学的措辞
 
+### 移动端与库化设计
+
+- **模块分离 (Android Core Module)**：Chaquopy Python 运行环境以及 `NetworkClient`、`LocalCommitteeRunner` 等底层逻辑已提取为独立的 Android Library 模块 `:openinvest-core`。`:app` 模块专注于 Compose UI 并直接引入 `:openinvest-core` 依赖。
+- **账本优先的资金修正**：资金修正（桌面端点击 `cash_bar` / 手机端 SettingsDialog / 港股 T+2 释放）禁止使用覆盖式 JSON 配置文件写入与上传（避免擦除事务流水），必须统一使用 `POST /api/accounts/real/cash` 或本地 Ledger 实例的 `correct_cash` 方法，以 Ledger 数据库为单一可信源。
+
+
 ## 测试纪律
 
 - **CI 自动跑**（`.github/workflows/ci.yml`）—— pytest 全套 + smoke import + 脱敏字段 grep

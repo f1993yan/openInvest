@@ -1,24 +1,6 @@
-import java.io.File
-
 plugins {
     alias(libs.plugins.android.application)
     alias(libs.plugins.kotlin.compose)
-    id("com.chaquo.python")
-}
-
-chaquopy {
-    defaultConfig {
-        version = "3.11"
-        pip {
-            install("openai")
-            install("httpx<0.28")
-            install("pandas")
-            install("numpy")
-            install("requests")
-            install("python-frontmatter")
-            install("portalocker")
-        }
-    }
 }
 
 android {
@@ -55,41 +37,8 @@ android {
     }
 }
 
-val projectRootDir = project.rootDir
-val appProjectDir = projectDir
-
-tasks.register("copyPythonSources") {
-    val srcDir = projectRootDir.parentFile
-    val destDir = File(appProjectDir, "src/main/python")
-    
-    inputs.files(listOf("core", "utils", "agents", "db", "jobs").map { File(srcDir, it) })
-    outputs.dir(destDir)
-
-    doLast {
-        destDir.deleteRecursively()
-        destDir.mkdirs()
-        
-        val dirsToCopy = listOf("core", "utils", "agents", "db", "jobs")
-        dirsToCopy.forEach { dirName ->
-            val fromDir = File(srcDir, dirName)
-            if (fromDir.exists()) {
-                fromDir.copyRecursively(File(destDir, dirName), overwrite = true)
-            }
-        }
-    }
-}
-
-tasks.named("preBuild") {
-    dependsOn("copyPythonSources")
-}
-
-tasks.configureEach {
-    if (name.startsWith("merge") && name.endsWith("PythonSources")) {
-        dependsOn("copyPythonSources")
-    }
-}
-
 dependencies {
+    implementation(project(":openinvest-core"))
     implementation(platform(libs.androidx.compose.bom))
     implementation(libs.androidx.activity.compose)
     implementation(libs.androidx.compose.material3)

@@ -1,0 +1,6 @@
+name: daily_stock_selection_close
+description: Run A-share daily stock selection at 15:00 on trading days
+schedule: "0 15 * * 1-5"
+timezone: Asia/Shanghai
+entry: jobs.daily_stock_selection:run
+enabled: true

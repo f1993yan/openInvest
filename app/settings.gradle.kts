@@ -24,3 +24,4 @@ dependencyResolutionManagement {
 
 rootProject.name = "OpenInvest"
 include(":app")
+include(":openinvest-core")

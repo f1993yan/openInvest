@@ -207,8 +207,8 @@ def _extract_one_line(text: Any) -> str:
     for key in ("ONE_LINE:", "HUMAN_CHECK:", "RATIONALE:"):
         match = re.search(rf"{key}\s*(.+?)(?=\s+[A-Z_]+:|$)", value, re.S)
         if match:
-            return _short(match.group(1).strip(), 140)
-    return _short(value, 140) if value else "-"
+            return _short(match.group(1).strip(), 300)
+    return _short(value, 300) if value else "-"
 
 
 def _extract_risk_flags(text: Any) -> List[str]:

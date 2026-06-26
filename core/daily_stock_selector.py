@@ -169,6 +169,8 @@ class DailySelectionResult:
     trade_date: str
     sectors: List[SectorSelection]
     stocks: List[StockSelection]
+    reference_pool: List[StockSelection]  # 板块龙头参考池（大市值稳定标的）
+    action_pool: List[StockSelection]     # 异动股实战池（技术异动/高波动）
     news_impact_summary: Dict[str, Any]
 
 
@@ -248,11 +250,13 @@ def build_daily_selection(
             _append_unique(bucket["reasons"], f"{sector}板块大资金流入强，板块内资金排名靠前", limit=5)
 
     stocks: List[StockSelection] = []
+    _tapes: Dict[str, Any] = {}
     affordability_filtered = 0
     for symbol, bucket in stock_buckets.items():
         tape = analyze_daily_tape(history_by_symbol.get(symbol), trade_date=trade_date)
         if tape is None:
             continue
+        _tapes[symbol] = tape
         trend = analyze_multi_period_trend(history_by_symbol.get(symbol), trade_date=trade_date)
         if trend is None:
             continue
@@ -329,10 +333,30 @@ def build_daily_selection(
 
     stocks.sort(key=lambda row: (-row.score, row.symbol))
     sector_rows = _rank_sectors(news_rows, stocks=stocks, flows=flow_rows, max_sectors=max_sectors)
+
+    # 双池架构：参考池（板块龙头大市值）+ 实战池（异动高波动）
+    reference_pool = []
+    action_pool = []
+    for s in stocks[:max_stocks]:
+        tape = _tapes.get(s.symbol)
+        is_leader = any(
+            leader.get("symbol") == s.symbol
+            for sector in sector_rows
+            for leader in (sector.leaders if hasattr(sector, 'leaders') else [])
+        )
+        if tape and hasattr(tape, 'change_pct') and abs(tape.change_pct) >= 5.0:
+            action_pool.append(s)
+        elif is_leader or (s.fundamental_score and s.fundamental_score >= 60):
+            reference_pool.append(s)
+        else:
+            action_pool.append(s)
+
     return DailySelectionResult(
         trade_date=trade_date or _infer_latest_date(history_by_symbol),
         sectors=sector_rows,
         stocks=stocks[:max_stocks],
+        reference_pool=reference_pool[:10],
+        action_pool=action_pool[:10],
         news_impact_summary={
             **_summarize_news_impact(news_rows),
             "affordability_filtered": affordability_filtered,
@@ -844,6 +868,8 @@ def result_to_dict(result: DailySelectionResult) -> Dict[str, Any]:
         "trade_date": result.trade_date,
         "sectors": [asdict(row) for row in result.sectors],
         "stocks": [asdict(row) for row in result.stocks],
+        "reference_pool": [asdict(row) for row in result.reference_pool],
+        "action_pool": [asdict(row) for row in result.action_pool],
         "news_impact_summary": result.news_impact_summary,
     }
 

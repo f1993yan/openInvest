@@ -75,6 +75,7 @@ class MonitorWindow(MonitorNewsMixin, MonitorSelectionMixin, MonitorTradeMixin, 
         self.news_cards: List[Dict[str, Any]] = []
         self.news_source: str = ""
         self.trade_popover: Optional[tk.Frame] = None
+        self.cash_popover: Optional[tk.Frame] = None
         self.trade_scroll_canvas: Optional[tk.Canvas] = None
         self.selection_popover: Optional[tk.Frame] = None
         self.selection_popover_symbol: Optional[str] = None
@@ -207,6 +208,8 @@ class MonitorWindow(MonitorNewsMixin, MonitorSelectionMixin, MonitorTradeMixin, 
         ).pack(side=tk.LEFT)
         self.cash_bar = CashRatioBar(top, width=226, height=18)
         self.cash_bar.pack(side=tk.RIGHT)
+        self.cash_bar.configure(cursor="hand2")
+        self.cash_bar.bind("<Button-1>", lambda _event: self._toggle_cash_correction_popover())
 
         search_wrap = tk.Frame(self.root, bg="#eef2f7", padx=10, pady=5)
         search_wrap.pack(fill=tk.X, padx=12, pady=(2, 7))
@@ -520,6 +523,12 @@ class MonitorWindow(MonitorNewsMixin, MonitorSelectionMixin, MonitorTradeMixin, 
                 config_path.parent.mkdir(parents=True, exist_ok=True)
                 with open(config_path, "w", encoding="utf-8") as f:
                     json.dump(config_data, f, ensure_ascii=False, indent=2)
+                try:
+                    from db.account_ledger import AccountLedger
+                    ledger = AccountLedger()
+                    ledger.initialize_from_monitor_config(config_data, reset=True)
+                except Exception as le:
+                    print(f"Failed to re-initialize ledger after sync: {le}")
             elif resp_config.status_code == 404:
                 pass
             else:
@@ -1074,6 +1083,136 @@ class MonitorWindow(MonitorNewsMixin, MonitorSelectionMixin, MonitorTradeMixin, 
                 return code, name, p_info
 
         return None
+
+    def _toggle_cash_correction_popover(self) -> None:
+        if self.cash_popover and self.cash_popover.winfo_exists():
+            self._close_cash_correction_popover()
+            return
+        self._open_cash_correction_popover()
+
+    def _open_cash_correction_popover(self) -> None:
+        self._close_cash_correction_popover()
+        if hasattr(self, "_close_trade_popover"):
+            self._close_trade_popover()
+        if hasattr(self, "_close_selection_popover"):
+            self._close_selection_popover()
+        
+        popover = tk.Frame(self.root, bg=LINE, padx=1, pady=1)
+        self.cash_popover = popover
+        panel = tk.Frame(popover, bg=PANEL_BG, padx=12, pady=10)
+        panel.pack(fill=tk.BOTH, expand=True)
+        
+        top = tk.Frame(panel, bg=PANEL_BG)
+        top.pack(fill=tk.X)
+        tk.Label(
+            top,
+            text="修正账户现金",
+            bg=PANEL_BG,
+            fg=TEXT,
+            font=("Microsoft YaHei UI", 10, "bold"),
+        ).pack(side=tk.LEFT)
+        close_btn = tk.Label(top, text="×", bg=PANEL_BG, fg=MUTED, font=("Segoe UI", 12), width=2, cursor="hand2")
+        close_btn.pack(side=tk.RIGHT)
+        close_btn.bind("<Button-1>", lambda _event: self._close_cash_correction_popover())
+        
+        # Available Cash field
+        cash_frame = tk.Frame(panel, bg=PANEL_BG)
+        cash_frame.pack(fill=tk.X, pady=(10, 5))
+        tk.Label(cash_frame, text="可用现金(CNY):", bg=PANEL_BG, fg=TEXT, font=("Microsoft YaHei UI", 9)).pack(side=tk.LEFT)
+        
+        curr_cash = 0.0
+        curr_t2 = 0.0
+        if not self.demo:
+            try:
+                from db.account_ledger import AccountLedger, REAL_ACCOUNT
+                from jobs.market_monitor import load_config
+                ledger = AccountLedger()
+                ledger.ensure_initialized(load_config())
+                summary = ledger.account_summary(REAL_ACCOUNT)
+                curr_cash = float(summary.get("cash_cny", 0.0) or 0.0)
+                curr_t2 = float(summary.get("t2_pending_cash_cny", 0.0) or 0.0)
+            except Exception:
+                pass
+        
+        cash_var = tk.StringVar(value=f"{curr_cash:.2f}")
+        cash_entry = tk.Entry(cash_frame, textvariable=cash_var, width=12, bg="#eef2f7", bd=0, fg=TEXT, font=("Microsoft YaHei UI", 9, "bold"))
+        cash_entry.pack(side=tk.RIGHT)
+        
+        # T+2 Pending Cash field
+        t2_frame = tk.Frame(panel, bg=PANEL_BG)
+        t2_frame.pack(fill=tk.X, pady=5)
+        tk.Label(t2_frame, text="T+2待交收(CNY):", bg=PANEL_BG, fg=TEXT, font=("Microsoft YaHei UI", 9)).pack(side=tk.LEFT)
+        
+        t2_var = tk.StringVar(value=f"{curr_t2:.2f}")
+        t2_entry = tk.Entry(t2_frame, textvariable=t2_var, width=12, bg="#eef2f7", bd=0, fg=TEXT, font=("Microsoft YaHei UI", 9, "bold"))
+        t2_entry.pack(side=tk.RIGHT)
+        
+        # Action button
+        btn_frame = tk.Frame(panel, bg=PANEL_BG)
+        btn_frame.pack(fill=tk.X, pady=(10, 0))
+        
+        status_lbl = tk.Label(btn_frame, text="", bg=PANEL_BG, fg=MUTED, font=("Microsoft YaHei UI", 8))
+        status_lbl.pack(side=tk.LEFT)
+        
+        confirm_btn = tk.Label(
+            btn_frame,
+            text="确认",
+            bg=BLUE,
+            fg="#ffffff",
+            font=("Microsoft YaHei UI", 8, "bold"),
+            padx=12,
+            pady=4,
+            cursor="hand2",
+        )
+        confirm_btn.pack(side=tk.RIGHT)
+        
+        def do_correct(_event: Optional[tk.Event] = None) -> str:
+            try:
+                cash_val = float(cash_var.get().strip())
+                t2_val = float(t2_var.get().strip())
+                if cash_val < 0 or t2_val < 0:
+                    raise ValueError("金额不能为负数")
+                
+                if self.demo:
+                    status_lbl.configure(text="演示模式: 未写入")
+                else:
+                    from db.account_ledger import AccountLedger, REAL_ACCOUNT
+                    from jobs.market_monitor import load_config
+                    ledger = AccountLedger()
+                    ledger.ensure_initialized(load_config())
+                    ledger.correct_cash(REAL_ACCOUNT, cash_val, t2_val)
+                    
+                status_lbl.configure(text="成功")
+                self.status_text.set("可用现金/待交收现金修正成功")
+                self.refresh()
+                self._close_cash_correction_popover()
+                
+                if not self.demo and self.remote_server_url:
+                    if messagebox.askyesno("上传数据", "现金修正执行成功，是否上传最新的持仓配置数据到远程服务器？"):
+                        self.upload_data()
+                        
+                return "break"
+            except Exception as exc:
+                status_lbl.configure(text="失败")
+                messagebox.showerror("错误", f"修正现金失败: {exc}")
+                return "break"
+                
+        confirm_btn.bind("<Button-1>", do_correct)
+        cash_entry.bind("<Return>", do_correct)
+        t2_entry.bind("<Return>", do_correct)
+        
+        width = 240
+        height = 140
+        x = max(10, self.root.winfo_width() - width - 10)
+        y = 50
+        popover.place(x=x, y=y, width=width, height=height)
+        popover.lift()
+        self.root.tk.call("raise", popover._w)
+
+    def _close_cash_correction_popover(self) -> None:
+        if self.cash_popover and self.cash_popover.winfo_exists():
+            self.cash_popover.destroy()
+        self.cash_popover = None
 
 
 def main() -> None:

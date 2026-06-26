@@ -1,0 +1,7 @@
+/build
+src/main/python/db/*.db
+src/main/python/db/*.sqlite
+src/main/python/db/*.sqlite-journal
+src/main/python/db/*.db-shm
+src/main/python/db/*.db-wal
+src/main/python/jobs/market_monitor_config.json

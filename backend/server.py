@@ -376,6 +376,23 @@ async def record_real_account_trade(body: AccountTradeRequest = Body(...)) -> Di
     return {"ok": True, "trade": trade.__dict__}
 
 
+@app.post("/api/accounts/real/cash")
+async def correct_real_account_cash(body: CashCorrectionRequest = Body(...)) -> Dict[str, Any]:
+    try:
+        from db.account_ledger import REAL_ACCOUNT
+        _get_account_ledger().correct_cash(
+            account=REAL_ACCOUNT,
+            cash=body.cash,
+            t2_pending=body.t2_pending_cash,
+        )
+        return {"ok": True, "message": "可用现金/待交收现金修正成功"}
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to correct cash: {str(e)}")
+
+
+
 @app.get("/api/committee")
 async def run_committee_get(
     symbol: str,

@@ -1,0 +1,421 @@
+"""Smart Money Concepts (SMC) strategy backtester.
+
+This module is intentionally deterministic and LLM-free.  It implements a
+compact SMC rule set:
+
+- swing highs/lows from local pivots;
+- BOS / CHOCH from closes breaking the latest confirmed swing;
+- bullish / bearish fair value gaps;
+- liquidity sweeps of prior swing levels;
+- order-block style entries after a break of structure.
+
+The model is not a promise that SMC is profitable.  It is a repeatable research
+tool for testing whether these concepts have edge on a given OHLCV series.
+"""
+from __future__ import annotations
+
+from dataclasses import dataclass, asdict
+from typing import Any, Dict, List, Optional
+
+import numpy as np
+import pandas as pd
+
+
+@dataclass(frozen=True)
+class SMCSignal:
+    date: str
+    kind: str
+    direction: str
+    price: float
+    level: float
+    note: str = ""
+
+
+@dataclass(frozen=True)
+class SMCTrade:
+    entry_date: str
+    exit_date: str
+    direction: str
+    entry_price: float
+    exit_price: float
+    stop_price: float
+    take_profit_price: float
+    qty: float
+    pnl: float
+    return_pct: float
+    exit_reason: str
+
+
+@dataclass(frozen=True)
+class SMCBacktestConfig:
+    swing_lookback: int = 3
+    atr_window: int = 14
+    risk_per_trade_pct: float = 1.0
+    initial_cash: float = 100_000.0
+    reward_risk: float = 2.0
+    max_hold_bars: int = 20
+    min_stop_atr: float = 0.8
+    require_fvg: bool = False
+    require_liquidity_sweep: bool = False
+    allow_short: bool = False
+    fee_bps: float = 5.0
+
+
+def normalize_ohlcv(df: pd.DataFrame) -> pd.DataFrame:
+    """Return sorted OHLCV data with required columns and numeric values."""
+    if df is None or df.empty:
+        return pd.DataFrame(columns=["Open", "High", "Low", "Close", "Volume"])
+
+    out = df.copy()
+    rename = {c: c.capitalize() for c in out.columns if str(c).lower() in {"open", "high", "low", "close", "volume"}}
+    out = out.rename(columns=rename)
+    for col in ["Open", "High", "Low", "Close"]:
+        if col not in out.columns:
+            raise ValueError(f"missing OHLC column: {col}")
+        out[col] = pd.to_numeric(out[col], errors="coerce")
+    if "Volume" not in out.columns:
+        out["Volume"] = 0.0
+    out["Volume"] = pd.to_numeric(out["Volume"], errors="coerce").fillna(0.0)
+    out = out.dropna(subset=["Open", "High", "Low", "Close"]).sort_index()
+    return out
+
+
+def add_smc_features(df: pd.DataFrame, config: SMCBacktestConfig | None = None) -> pd.DataFrame:
+    """Annotate OHLCV data with SMC feature columns."""
+    cfg = config or SMCBacktestConfig()
+    out = normalize_ohlcv(df)
+    if out.empty:
+        return out
+
+    high = out["High"]
+    low = out["Low"]
+    close = out["Close"]
+    tr = pd.concat(
+        [
+            high - low,
+            (high - close.shift(1)).abs(),
+            (low - close.shift(1)).abs(),
+        ],
+        axis=1,
+    ).max(axis=1)
+    out["ATR"] = tr.rolling(cfg.atr_window, min_periods=1).mean()
+
+    n = cfg.swing_lookback
+    out["swing_high"] = False
+    out["swing_low"] = False
+    for i in range(n, len(out) - n):
+        window_high = high.iloc[i - n : i + n + 1]
+        window_low = low.iloc[i - n : i + n + 1]
+        out.iat[i, out.columns.get_loc("swing_high")] = high.iloc[i] == window_high.max()
+        out.iat[i, out.columns.get_loc("swing_low")] = low.iloc[i] == window_low.min()
+
+    out["last_swing_high"] = np.nan
+    out["last_swing_low"] = np.nan
+    last_high = np.nan
+    last_low = np.nan
+    # 关键：bar p 的 swing 枢轴用了 [p-n, p+n] 的前向窗口确认，要到 bar p+n
+    # 收盘（窗口末端全部可观测）才"可知"。若在枢轴当根 p 就更新 last_swing，则
+    # (p, p+n] 区间内的 BOS/CHOCH 判定会引用一个依赖未来数据的摆动位 —— 前视偏差。
+    # 修复：遍历到 bar j 时，先把"此刻刚好确认"的枢轴（位于 conf=j-n，其前向窗口
+    # 末端 (j-n)+n = j 正好闭合）折入累加器，再写入本行。于是 bar j 暴露的
+    # last_swing 至多含确认根 <= j 的枢轴，close[j] 与该枢轴均在 bar j 收盘时可知，
+    # 信息一致、无未来数据。该 feature 同时被 generate_smc_signals 共用，两者都受益。
+    for j in range(len(out)):
+        conf = j - n  # 前向窗口在本根收盘闭合、此刻才确认的枢轴位置
+        if conf >= 0:
+            if bool(out["swing_high"].iloc[conf]):
+                last_high = float(high.iloc[conf])
+            if bool(out["swing_low"].iloc[conf]):
+                last_low = float(low.iloc[conf])
+        out.iat[j, out.columns.get_loc("last_swing_high")] = last_high
+        out.iat[j, out.columns.get_loc("last_swing_low")] = last_low
+
+    out["bullish_bos"] = close > out["last_swing_high"]
+    out["bearish_bos"] = close < out["last_swing_low"]
+    out["bullish_choch"] = False
+    out["bearish_choch"] = False
+    structure = "neutral"
+    for i in range(len(out)):
+        bullish_break = bool(out["bullish_bos"].iloc[i])
+        bearish_break = bool(out["bearish_bos"].iloc[i])
+        if bullish_break and structure == "bearish":
+            out.iat[i, out.columns.get_loc("bullish_choch")] = True
+        if bearish_break and structure == "bullish":
+            out.iat[i, out.columns.get_loc("bearish_choch")] = True
+        if bullish_break:
+            structure = "bullish"
+        elif bearish_break:
+            structure = "bearish"
+    out["bullish_fvg"] = low > high.shift(2)
+    out["bearish_fvg"] = high < low.shift(2)
+    out["bullish_liquidity_sweep"] = (low < out["last_swing_low"]) & (close > out["last_swing_low"])
+    out["bearish_liquidity_sweep"] = (high > out["last_swing_high"]) & (close < out["last_swing_high"])
+    return out
+
+
+def generate_smc_signals(df: pd.DataFrame, config: SMCBacktestConfig | None = None) -> List[SMCSignal]:
+    """Generate human-readable SMC events from OHLCV data."""
+    cfg = config or SMCBacktestConfig()
+    data = add_smc_features(df, cfg)
+    signals: List[SMCSignal] = []
+    for idx, row in data.iterrows():
+        date = _date_str(idx)
+        if bool(row.get("bullish_bos")):
+            signals.append(SMCSignal(date, "BOS", "long", float(row["Close"]), float(row["last_swing_high"]), "close broke prior swing high"))
+        if bool(row.get("bearish_bos")):
+            signals.append(SMCSignal(date, "BOS", "short", float(row["Close"]), float(row["last_swing_low"]), "close broke prior swing low"))
+        if bool(row.get("bullish_choch")):
+            signals.append(SMCSignal(date, "CHOCH", "long", float(row["Close"]), float(row["last_swing_high"]), "bullish change of character"))
+        if bool(row.get("bearish_choch")):
+            signals.append(SMCSignal(date, "CHOCH", "short", float(row["Close"]), float(row["last_swing_low"]), "bearish change of character"))
+        if bool(row.get("bullish_fvg")):
+            signals.append(SMCSignal(date, "FVG", "long", float(row["Close"]), float(row["High"]), "bullish imbalance"))
+        if bool(row.get("bearish_fvg")):
+            signals.append(SMCSignal(date, "FVG", "short", float(row["Close"]), float(row["Low"]), "bearish imbalance"))
+        if bool(row.get("bullish_liquidity_sweep")):
+            signals.append(SMCSignal(date, "SWEEP", "long", float(row["Close"]), float(row["last_swing_low"]), "swept sell-side liquidity and closed back above"))
+        if bool(row.get("bearish_liquidity_sweep")):
+            signals.append(SMCSignal(date, "SWEEP", "short", float(row["Close"]), float(row["last_swing_high"]), "swept buy-side liquidity and closed back below"))
+    return signals
+
+
+def backtest_smc_strategy(df: pd.DataFrame, config: SMCBacktestConfig | None = None) -> Dict[str, Any]:
+    """Run a single-position SMC backtest and return metrics plus trades."""
+    cfg = config or SMCBacktestConfig()
+    data = add_smc_features(df, cfg)
+    if len(data) < max(cfg.swing_lookback * 2 + 5, cfg.atr_window):
+        return _empty_result(cfg)
+
+    cash = float(cfg.initial_cash)
+    equity_curve: List[tuple[str, float]] = []
+    trades: List[SMCTrade] = []
+    position: Optional[Dict[str, Any]] = None
+    fee_rate = cfg.fee_bps / 10_000
+    trend = "neutral"
+    # 待执行入场：SMC 信号由"当根收盘价"算出（bullish_bos = close > swing 等），
+    # 只有 bar i 收盘后才成立。若在同一根 bar 的 open 成交，就是用未来信息
+    # 回到过去价位成交（前视偏差），白吃 open→close 的位移，系统性虚高收益。
+    # 正确做法：bar i 收盘形成信号 → bar i+1 开盘成交。
+    # pending_entry 暂存上一根 bar 决定的方向与触发它的那根 row（用于算止损）。
+    pending_entry: Optional[Dict[str, Any]] = None
+
+    for i, (idx, row) in enumerate(data.iterrows()):
+        date = _date_str(idx)
+        open_price = float(row["Open"])
+        high = float(row["High"])
+        low = float(row["Low"])
+        close = float(row["Close"])
+
+        if position is not None:
+            exit_price, reason = _maybe_exit(position, open_price, high, low, close, i, cfg)
+            if exit_price is not None:
+                trade = _close_trade(position, date, exit_price, reason, fee_rate)
+                trades.append(trade)
+                # 平仓返还的是不含费成本（qty*entry），出入场两笔费都已在 pnl 内扣除。
+                cash += position["qty"] * position["entry"] + trade.pnl
+                position = None
+
+        # 执行上一根 bar 形成的待入场信号：在本根 open 成交（信号 t、成交 t+1）。
+        if position is None and pending_entry is not None:
+            position = _open_position(
+                pending_entry["direction"], date, i, open_price,
+                pending_entry["signal_row"], cash, cfg, fee_rate,
+            )
+            if position is not None:
+                # 开仓现金流 = 买入成本(qty*entry) + 入场手续费。两者分开记，
+                # 避免把入场费折进 notional 后在平仓时原样退回（旧实现的 bug：
+                # 入场费实际从未被收取，round-trip 只扣了出场单边费）。
+                cash -= position["qty"] * position["entry"] + position["entry_fee"]
+        pending_entry = None
+
+        if bool(row.get("bullish_bos")):
+            trend = "bullish"
+        elif bool(row.get("bearish_bos")):
+            trend = "bearish"
+
+        # 本根收盘形成下一根的入场信号（不在本根成交，消除前视偏差）。
+        if position is None:
+            entry_direction = _entry_direction(row, trend, cfg)
+            if entry_direction:
+                pending_entry = {"direction": entry_direction, "signal_row": row}
+
+        mark_value = cash
+        if position is not None:
+            mark_value += position["qty"] * position["entry"] + _floating_pnl(position, close)
+        equity_curve.append((date, round(mark_value, 2)))
+
+    if position is not None:
+        idx = data.index[-1]
+        close = float(data["Close"].iloc[-1])
+        trade = _close_trade(position, _date_str(idx), close, "end_of_data", fee_rate)
+        trades.append(trade)
+        cash += position["qty"] * position["entry"] + trade.pnl
+        equity_curve[-1] = (_date_str(idx), round(cash, 2))
+
+    metrics = _metrics(equity_curve, trades, cfg.initial_cash)
+    return {
+        "config": asdict(cfg),
+        "metrics": metrics,
+        "trades": [asdict(t) for t in trades],
+        "equity_curve": equity_curve,
+        "signals": [asdict(s) for s in generate_smc_signals(data, cfg)],
+    }
+
+
+def _entry_direction(row: pd.Series, trend: str, cfg: SMCBacktestConfig) -> Optional[str]:
+    bullish_ok = bool(row.get("bullish_bos")) or bool(row.get("bullish_choch"))
+    bearish_ok = bool(row.get("bearish_bos")) or bool(row.get("bearish_choch"))
+    if cfg.require_fvg:
+        bullish_ok = bullish_ok and bool(row.get("bullish_fvg"))
+        bearish_ok = bearish_ok and bool(row.get("bearish_fvg"))
+    if cfg.require_liquidity_sweep:
+        bullish_ok = bullish_ok and bool(row.get("bullish_liquidity_sweep"))
+        bearish_ok = bearish_ok and bool(row.get("bearish_liquidity_sweep"))
+    if bullish_ok:
+        return "long"
+    if bearish_ok and cfg.allow_short:
+        return "short"
+    return None
+
+
+def _open_position(direction: str, date: str, bar_index: int, entry: float, row: pd.Series, cash: float, cfg: SMCBacktestConfig, fee_rate: float) -> Optional[Dict[str, Any]]:
+    atr = max(float(row.get("ATR") or 0.0), 1e-9)
+    if direction == "long":
+        structural_stop = float(row.get("last_swing_low") or np.nan)
+        raw_stop = structural_stop if np.isfinite(structural_stop) else entry - atr
+        stop = min(raw_stop, entry - cfg.min_stop_atr * atr)
+        risk_per_unit = entry - stop
+        take_profit = entry + cfg.reward_risk * risk_per_unit
+    else:
+        structural_stop = float(row.get("last_swing_high") or np.nan)
+        raw_stop = structural_stop if np.isfinite(structural_stop) else entry + atr
+        stop = max(raw_stop, entry + cfg.min_stop_atr * atr)
+        risk_per_unit = stop - entry
+        take_profit = entry - cfg.reward_risk * risk_per_unit
+    if risk_per_unit <= 0:
+        return None
+    risk_budget = cash * cfg.risk_per_trade_pct / 100
+    qty = risk_budget / risk_per_unit
+    # 现金需覆盖买入成本 + 入场手续费。用含费总额做现金约束，
+    # 但成本基（qty*entry）与手续费分开存，平仓时只返还成本基、两笔费各自计入 pnl。
+    gross = qty * entry
+    entry_fee = gross * fee_rate
+    total_cost = gross + entry_fee
+    if total_cost > cash:
+        scale = cash / total_cost
+        qty *= scale
+        gross = qty * entry
+        entry_fee = gross * fee_rate
+        total_cost = cash
+    if qty <= 0 or total_cost <= 0:
+        return None
+    return {
+        "direction": direction,
+        "entry_date": date,
+        "entry_bar": bar_index,
+        "entry": entry,
+        "stop": stop,
+        "take_profit": take_profit,
+        "qty": qty,
+        "entry_fee": entry_fee,
+        "cost_basis": gross,
+    }
+
+
+def _maybe_exit(position: Dict[str, Any], open_price: float, high: float, low: float, close: float, bar_index: int, cfg: SMCBacktestConfig) -> tuple[Optional[float], str]:
+    # 跳空成交：若开盘已穿越止损/止盈，真实成交价是更差的开盘价，而非挂单价位。
+    # 旧实现一律按挂单价成交，乐观低估了亏损（gap-through 时尤甚）。
+    # 同根 bar 内止损优先于止盈检查（保守：无法判断盘中先后，假设先触不利方向）。
+    if position["direction"] == "long":
+        if low <= position["stop"]:
+            fill = min(open_price, position["stop"]) if open_price <= position["stop"] else position["stop"]
+            return float(fill), "stop_loss"
+        if high >= position["take_profit"]:
+            fill = max(open_price, position["take_profit"]) if open_price >= position["take_profit"] else position["take_profit"]
+            return float(fill), "take_profit"
+    else:
+        if high >= position["stop"]:
+            fill = max(open_price, position["stop"]) if open_price >= position["stop"] else position["stop"]
+            return float(fill), "stop_loss"
+        if low <= position["take_profit"]:
+            fill = min(open_price, position["take_profit"]) if open_price <= position["take_profit"] else position["take_profit"]
+            return float(fill), "take_profit"
+    if bar_index - int(position["entry_bar"]) >= cfg.max_hold_bars:
+        return close, "time_exit"
+    return None, ""
+
+
+def _close_trade(position: Dict[str, Any], exit_date: str, exit_price: float, reason: str, fee_rate: float) -> SMCTrade:
+    pnl = _floating_pnl(position, exit_price)
+    exit_fee = abs(exit_price * position["qty"]) * fee_rate
+    # round-trip 双边手续费：入场费在开仓时已记于 position，出场费此处计算，
+    # 两笔都从 pnl 扣除。旧实现把入场费折进 notional 又在平仓原样退回，
+    # 等于只收了出场单边费（fee_bps=5 时真实成本被低估约 50%）。
+    pnl -= position["entry_fee"] + exit_fee
+    ret = pnl / max(position["cost_basis"], 1e-9) * 100
+    return SMCTrade(
+        entry_date=position["entry_date"],
+        exit_date=exit_date,
+        direction=position["direction"],
+        entry_price=round(position["entry"], 4),
+        exit_price=round(exit_price, 4),
+        stop_price=round(position["stop"], 4),
+        take_profit_price=round(position["take_profit"], 4),
+        qty=round(position["qty"], 4),
+        pnl=round(pnl, 2),
+        return_pct=round(ret, 4),
+        exit_reason=reason,
+    )
+
+
+def _floating_pnl(position: Dict[str, Any], price: float) -> float:
+    if position["direction"] == "long":
+        return (price - position["entry"]) * position["qty"]
+    return (position["entry"] - price) * position["qty"]
+
+
+def _metrics(equity_curve: List[tuple[str, float]], trades: List[SMCTrade], initial_cash: float) -> Dict[str, Any]:
+    final_equity = equity_curve[-1][1] if equity_curve else initial_cash
+    total_return = (final_equity / initial_cash - 1) * 100 if initial_cash > 0 else 0.0
+    values = np.array([v for _, v in equity_curve], dtype=float) if equity_curve else np.array([initial_cash])
+    peak = np.maximum.accumulate(values)
+    dd = (values - peak) / np.maximum(peak, 1e-9)
+    returns = np.diff(values) / np.maximum(values[:-1], 1e-9) if len(values) > 1 else np.array([])
+    sharpe = 0.0
+    if len(returns) > 1 and np.std(returns, ddof=1) > 1e-9:
+        sharpe = float(np.mean(returns) / np.std(returns, ddof=1) * np.sqrt(252))
+    wins = [t for t in trades if t.pnl > 0]
+    gross_win = sum(t.pnl for t in trades if t.pnl > 0)
+    gross_loss = abs(sum(t.pnl for t in trades if t.pnl < 0))
+    return {
+        "initial_cash": round(initial_cash, 2),
+        "final_equity": round(final_equity, 2),
+        "total_return_pct": round(total_return, 4),
+        "max_drawdown_pct": round(abs(float(dd.min())) * 100, 4),
+        "sharpe_ratio": round(sharpe, 4),
+        "trade_count": len(trades),
+        "win_rate_pct": round(len(wins) / len(trades) * 100, 2) if trades else 0.0,
+        "profit_factor": round(gross_win / gross_loss, 4) if gross_loss > 0 else (999.0 if gross_win > 0 else 0.0),
+    }
+
+
+def _empty_result(cfg: SMCBacktestConfig) -> Dict[str, Any]:
+    return {"config": asdict(cfg), "metrics": _metrics([], [], cfg.initial_cash), "trades": [], "equity_curve": [], "signals": []}
+
+
+def _date_str(idx: Any) -> str:
+    try:
+        return pd.to_datetime(idx).strftime("%Y-%m-%d")
+    except Exception:
+        return str(idx)
+
+
+__all__ = [
+    "SMCBacktestConfig",
+    "SMCSignal",
+    "SMCTrade",
+    "add_smc_features",
+    "backtest_smc_strategy",
+    "generate_smc_signals",
+    "normalize_ohlcv",
+]

@@ -201,7 +201,7 @@ fun MainScreen(modifier: Modifier = Modifier, onSaveUrl: (String) -> Unit) {
             for (row in rows) {
                 val cachedRow = cachedSnap?.rows?.find { it.symbol.equals(row.symbol, ignoreCase = true) }
                 val holdingsJson = try {
-                    val list = snap.rows.filter { it.is_holding && it.symbol != row.symbol }.map { h ->
+                    val list = rows.filter { it.is_holding && it.symbol != row.symbol }.map { h ->
                         mapOf(
                             "symbol" to h.symbol,
                             "name" to h.name,
@@ -271,11 +271,11 @@ fun MainScreen(modifier: Modifier = Modifier, onSaveUrl: (String) -> Unit) {
                 val resultsList = localCommitteeResults.values.toList()
                 if (resultsList.isNotEmpty()) {
                     val resultsJson = "[" + resultsList.joinToString(",") + "]"
-                    val pricesMap = snap.rows.associate { r -> r.symbol.uppercase() to mapOf("price" to r.price.current) }
+                    val pricesMap = rows.associate { r -> r.symbol.uppercase() to mapOf("price" to r.price.current) }
                     val pricesJson = gson.toJson(pricesMap)
-                    val holdingSymbols = snap.rows.filter { it.is_holding }.map { it.symbol.uppercase() }
+                    val holdingSymbols = rows.filter { it.is_holding }.map { it.symbol.uppercase() }
                     val holdingSymbolsJson = gson.toJson(holdingSymbols)
-                    val stocksList = snap.rows.map { r ->
+                    val stocksList = rows.map { r ->
                         mapOf(
                             "symbol" to r.symbol,
                             "name" to r.name,
@@ -378,7 +378,7 @@ fun MainScreen(modifier: Modifier = Modifier, onSaveUrl: (String) -> Unit) {
                         }
 
                         val holdingsJson = try {
-                            val list = snap.rows.filter { it.is_holding && it.symbol != row.symbol }.map { h ->
+                            val list = rows.filter { it.is_holding && it.symbol != row.symbol }.map { h ->
                                 mapOf(
                                     "symbol" to h.symbol,
                                     "name" to h.name,
@@ -494,11 +494,11 @@ fun MainScreen(modifier: Modifier = Modifier, onSaveUrl: (String) -> Unit) {
             val resultsList = localCommitteeResults.values.toList()
             if (resultsList.isNotEmpty()) {
                 val resultsJson = "[" + resultsList.joinToString(",") + "]"
-                val pricesMap = snap.rows.associate { r -> r.symbol.uppercase() to mapOf("price" to r.price.current) }
+                val pricesMap = rows.associate { r -> r.symbol.uppercase() to mapOf("price" to r.price.current) }
                 val pricesJson = gson.toJson(pricesMap)
-                val holdingSymbols = snap.rows.filter { it.is_holding }.map { it.symbol.uppercase() }
+                val holdingSymbols = rows.filter { it.is_holding }.map { it.symbol.uppercase() }
                 val holdingSymbolsJson = gson.toJson(holdingSymbols)
-                val stocksList = snap.rows.map { r ->
+                val stocksList = rows.map { r ->
                     mapOf(
                         "symbol" to r.symbol,
                         "name" to r.name,
@@ -1347,40 +1347,39 @@ fun MainScreen(modifier: Modifier = Modifier, onSaveUrl: (String) -> Unit) {
                                 val snapJson = gson.toJson(updatedSnap)
                                 saveLocalFile(context, "resolved_snapshot.json", snapJson)
                                 
-                                // Update market_monitor_config.json
-                                val configStr = readLocalFile(context, "market_monitor_config.json")
-                                if (configStr != null) {
-                                    try {
-                                        val configObj = JSONObject(configStr)
-                                        val configCash = configObj.optDouble("cash", 0.0)
-                                        val configT2 = configObj.optDouble("t2_pending_cash", 0.0)
-                                        configObj.put("cash", configCash + configT2)
-                                        configObj.put("t2_pending_cash", 0.0)
-                                        saveLocalFile(context, "market_monitor_config.json", configObj.toString(2))
-                                        
-                                        // Also ask for upload to cloud if remote url exists
-                                        if (NetworkClient.getBaseUrl().isNotEmpty()) {
-                                            NetworkClient.uploadMonitorConfig(configObj.toString()) { res ->
-                                                coroutineScope.launch(Dispatchers.Main) {
-                                                    res.fold(
-                                                        onSuccess = {
-                                                            Toast.makeText(context, "已更新且同步至云端", Toast.LENGTH_SHORT).show()
-                                                        },
-                                                        onFailure = { err ->
-                                                            Toast.makeText(context, "本地已更新，但同步云端失败: ${err.message}", Toast.LENGTH_LONG).show()
-                                                        }
-                                                    )
+                                if (NetworkClient.getBaseUrl().isNotEmpty()) {
+                                    NetworkClient.correctCash(originalCash + originalT2, 0.0) { res ->
+                                        coroutineScope.launch(Dispatchers.Main) {
+                                            res.fold(
+                                                onSuccess = {
+                                                    Toast.makeText(context, "已更新且同步至云端", Toast.LENGTH_SHORT).show()
+                                                    refreshData()
+                                                },
+                                                onFailure = { err ->
+                                                    Toast.makeText(context, "同步云端失败: ${err.message}", Toast.LENGTH_LONG).show()
                                                 }
-                                            }
-                                        } else {
-                                            Toast.makeText(context, "本地持仓数据更新成功！", Toast.LENGTH_SHORT).show()
+                                            )
                                         }
-                                    } catch (e: Exception) {
-                                        Log.e("MainActivity", "Failed to update market_monitor_config.json", e)
-                                        Toast.makeText(context, "更新本地持仓配置失败: ${e.message}", Toast.LENGTH_LONG).show()
                                     }
                                 } else {
-                                    Toast.makeText(context, "未找到本地持仓配置文件", Toast.LENGTH_LONG).show()
+                                    // Update market_monitor_config.json locally (offline fallback)
+                                    val configStr = readLocalFile(context, "market_monitor_config.json")
+                                    if (configStr != null) {
+                                        try {
+                                            val configObj = JSONObject(configStr)
+                                            val configCash = configObj.optDouble("cash", 0.0)
+                                            val configT2 = configObj.optDouble("t2_pending_cash", 0.0)
+                                            configObj.put("cash", configCash + configT2)
+                                            configObj.put("t2_pending_cash", 0.0)
+                                            saveLocalFile(context, "market_monitor_config.json", configObj.toString(2))
+                                            Toast.makeText(context, "本地持仓数据更新成功！", Toast.LENGTH_SHORT).show()
+                                        } catch (e: Exception) {
+                                            Log.e("MainActivity", "Failed to update market_monitor_config.json", e)
+                                            Toast.makeText(context, "更新本地持仓配置失败: ${e.message}", Toast.LENGTH_LONG).show()
+                                        }
+                                    } else {
+                                        Toast.makeText(context, "未找到本地持仓配置文件", Toast.LENGTH_LONG).show()
+                                    }
                                 }
                             }
                         }

@@ -671,5 +671,45 @@ object NetworkClient {
             }
         })
     }
+
+    fun correctCash(cash: Double, t2PendingCash: Double?, onResult: (Result<String>) -> Unit) {
+        val bodyMap = mutableMapOf<String, Any>(
+            "cash" to cash
+        )
+        if (t2PendingCash != null) {
+            bodyMap["t2_pending_cash"] = t2PendingCash
+        }
+        val requestBody = gson.toJson(bodyMap).toRequestBody(JSON_MEDIA_TYPE)
+        val request = Request.Builder()
+            .url("$baseUrl/api/accounts/real/cash")
+            .post(requestBody)
+            .build()
+
+        Log.d(TAG, "correctCash: POST $baseUrl/api/accounts/real/cash: cash=$cash, t2PendingCash=$t2PendingCash")
+        client.newCall(request).enqueue(object : Callback {
+            override fun onFailure(call: Call, e: IOException) {
+                Log.e(TAG, "correctCash failed", e)
+                runOnMain(onResult, Result.failure(e))
+            }
+
+            override fun onResponse(call: Call, response: Response) {
+                try {
+                    if (response.isSuccessful) {
+                        Log.d(TAG, "correctCash success")
+                        runOnMain(onResult, Result.success("可用现金/待交收现金修正成功"))
+                    } else {
+                        val errorMsg = response.body?.string() ?: ""
+                        Log.w(TAG, "correctCash failure: HTTP ${response.code} -> $errorMsg")
+                        runOnMain(onResult, Result.failure(IOException("修正现金失败: HTTP ${response.code}: $errorMsg")))
+                    }
+                } catch (e: Exception) {
+                    Log.e(TAG, "correctCash exception", e)
+                    runOnMain(onResult, Result.failure(e))
+                } finally {
+                    response.close()
+                }
+            }
+        })
+    }
 }
 

@@ -14,7 +14,7 @@ from typing import Any, Dict, Iterable, List
 
 from core.daily_stock_selector import build_daily_selection, result_to_dict
 from services.news_sources import RawNewsItem, fetch_all
-from services.news_sources.domestic_hot_news import enrich_news_items
+from services.news_sources.domestic_hot_news import enrich_news_items, extract_stock_symbols_from_text
 from utils.akshare_data import get_history_data
 
 
@@ -40,9 +40,29 @@ def run_daily_stock_selection(
         timeout_sec=35,
     )
     enriched = enrich_news_items(items)
+
+    # 从新闻文本中提取股票代码（增强 NLP）
+    for item in enriched:
+        text = f"{item.title} {item.snippet} {item.text}"
+        extracted = extract_stock_symbols_from_text(text)
+        if extracted:
+            meta = dict(item.raw_meta or {})
+            meta["extracted_symbols"] = extracted
+            enriched[enriched.index(item)] = RawNewsItem(
+                src_name=item.src_name, title=item.title, url=item.url,
+                snippet=item.snippet, text=item.text,
+                published_at=item.published_at, fetched_at=item.fetched_at,
+                raw_meta=meta,
+            )
+
     sector_fund_flows = _fetch_sector_fund_flows()
     flow_items = _fund_flow_items(sector_fund_flows)
-    combined_items = [*enriched, *flow_items]
+
+    # 北向个股资金流（大幅净买入标的）
+    northbound_stocks = _fetch_northbound_individual_flow(max_stocks=15)
+    northbound_items = _northbound_flow_items(northbound_stocks)
+
+    combined_items = [*enriched, *flow_items, *northbound_items]
     history = _load_candidate_history(combined_items)
     fundamentals = _load_candidate_fundamentals(combined_items)
     cash_constraint = available_cash_cny
@@ -61,6 +81,7 @@ def run_daily_stock_selection(
     payload["generated_at"] = datetime.now().isoformat(timespec="seconds")
     payload["source_news_count"] = len(enriched)
     payload["sector_fund_flow_count"] = len(sector_fund_flows)
+    payload["northbound_stock_count"] = len(northbound_stocks)
     payload["cash_constraint_cny"] = cash_constraint
     payload["cash_constraint_source"] = _cash_constraint_source(cash_constraint)
     payload["sector_fund_flow_status"] = _sector_fund_flow_status(sector_fund_flows)
@@ -157,7 +178,15 @@ def _fetch_sector_fund_flows(*, max_sectors: int = 8, max_leaders: int = 5) -> L
     rows = _fetch_legacy_sector_fund_flows(max_sectors=max_sectors, max_leaders=max_leaders)
     if rows:
         return rows
-    return _fetch_fallback_sector_fund_flows(max_sectors=max_sectors, max_leaders=max_leaders)
+    rows = _fetch_fallback_sector_fund_flows(max_sectors=max_sectors, max_leaders=max_leaders)
+    if rows:
+        return rows
+    # 最后降级到浏览器爬虫
+    try:
+        from utils.browser_scraper import fetch_sector_flow_browser
+        return fetch_sector_flow_browser(max_sectors=max_sectors)
+    except Exception:
+        return []
 
 
 def _fetch_legacy_sector_fund_flows(*, max_sectors: int = 8, max_leaders: int = 5) -> List[Dict[str, Any]]:
@@ -317,6 +346,62 @@ def _fund_flow_items(flows: List[Dict[str, Any]]) -> List[RawNewsItem]:
     return items
 
 
+def _fetch_northbound_individual_flow(max_stocks: int = 10) -> List[Dict[str, Any]]:
+    """获取北向资金个股净买入 TOP 排名（先 akshare，失败用浏览器）"""
+    # 1. 先试 akshare
+    try:
+        import akshare as ak
+        df = ak.stock_hsgt_stock_statistics_em(symbol='沪股通')
+        if df is not None and not df.empty:
+            results = []
+            for _, row in df.head(max_stocks).iterrows():
+                symbol = str(row.get("代码", row.get("股票代码", ""))).strip()
+                name = str(row.get("名称", row.get("股票名称", symbol))).strip()
+                net_buy = _safe_float(row.get("净买额") or row.get("今日净买额") or 0)
+                change_pct = _safe_float(row.get("涨跌幅") or 0)
+                if net_buy > 0 and symbol:
+                    results.append({
+                        "symbol": symbol, "name": name, "market": "A股",
+                        "net_buy_cny": net_buy, "change_pct": change_pct,
+                        "source": "akshare_hsgt",
+                        "reason": f"沪股通净买入 {net_buy/10000:,.0f}万",
+                    })
+            if results:
+                return results[:max_stocks]
+    except Exception:
+        pass
+
+    # 2. 降级到浏览器爬虫
+    try:
+        from utils.browser_scraper import fetch_northbound_stocks_browser
+        return fetch_northbound_stocks_browser(max_stocks=max_stocks)
+    except Exception as e:
+        log.warning("北向个股数据获取失败: %s", e)
+        return []
+
+
+def _northbound_flow_items(stocks: List[Dict[str, Any]]) -> List[RawNewsItem]:
+    """将北向个股净买数据转为 RawNewsItem，注入选股池"""
+    if not stocks:
+        return []
+    leaders = [
+        {"symbol": s["symbol"], "name": s["name"], "market": "A股", "reason": s["reason"]}
+        for s in stocks
+    ]
+    return [
+        RawNewsItem(
+            src_name="northbound_flow",
+            title=f"北向资金今日大幅净买入 {len(stocks)} 只A股",
+            url="akshare://stock_hsgt_stock_statistics_em",
+            snippet="; ".join(f"{s['name']}({s['symbol']}) 净买{s['net_buy_cny']/10000:,.0f}万" for s in stocks[:5]),
+            raw_meta={
+                "hot_score": max(10_000, sum(s["net_buy_cny"] for s in stocks) / 1000),
+                "sectors": [{"sector": "北向资金", "leaders": leaders}],
+            },
+        )
+    ]
+
+
 def _pick(row: Any, names: tuple[str, ...]) -> Any:
     for name in names:
         if name in row:
@@ -354,11 +439,17 @@ def _safe_float(value: Any, default: float = 0.0) -> float:
 def _candidate_symbols(items: Iterable[RawNewsItem]) -> List[str]:
     out: List[str] = []
     for item in items:
+        # From sector leaders
         for sector in (item.raw_meta or {}).get("sectors", []) or []:
             for leader in sector.get("leaders", []) or []:
                 symbol = str(leader.get("symbol") or "").strip()
                 if _is_a_share(symbol) and symbol not in out:
                     out.append(symbol)
+        # From stock code extraction in news text
+        for extracted in (item.raw_meta or {}).get("extracted_symbols", []) or []:
+            symbol = str(extracted.get("symbol") or "").strip()
+            if _is_a_share(symbol) and symbol not in out:
+                out.append(symbol)
     return out
 
 
