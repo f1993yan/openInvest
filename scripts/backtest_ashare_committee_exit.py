@@ -70,6 +70,10 @@ def _safe_float(value: Any, default: float = 0.0) -> float:
         return default
 
 
+def _clamp(value: float, low: float, high: float) -> float:
+    return max(low, min(high, value))
+
+
 def _round_price(value: float) -> float:
     return round(max(float(value), 0.0), 2)
 
@@ -356,6 +360,67 @@ def _sell_policy_stats(sell_pnls: List[float]) -> Dict[str, float]:
     }
 
 
+def _post_sell_path_stats(
+    trades: List[Dict[str, Any]],
+    histories: Dict[str, pd.DataFrame],
+    *,
+    horizon: int = 5,
+) -> Dict[str, float]:
+    """Opportunity-cost diagnostics for exits.
+
+    A sell is useful if it avoids more near-term downside than it gives up in
+    rebound.  The metric below is path-based, so it catches the failure mode
+    where a stop/trim is profitable on paper but tends to sell immediately
+    before a rebound.
+    """
+    avoided_values: List[float] = []
+    missed_values: List[float] = []
+    edge_values: List[float] = []
+    for trade in trades:
+        if trade.get("side") != "SELL":
+            continue
+        symbol = str(trade.get("symbol") or "")
+        hist = histories.get(symbol)
+        if hist is None or hist.empty:
+            continue
+        try:
+            date = pd.to_datetime(trade.get("date"))
+            idx = list(hist.index).index(date)
+        except Exception:
+            continue
+        future = hist.iloc[idx + 1: idx + 1 + horizon]
+        price = _safe_float(trade.get("price"))
+        if future.empty or price <= 0:
+            continue
+        min_low = _safe_float(future["Low"].min(), price)
+        max_high = _safe_float(future["High"].max(), price)
+        avoided = max(0.0, (price - min_low) / price * 100.0)
+        missed = max(0.0, (max_high - price) / price * 100.0)
+        avoided_values.append(avoided)
+        missed_values.append(missed)
+        edge_values.append(avoided - missed)
+
+    sample_count = len(edge_values)
+    if sample_count <= 0:
+        return {
+            "sell_path_sample_count": 0,
+            "avg_post_sell_avoided_drawdown_pct": 0.0,
+            "avg_post_sell_missed_rebound_pct": 0.0,
+            "avg_post_sell_net_edge_pct": 0.0,
+            "post_sell_positive_edge_rate": 0.0,
+            "post_sell_positive_edge_lower": 0.0,
+        }
+    positive = sum(1 for x in edge_values if x > 0)
+    return {
+        "sell_path_sample_count": sample_count,
+        "avg_post_sell_avoided_drawdown_pct": round(sum(avoided_values) / sample_count, 6),
+        "avg_post_sell_missed_rebound_pct": round(sum(missed_values) / sample_count, 6),
+        "avg_post_sell_net_edge_pct": round(sum(edge_values) / sample_count, 6),
+        "post_sell_positive_edge_rate": round(positive / sample_count, 6),
+        "post_sell_positive_edge_lower": round(_wilson_lower_bound(positive, sample_count), 6),
+    }
+
+
 def _policy_quality_score(metrics: Dict[str, Any]) -> float:
     """Risk-adjusted utility used to choose and weight exit policies."""
     objective = _safe_float(metrics.get("objective_score"))
@@ -366,8 +431,23 @@ def _policy_quality_score(metrics: Dict[str, Any]) -> float:
     reliability = sell_count / (sell_count + 8.0) if sell_count > 0 else 0.0
     expectancy_term = math.copysign(math.log1p(abs(expectancy) / 100.0), expectancy)
     profit_factor_term = math.log(max(profit_factor, 0.01))
+    net_path_edge = _safe_float(metrics.get("avg_post_sell_net_edge_pct"))
+    avoided = _safe_float(metrics.get("avg_post_sell_avoided_drawdown_pct"))
+    missed = _safe_float(metrics.get("avg_post_sell_missed_rebound_pct"))
+    path_scale = max(avoided + missed, abs(net_path_edge), 1.0)
+    path_utility = _clamp(net_path_edge / path_scale, -1.0, 1.0)
+    path_hit_lower = _safe_float(metrics.get("post_sell_positive_edge_lower"))
     drawdown_penalty = math.log1p(max_dd / 10.0)
-    score = objective + reliability * (0.75 * expectancy_term + 0.25 * profit_factor_term) - 0.10 * drawdown_penalty
+    score = (
+        objective
+        + reliability * (
+            0.55 * expectancy_term
+            + 0.20 * profit_factor_term
+            + 0.20 * path_utility
+            + 0.05 * (path_hit_lower - 0.5)
+        )
+        - 0.10 * drawdown_penalty
+    )
     return round(score, 6)
 def run_backtest(
     *,
@@ -380,6 +460,7 @@ def run_backtest(
     initial_cash: float = 100_000.0,
     fee_rate: float = 0.0005,
     max_ops_per_symbol_per_day: int = 5,
+    committee_sell_stop_band: float = 1.03,
 ) -> Dict[str, Any]:
     dates = _calendar(histories, start, end)
     cash = float(initial_cash)
@@ -430,7 +511,10 @@ def run_backtest(
                 fill = max(open_p, pos.take_profit_1) if open_p > pos.take_profit_1 else pos.take_profit_1
                 shares_to_sell = max(_lot_size(symbol, pos), (pos.shares // 2) // 100 * 100)
                 shares_to_sell = min(pos.shares, shares_to_sell)
-            elif signals.get(symbol, {}).get("verdict") in {"SELL", "TRIM"} and close < pos.effective_stop * 1.03:
+            elif (
+                signals.get(symbol, {}).get("verdict") in {"SELL", "TRIM"}
+                and close < pos.effective_stop * max(1.0, committee_sell_stop_band)
+            ):
                 exit_reason = "委员会风险减仓"
                 fill = close
                 shares_to_sell = max(_lot_size(symbol, pos), (pos.shares // 2) // 100 * 100)
@@ -604,6 +688,7 @@ def run_backtest(
     return_risk_ratio = total_return_pct / max(abs(max_drawdown_pct), 0.01)
     objective = _objective_metrics(equity_curve, max_drawdown_pct)
     sell_stats = _sell_policy_stats(sell_pnls)
+    sell_path_stats = _post_sell_path_stats(trades, histories, horizon=5)
     metrics = {
         "initial_cash": round(initial_cash, 2),
         "final_equity": round(final_equity, 2),
@@ -615,6 +700,7 @@ def run_backtest(
         "realized_pnl": round(sum(sell_pnls), 2),
         "win_rate": sell_stats["sell_win_rate"],
         **sell_stats,
+        **sell_path_stats,
         **objective,
     }
     metrics["policy_quality_score"] = _policy_quality_score(metrics)
@@ -624,6 +710,9 @@ def run_backtest(
         "trades": trades,
         "equity_curve": equity_curve,
         "symbol_daily_rows": symbol_daily_rows,
+        "diagnostics": {
+            "committee_sell_stop_band": round(max(1.0, committee_sell_stop_band), 4),
+        },
     }
 
 
@@ -816,6 +905,7 @@ def optimize_exit_params(
     fee_rate: float,
     max_ops_per_symbol_per_day: int,
     param_grid: List[ExitParams],
+    committee_sell_stop_band: float = 1.03,
 ) -> Dict[str, Any]:
     best: Optional[Dict[str, Any]] = None
     all_results: List[Dict[str, Any]] = []
@@ -830,6 +920,7 @@ def optimize_exit_params(
             initial_cash=initial_cash,
             fee_rate=fee_rate,
             max_ops_per_symbol_per_day=max_ops_per_symbol_per_day,
+            committee_sell_stop_band=committee_sell_stop_band,
         )
         score = result["metrics"].get("policy_quality_score", result["metrics"].get("objective_score", result["metrics"]["return_risk_ratio"]))
         compact = {
@@ -941,6 +1032,7 @@ def main() -> None:
     parser.add_argument("--initial-cash", type=float, default=100_000.0)
     parser.add_argument("--fee-rate", type=float, default=0.0005, help="万五=0.0005")
     parser.add_argument("--max-ops", type=int, default=5)
+    parser.add_argument("--committee-sell-stop-band", type=float, default=1.03)
     parser.add_argument("--out", default=str(ROOT / "reports" / "ashare_committee_exit_backtest.json"))
     parser.add_argument("--trades-csv", default=str(ROOT / "reports" / "ashare_committee_exit_trades.csv"))
     parser.add_argument("--daily-csv", default=str(ROOT / "reports" / "ashare_committee_exit_daily_samples.csv"))
@@ -966,6 +1058,7 @@ def main() -> None:
         fee_rate=args.fee_rate,
         max_ops_per_symbol_per_day=args.max_ops,
         param_grid=param_grid,
+        committee_sell_stop_band=args.committee_sell_stop_band,
     )
     result["discrete_optimization"] = grid_diagnostics
     result["config"] = {
@@ -975,6 +1068,7 @@ def main() -> None:
         "initial_cash": args.initial_cash,
         "fee_rate": args.fee_rate,
         "max_ops_per_symbol_per_day": args.max_ops,
+        "committee_sell_stop_band": args.committee_sell_stop_band,
         "a_share_rules": {
             "lot_size": 100,
             "star_market_first_buy_lot": 200,

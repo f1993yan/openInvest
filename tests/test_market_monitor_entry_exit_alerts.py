@@ -19,6 +19,7 @@ from jobs.market_monitor import (
     update_entry_exit_alert_state,
 )
 from scripts.monitor_window_text import _llm_review_lots_hint
+from scripts.monitor_window_text import _operation_summary
 
 
 def _result(symbol, price, breakout):
@@ -809,6 +810,80 @@ def test_policy_quality_adjusts_existing_position_sell_score_conservatively():
 
     assert high_quality > low_quality
     assert high_quality - low_quality <= 8.1
+
+
+def test_sell_trigger_uses_policy_aware_threshold_below_plain_45():
+    result = {
+        "success": True,
+        "symbol": "600900",
+        "name": "长江电力",
+        "market": "a",
+        "verdict": "TRIM",
+        "confidence": 0.19,
+        "suggested_alloc_cny": -5000,
+        "position_exit_policy": {
+            "policy_quality_score": 6.0,
+            "sell_count": 30,
+            "sell_win_rate_lower": 0.60,
+            "avg_sell_win_cny": 600.0,
+            "avg_sell_loss_cny": 300.0,
+            "avg_post_sell_avoided_drawdown_pct": 6.0,
+            "avg_post_sell_missed_rebound_pct": 2.0,
+            "avg_post_sell_net_edge_pct": 4.0,
+            "profit_factor": 1.8,
+            "conservative_sell_expectancy_cny": 300.0,
+        },
+    }
+    triggers = [{"side": "sell", "kind": "position_stop", "level": 10.0, "price": 9.9}]
+
+    selected, suppressed = select_optimal_actionable_alerts(
+        results=[result],
+        prices={"600900": {"price": 9.9, "change_pct": -1.0}},
+        cash=10000,
+        stocks=[{"symbol": "600900", "position_pct": 8.0, "units": 1000, "cost": 10.0}],
+        entry_exit_state={"symbols": {"600900": {"position_exit_plan": {"effective_stop_price": 10.0}}}},
+    )
+
+    assert suppressed == []
+    assert selected[0]["symbol"] == "600900"
+    assert selected[0]["alert_threshold"] < 45.0
+    assert selected[0]["alert_score"] >= selected[0]["alert_threshold"]
+
+
+def test_candidate_sell_is_not_rendered_as_plain_observation():
+    assert _operation_summary({
+        "state": "candidate",
+        "operation": {"status": "candidate", "verdict": "TRIM", "suggested_alloc_cny": -5000},
+    }) == "候选卖"
+
+
+def test_position_exit_policy_loads_weekly_post_sell_path_metrics(tmp_path):
+    from core.position_exit_policy import load_position_exit_policy
+
+    env_path = tmp_path / ".env"
+    env_path.write_text(
+        'INVEST_A_SHARE_SECTOR_EXIT_POLICIES={"电力行业":{'
+        '"max_loss_pct":4.0,'
+        '"stop_atr_mult":1.2,'
+        '"take_profit_r1":1.5,'
+        '"take_profit_r2":3.0,'
+        '"trailing_atr_mult":2.0,'
+        '"sell_path_sample_count":31,'
+        '"avg_post_sell_avoided_drawdown_pct":5.5,'
+        '"avg_post_sell_missed_rebound_pct":2.0,'
+        '"avg_post_sell_net_edge_pct":3.5,'
+        '"post_sell_positive_edge_rate":0.61,'
+        '"post_sell_positive_edge_lower":0.43'
+        '}}\n',
+        encoding="utf-8",
+    )
+
+    policy = load_position_exit_policy(env_path=env_path, sector="电力行业")
+
+    assert policy.avg_post_sell_net_edge_pct == 3.5
+    assert policy.sell_path_sample_count == 31
+    assert policy.post_sell_positive_edge_lower == 0.43
+    assert policy.as_dict()["avg_post_sell_missed_rebound_pct"] == 2.0
 
 
 def test_sell_policy_stats_shrink_small_sample_win_rate():

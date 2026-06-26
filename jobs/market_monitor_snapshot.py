@@ -35,6 +35,9 @@ def _operation_detail(result: Dict[str, Any], row: Dict[str, Any], actionable: D
     elif triggers:
         status = "watch_trigger"
         reason = "price_touched_one_round_trigger"
+    elif verdict in {"TRIM", "SELL"} and abs(alloc) > 0 and not triggers:
+        status = "candidate"
+        reason = "committee_sell_without_locked_exit_trigger"
     elif verdict in {"BUY", "ACCUMULATE", "TRIM", "SELL"} and abs(alloc) > 0:
         status = "candidate"
         reason = "committee_has_direction_but_not_selected"

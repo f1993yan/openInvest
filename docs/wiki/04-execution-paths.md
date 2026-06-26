@@ -176,6 +176,10 @@ start-invest-backend.bat
 - 入场/出场点来自 `entry_exit_points`，服务于“现在能不能买/加/减”的技术确认。
 - 持仓止盈止损来自 `position_exit_plan`，服务于“已经持有后如何守纪律”，锚定成本和板块参数，不能拿来反推买入点。
 - `policy_quality_score` 是 risk-adjusted expected utility，不是裸胜率：胜率先用 Wilson 下界保守化，再按卖出样本数可靠性收缩；监控只把它作为已持仓 `TRIM/SELL` 的小幅 likelihood-ratio 校准。
+- 卖出提醒阈值在 `jobs/market_monitor_alerts.py`，不是持仓止损线本身：`_sell_alert_threshold()` 会结合是否触发 `position_exit_plan`、`sell_win_rate_lower`、`conservative_sell_expectancy_cny`、`avg_post_sell_net_edge_pct` 和 `policy_quality_score` 调整提醒门槛。已经触发锁定出场线时可以低于基础 45 分；没有价格触发时仍保持更高约束。
+- 主窗口文案在 `scripts/monitor_window_text.py`：方向性委员会结果但未成为可执行提醒时显示“候选卖/候选买”，避免和普通“观察”混淆。快照原因来自 `jobs/market_monitor_snapshot.py` 的 `operation.reason`。
+- 卖出阈值诊断脚本是 `scripts/diagnose_ashare_sell_threshold.py`。它比较不同 `committee_sell_stop_band` 的收益/回撤、卖出胜率下界、卖出后规避回撤和错过反弹成本；如果多组 band 结果完全一致，说明委员会卖出带不是约束点，应优先检查提醒筛选、止盈止损参数或 UI 状态。
+- 周度优化的 `policy_quality_score` 会纳入卖出后 5 日路径效用：`avg_post_sell_net_edge_pct = avoided_drawdown - missed_rebound`。这个指标为负时，说明卖出经常躲过一部分下跌但错过更大的反弹，参数优化会相应惩罚该策略。
 - 周度参数优化的行业映射会先用更像浏览器的东方财富直连，失败后尝试 AkShare，再读 `data/sector_cache.json`；缓存仍缺失时才使用本地配置里的 `sector`/`industry`。
 - `AccountLedger(real)` 是持仓单一可信源；ledger 更新后同步 config/snapshot，config 只作为旧路径兼容和新标的首次播种来源。
 

@@ -30,6 +30,12 @@ class PositionExitPolicy:
     sell_win_rate_lower: float = 0.0
     profit_factor: float = 0.0
     conservative_sell_expectancy_cny: float = 0.0
+    sell_path_sample_count: int = 0
+    avg_post_sell_avoided_drawdown_pct: float = 0.0
+    avg_post_sell_missed_rebound_pct: float = 0.0
+    avg_post_sell_net_edge_pct: float = 0.0
+    post_sell_positive_edge_rate: float = 0.0
+    post_sell_positive_edge_lower: float = 0.0
     max_drawdown_pct: float = 0.0
     source: str = ".env"
     sector: str = ""
@@ -64,6 +70,11 @@ class PositionExitPolicy:
             f"max_loss_pct={self.max_loss_pct:.4f} stop_atr_mult={self.stop_atr_mult:.4f} "
             f"take_profit_r1={self.take_profit_r1:.4f} take_profit_r2={self.take_profit_r2:.4f} "
             f"trailing_atr_mult={self.trailing_atr_mult:.4f}\n"
+            f"sell_quality=policy_quality_score={self.policy_quality_score:.4f} "
+            f"sell_win_rate_lower={self.sell_win_rate_lower:.4f} "
+            f"conservative_expectancy_cny={self.conservative_sell_expectancy_cny:.2f} "
+            f"post_sell_net_edge_pct={self.avg_post_sell_net_edge_pct:.4f} "
+            f"post_sell_positive_edge_lower={self.post_sell_positive_edge_lower:.4f}\n"
             "formula=initial_stop_pct=min(max_loss_pct,max(3,atr_pct*stop_atr_mult)); "
             "hard_stop=cost*(1-initial_stop_pct/100); "
             "take_profit_1=cost+R*take_profit_r1; take_profit_2=cost+R*take_profit_r2; "
@@ -110,6 +121,12 @@ def _policy_from_values(values: Dict[str, Any], *, source: str, sector: str = ""
         sell_win_rate_lower=_clamp(_safe_float(values.get("sell_win_rate_lower"), 0.0), 0.0, 1.0),
         profit_factor=max(0.0, _safe_float(values.get("profit_factor"), 0.0)),
         conservative_sell_expectancy_cny=_safe_float(values.get("conservative_sell_expectancy_cny"), 0.0),
+        sell_path_sample_count=int(max(0, _safe_float(values.get("sell_path_sample_count"), 0.0))),
+        avg_post_sell_avoided_drawdown_pct=_safe_float(values.get("avg_post_sell_avoided_drawdown_pct"), 0.0),
+        avg_post_sell_missed_rebound_pct=_safe_float(values.get("avg_post_sell_missed_rebound_pct"), 0.0),
+        avg_post_sell_net_edge_pct=_safe_float(values.get("avg_post_sell_net_edge_pct"), 0.0),
+        post_sell_positive_edge_rate=_clamp(_safe_float(values.get("post_sell_positive_edge_rate"), 0.0), 0.0, 1.0),
+        post_sell_positive_edge_lower=_clamp(_safe_float(values.get("post_sell_positive_edge_lower"), 0.0), 0.0, 1.0),
         max_drawdown_pct=_safe_float(values.get("max_drawdown_pct"), 0.0),
         source=source,
         sector=sector,

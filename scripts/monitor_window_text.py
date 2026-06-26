@@ -142,6 +142,12 @@ def _operation_summary(row: Dict[str, Any]) -> str:
         return f"{side}{_fmt_lots(abs(lots))}" if lots else "操作"
     if status in {"trigger_confirmed", "watch_trigger"}:
         return "触发"
+    if status == "candidate":
+        if verdict in {"SELL", "TRIM"}:
+            return "候选卖"
+        if verdict in {"BUY", "ACCUMULATE"}:
+            return "候选买"
+        return "候选"
     if status == "blocked":
         return "拦截"
     return "观察"

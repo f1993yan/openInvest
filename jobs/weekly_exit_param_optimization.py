@@ -423,6 +423,12 @@ def run() -> Dict[str, Any]:
             "avg_sell_loss_cny",
             "profit_factor",
             "conservative_sell_expectancy_cny",
+            "sell_path_sample_count",
+            "avg_post_sell_avoided_drawdown_pct",
+            "avg_post_sell_missed_rebound_pct",
+            "avg_post_sell_net_edge_pct",
+            "post_sell_positive_edge_rate",
+            "post_sell_positive_edge_lower",
             "total_return_pct",
             "max_drawdown_pct",
         )

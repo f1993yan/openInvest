@@ -221,6 +221,24 @@ uv run pytest tests/test_gold_price.py tests/test_backtest_no_lookahead.py tests
 6. 执行护栏拦截涨停追买、重复同向影子交易、低质量或不可执行提醒。
 7. 委员会账户记录系统会怎么做，真实账户只在用户明确录入成交后变化。
 
+### A 股持仓止盈止损与卖出提醒
+
+已持仓 A 股使用独立的 `position_exit_plan`，锚定真实成本和板块级周度回测参数。它和入场/出场点模型不是一回事：
+
+- `entry_exit_points` 用于判断现在是否适合买入、加仓、回踩或突破。
+- `position_exit_plan` 用于已有持仓后的纪律止损、第一止盈、第二止盈和收盘后追踪止损上移。
+- 盘中 10 分钟委员会刷新不会重算并下移持仓止盈止损线；A 股收盘后才允许追踪止损按规则上移。
+- 主窗口如果显示“候选卖”，表示委员会方向是减仓/卖出，但价格还没有触发锁定的持仓纪律线，或提醒层没有把它选成可执行操作。
+- 已触发持仓纪律线的卖出提醒会用板块策略质量、Wilson 胜率下界、保守卖出期望和卖出后路径效用调整提醒阈值，避免该卖时被普通观察状态淹没。
+
+诊断卖出阈值是否过严：
+
+```powershell
+uv run python scripts/diagnose_ashare_sell_threshold.py --symbols "600183,002185,601138" --days 120 --bands "1.00,1.01,1.03,1.05,1.08"
+```
+
+诊断报告写入 `reports/ashare_sell_threshold_diagnosis.json`，重点看 `decision_utility`、`max_drawdown_pct`、`sell_win_rate_lower` 和 `avg_net_sell_path_edge_pct`。`avg_net_sell_path_edge_pct = 卖出后规避回撤 - 卖出后错过反弹`，用于识别卖点是否过早。如果不同卖出带结果几乎一致，说明真正瓶颈通常在提醒筛选、止盈止损参数或 UI 状态解释，而不是委员会卖出带宽。
+
 ## 桌面监控窗口
 
 桌面窗口读取 `data/market_monitor/latest_window.json`、`data/daily_stock_selection/latest.json` 和 `data/weekend_news/` 下的最新结果。它不再按秒重新跑业务逻辑，只在委员会、选股或新闻任务写入新快照后局部刷新界面。
@@ -228,6 +246,7 @@ uv run pytest tests/test_gold_price.py tests/test_backtest_no_lookahead.py tests
 主窗口只展示标的监控，多个标的按操作优先级用卡片堆叠展示：
 
 - `需要操作`、`触发确认`、`单轮触发` 优先于普通观察。
+- `候选卖/候选买` 表示委员会有方向，但尚未满足可执行价格触发或提醒层综合阈值。
 - 买入 / 卖出建议以整数手展示，用户可在推荐上限内修改手数。
 - 点击“我已遵循买入/卖出”会即时拉取最新价格记账，不使用窗口缓存价格。
 - 右下角 `+` 按钮会打开手动交易面板，列出持仓和关注标的；每行可切换买/卖、调整手数并点击执行，成交按最新价格写入真实账户。

@@ -9,6 +9,12 @@ from jobs.market_monitor_common import _clamp, _safe_num
 from jobs.market_monitor_entry_exit import evaluate_entry_exit_triggers, evaluate_position_exit_plan_triggers, _stock_units
 from jobs.market_monitor_guards import _is_limit_up_buy_blocked
 
+SELL_ALERT_BASE_THRESHOLD = 45.0
+SELL_ALERT_TRIGGER_FLOOR = 38.0
+SELL_ALERT_POLICY_FLOOR = 41.0
+BUY_ALERT_THRESHOLD = 55.0
+
+
 def _has_llm_hold_conflict(result: Dict[str, Any]) -> bool:
     memo = str(result.get("cio_memo", ""))
     return "LLM=HOLD" in memo and ("-> ACCUMULATE" in memo or "-> BUY" in memo)
@@ -129,6 +135,68 @@ def _position_policy_quality_adjustment(result: Dict[str, Any], stock: Dict[str,
     win_edge = max(-0.5, min(0.5, win_lower - 0.5))
     log_lr = reliability * (0.22 * utility_edge + 0.12 * expectancy_edge + 0.08 * win_edge)
     return _clamp(_LLM_REVIEW_LOGIT_SCALE * log_lr, -4.0, 4.0)
+
+
+def _sell_policy_reliability(policy: Dict[str, Any]) -> float:
+    sell_count = max(0.0, _safe_num(policy.get("sell_count")))
+    return sell_count / (sell_count + 8.0) if sell_count > 0 else 0.0
+
+
+def _sell_policy_edge(result: Dict[str, Any]) -> float:
+    """Shrunk conservative expected utility for sell alerts.
+
+    Utility is estimated directly from the sell outcome distribution:
+
+        U = p_lower * avg_win - (1 - p_lower) * avg_loss
+
+    where ``p_lower`` is the Wilson lower bound, not the raw win rate.  The
+    result is normalized by payoff scale and shrunk by sample reliability, so a
+    tiny sample with a lucky 100% win rate cannot dominate alert selection.
+    """
+    policy = result.get("position_exit_policy") or {}
+    reliability = _sell_policy_reliability(policy)
+    if reliability <= 0:
+        return 0.0
+    win_lower = _safe_num(policy.get("sell_win_rate_lower"))
+    avg_win = _safe_num(policy.get("avg_sell_win_cny"))
+    avg_loss = _safe_num(policy.get("avg_sell_loss_cny"))
+    expectancy = _safe_num(policy.get("conservative_sell_expectancy_cny"))
+    path_edge = _safe_num(policy.get("avg_post_sell_net_edge_pct"))
+    avoided = _safe_num(policy.get("avg_post_sell_avoided_drawdown_pct"))
+    missed = _safe_num(policy.get("avg_post_sell_missed_rebound_pct"))
+    path_scale = max(avoided + missed, abs(path_edge), 1.0)
+    if avg_win > 0 or avg_loss > 0:
+        expectancy = win_lower * avg_win - (1.0 - win_lower) * avg_loss
+    payoff_scale = max(avg_win, avg_loss, abs(expectancy), 100.0)
+    normalized_utility = _clamp(expectancy / payoff_scale, -1.0, 1.0)
+    path_utility = _clamp(path_edge / path_scale, -1.0, 1.0)
+    return reliability * (0.75 * normalized_utility + 0.25 * path_utility)
+
+
+def _sell_alert_threshold(result: Dict[str, Any], triggers: List[Dict[str, Any]]) -> float:
+    """Minimum score for held TRIM/SELL alerts.
+
+    The threshold is intentionally lower for confirmed stop/take-profit
+    triggers because those are executable price events.  Committee-only sell
+    ideas still need stronger evidence, but a sector policy with positive
+    Wilson-lower-bound expectancy can lower the bar modestly.
+    """
+    has_sell_trigger = any(t.get("side") == "sell" for t in triggers)
+    threshold = SELL_ALERT_BASE_THRESHOLD
+    if has_sell_trigger:
+        threshold = SELL_ALERT_TRIGGER_FLOOR
+
+    edge = _sell_policy_edge(result)
+    # Same logit-score scale used for LLM/review evidence.  Positive expected
+    # utility reduces the alert threshold; negative expected utility raises it.
+    utility_adjustment = _clamp(_LLM_REVIEW_LOGIT_SCALE * edge, -5.0, 4.0)
+    if edge > 0:
+        threshold -= utility_adjustment
+    elif edge < 0:
+        threshold += abs(utility_adjustment)
+
+    floor = SELL_ALERT_TRIGGER_FLOOR if has_sell_trigger else SELL_ALERT_POLICY_FLOOR
+    return round(_clamp(threshold, floor, 52.0), 2)
 
 
 def _entry_trigger_for_result(
@@ -458,13 +526,19 @@ def select_optimal_actionable_alerts(
         score = _action_score(result, stock=stock, price_info=price_info, triggers=triggers)
 
         if verdict in {"TRIM", "SELL"} and alloc < 0:
-            if score >= 45.0:
+            threshold = _sell_alert_threshold(result, triggers)
+            if score >= threshold:
                 selected = dict(result)
                 selected["alert_score"] = round(score, 2)
+                selected["alert_threshold"] = threshold
                 selected["alert_triggers"] = triggers
                 sell_alerts.append(selected)
             else:
-                suppressed.append({"symbol": symbol, "name": result.get("name"), "reason": "low_sell_score"})
+                suppressed.append({
+                    "symbol": symbol,
+                    "name": result.get("name"),
+                    "reason": f"low_sell_score:{score:.1f}<{threshold:.1f}",
+                })
             continue
 
         if verdict not in {"BUY", "ACCUMULATE"} or alloc <= 0:
@@ -472,7 +546,7 @@ def select_optimal_actionable_alerts(
         if _is_limit_up_buy_blocked(result, price_info):
             suppressed.append({"symbol": symbol, "name": result.get("name"), "reason": "limit_up_buy_blocked"})
             continue
-        if score < 55.0:
+        if score < BUY_ALERT_THRESHOLD:
             suppressed.append({"symbol": symbol, "name": result.get("name"), "reason": f"low_score:{score:.1f}"})
             continue
 
