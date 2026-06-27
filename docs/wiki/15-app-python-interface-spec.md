@@ -97,6 +97,11 @@ def run_committee_local(
 }
 ```
 
+兼容说明：
+- `verdict` 枚举保持不变，只能是 `BUY, ACCUMULATE, HOLD, WAIT, TRIM, SELL`。
+- `suggested_alloc_cny` 语义保持不变：正数表示买入/加仓，负数表示卖出/减仓。
+- Python 侧可能额外返回 `trim_reason`、`reentry_price`、`reentry_condition`、`expected_path` 等解释字段；客户端应按可选字段处理。风控型减仓（如 `stop_loss/bearish/risk/drawdown/exit_policy`）不要求买回点，战术型减仓才要求低于现价的 `reentry_price`。
+
 #### 2.1.3 失败返回 JSON 结构 (`success: false`)
 ```json
 {

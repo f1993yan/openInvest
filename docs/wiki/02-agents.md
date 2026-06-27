@@ -95,10 +95,14 @@ CIO 输出 verdict 后，`parse_cio_memo()` 自动校验：
 |------|----------|
 | `confidence ≥ 0.95` 且 alloc 不是 ¥0 | 降到 0.85（防 LLM 过度自信）|
 | `alloc_cny > 100_000` | clamp 到 100_000（防 LLM 报天文数字）|
+| worker 输入含 `[WORKER_UNAVAILABLE]` | 强制 `HOLD` + alloc=0（输入不可靠）|
+| `SOLVENCY=strong` 且 `TRIM_REASON=concentration` | 强制 `HOLD`（兜底充足时集中度只限制加仓，不触发卖出）|
+| 战术型 `TRIM_REASON=range_trade/take_profit_reentry/swing` 但 `REENTRY_PRICE` 缺失或不低于现价 | 强制 `HOLD`（高抛低接闭环不成立）|
+| 风控型 `TRIM_REASON=stop_loss/bearish/risk/drawdown/exit_policy` 缺少 `REENTRY_PRICE` | **不降级**，保留 `TRIM`（目标是降低风险，不是买回）|
 | verdict=`BUY` 但 regime=`crash` | 降到 `HOLD`（硬约束打架，REGIME 优先）|
 | confidence < 0.3 | 视为"无效决议"，触发 retry |
 
-源：`core/committee.py:parse_cio_memo` + `_sanity_check`。
+源：`core/committee.py:parse_cio_memo`。对外接口不变：`verdict` 仍只使用 `BUY/ACCUMULATE/HOLD/WAIT/TRIM/SELL`，`suggested_alloc_cny` 仍为正买负卖；`TRIM_REASON` 是内部解释字段。
 
 ---
 

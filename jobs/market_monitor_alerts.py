@@ -12,6 +12,7 @@ from jobs.market_monitor_guards import _is_limit_up_buy_blocked
 SELL_ALERT_BASE_THRESHOLD = 45.0
 SELL_ALERT_TRIGGER_FLOOR = 38.0
 SELL_ALERT_POLICY_FLOOR = 41.0
+SELL_ALERT_COMMITTEE_FLOOR = 34.0
 BUY_ALERT_THRESHOLD = 55.0
 
 
@@ -173,6 +174,70 @@ def _sell_policy_edge(result: Dict[str, Any]) -> float:
     return reliability * (0.75 * normalized_utility + 0.25 * path_utility)
 
 
+def _sell_position_pressure(result: Dict[str, Any], stock: Dict[str, Any], price: float) -> float:
+    """How much existing holding risk the committee wants to remove.
+
+    For a held stock, selling is a risk-release decision.  A TRIM/SELL verdict
+    with a large negative allocation should require less extra price-trigger
+    evidence than a tiny trim, because the optimizer is already saying the
+    current position is too risky.  The output is bounded in [0, 1].
+    """
+    alloc = abs(_safe_num(result.get("suggested_alloc_cny")))
+    if alloc <= 0:
+        return 0.0
+    units = _safe_num(stock.get("units"))
+    cost = _safe_num(stock.get("cost"))
+    holding_value = 0.0
+    if units > 0 and price > 0:
+        holding_value = units * price
+    elif units > 0 and cost > 0:
+        holding_value = units * cost
+    position_pct = _safe_num(stock.get("position_pct"))
+    if holding_value <= 0 and position_pct <= 0:
+        return 0.0
+    if holding_value > 0:
+        return _clamp(alloc / holding_value, 0.0, 1.0)
+    return _clamp(position_pct / 20.0, 0.0, 1.0)
+
+
+def _sell_committee_execution_edge(
+    result: Dict[str, Any],
+    stock: Dict[str, Any],
+    price_info: Dict[str, Any],
+) -> float:
+    """Bounded evidence that a held sell should become executable now.
+
+    This combines independent pieces of evidence into a conservative expected
+    utility proxy:
+
+    - committee confidence and SELL/TRIM direction;
+    - negative allocation size relative to the held position;
+    - weekly walk-forward sell policy edge using Wilson-lower win rate;
+    - adverse same-day price movement for existing holdings.
+
+    It is intentionally bounded so it can lower the alert threshold, but cannot
+    by itself make every weak TRIM noisy.
+    """
+    verdict = str(result.get("verdict", "")).upper()
+    if verdict not in {"TRIM", "SELL"}:
+        return 0.0
+    if _safe_num(stock.get("position_pct")) <= 0 and _safe_num(stock.get("units")) <= 0:
+        return 0.0
+    confidence = _clamp(_safe_num(result.get("confidence")), 0.0, 1.0)
+    direction_edge = 1.0 if verdict == "SELL" else 0.72
+    pressure = _sell_position_pressure(result, stock, _safe_num(price_info.get("price")))
+    policy_edge = _clamp(_sell_policy_edge(result), -1.0, 1.0)
+    change_pct = _safe_num(price_info.get("change_pct"))
+    price_edge = _clamp((-change_pct) / 5.0, -0.4, 0.8)
+    raw = (
+        0.36 * (confidence * direction_edge)
+        + 0.28 * pressure
+        + 0.24 * max(0.0, policy_edge)
+        + 0.12 * max(0.0, price_edge)
+    )
+    return _clamp(raw, 0.0, 1.0)
+
+
 def _sell_alert_threshold(result: Dict[str, Any], triggers: List[Dict[str, Any]]) -> float:
     """Minimum score for held TRIM/SELL alerts.
 
@@ -197,6 +262,73 @@ def _sell_alert_threshold(result: Dict[str, Any], triggers: List[Dict[str, Any]]
 
     floor = SELL_ALERT_TRIGGER_FLOOR if has_sell_trigger else SELL_ALERT_POLICY_FLOOR
     return round(_clamp(threshold, floor, 52.0), 2)
+
+
+def _sell_committee_alert_threshold(
+    result: Dict[str, Any],
+    *,
+    stock: Dict[str, Any],
+    price_info: Dict[str, Any],
+    triggers: List[Dict[str, Any]],
+) -> float:
+    """Execution threshold for held TRIM/SELL decisions.
+
+    Price triggers still get the strict policy threshold.  Without a trigger,
+    high-confidence SELL/TRIM decisions on existing positions can become
+    actionable when their conservative execution edge is strong enough.  This
+    removes the old buy/sell asymmetry: buys were allowed through on committee
+    score alone, while sells were effectively forced to wait for a line touch.
+    """
+    threshold = _sell_alert_threshold(result, triggers)
+    if any(t.get("side") == "sell" for t in triggers):
+        return threshold
+    edge = _sell_committee_execution_edge(result, stock, price_info)
+    if edge <= 0:
+        return threshold
+    verdict = str(result.get("verdict", "")).upper()
+    floor = SELL_ALERT_COMMITTEE_FLOOR if verdict == "SELL" else SELL_ALERT_COMMITTEE_FLOOR + 2.0
+    # Edge is in [0, 1].  Strong evidence can reduce the no-trigger threshold
+    # by up to 9 points, but the floor keeps marginal sells as candidates.
+    threshold -= 9.0 * edge
+    return round(_clamp(threshold, floor, 52.0), 2)
+
+
+def _sell_candidate_wait_reason(
+    *,
+    result: Dict[str, Any],
+    score: float,
+    threshold: float,
+    triggers: List[Dict[str, Any]],
+) -> str:
+    verdict = str(result.get("verdict", "")).upper()
+    if not any(t.get("side") == "sell" for t in triggers):
+        return f"sell_waiting_for_trigger_or_edge:{score:.1f}<{threshold:.1f}:{verdict}"
+    return f"low_sell_score:{score:.1f}<{threshold:.1f}:{verdict}"
+
+
+def _sell_candidate_wait_label(reason: str) -> str:
+    text = str(reason or "")
+    match = re.search(r"([0-9]+(?:\.[0-9]+)?)<([0-9]+(?:\.[0-9]+)?)", text)
+    if "waiting_for_trigger_or_edge" in text:
+        base = "卖出证据不足，未触发纪律线"
+    elif "low_sell_score" in text:
+        base = "卖出评分不足"
+    else:
+        base = "卖出条件未满足"
+    if match:
+        return f"{base}（{match.group(1)}/{match.group(2)}）"
+    return base
+
+
+def _suppressed_reasons_by_symbol(suppressed_alerts: List[Dict[str, Any]]) -> Dict[str, List[str]]:
+    out: Dict[str, List[str]] = {}
+    for item in suppressed_alerts:
+        symbol = str(item.get("symbol") or "").upper()
+        if not symbol:
+            continue
+        reason = str(item.get("reason") or "suppressed")
+        out.setdefault(symbol, []).append(_sell_candidate_wait_label(reason))
+    return out
 
 
 def _entry_trigger_for_result(
@@ -526,7 +658,12 @@ def select_optimal_actionable_alerts(
         score = _action_score(result, stock=stock, price_info=price_info, triggers=triggers)
 
         if verdict in {"TRIM", "SELL"} and alloc < 0:
-            threshold = _sell_alert_threshold(result, triggers)
+            threshold = _sell_committee_alert_threshold(
+                result,
+                stock=stock,
+                price_info=price_info,
+                triggers=triggers,
+            )
             if score >= threshold:
                 selected = dict(result)
                 selected["alert_score"] = round(score, 2)
@@ -537,7 +674,12 @@ def select_optimal_actionable_alerts(
                 suppressed.append({
                     "symbol": symbol,
                     "name": result.get("name"),
-                    "reason": f"low_sell_score:{score:.1f}<{threshold:.1f}",
+                    "reason": _sell_candidate_wait_reason(
+                        result=result,
+                        score=score,
+                        threshold=threshold,
+                        triggers=triggers,
+                    ),
                 })
             continue
 

@@ -72,10 +72,10 @@ VERDICT: BUY | ACCUMULATE | HOLD | TRIM | SELL
 CONFIDENCE: 0.0-1.0
 DOMINANT_VIEW: quant | macro | risk
 SUGGESTED_ALLOC_CNY: <具体金额, 如果是 SELL/TRIM 用负数表示减仓>
-TRIM_REASON: <VERDICT=TRIM 时必填：concentration | stop_loss | bearish；非 TRIM 时写 N/A>
-REENTRY_PRICE: <VERDICT=TRIM 时必填：买回目标价，纯数字（CNY），**必须低于现价**；非 TRIM 写 N/A>
-REENTRY_CONDITION: <VERDICT=TRIM 时必填：买回触发条件，如 "价格跌至 ¥950 且 RSI<40 或 VIX 回落 <18"；非 TRIM 写 N/A>
-EXPECTED_PATH: <VERDICT=TRIM 时必填：一句话卖出后预期路径，引用"卖出后路径参考"里的概率数字；非 TRIM 写 N/A>
+TRIM_REASON: <VERDICT=TRIM 时必填：concentration | stop_loss | bearish | risk | drawdown | exit_policy | range_trade | take_profit_reentry | swing；非 TRIM 时写 N/A>
+REENTRY_PRICE: <仅 range_trade/take_profit_reentry/swing 这类“卖出后准备买回”的 TRIM 必填，且必须低于现价；风控减仓 stop_loss/bearish/risk/drawdown/exit_policy 写 N/A；非 TRIM 写 N/A>
+REENTRY_CONDITION: <仅卖出后准备买回的 TRIM 必填；风控减仓写 N/A；非 TRIM 写 N/A>
+EXPECTED_PATH: <TRIM 时写一句话解释卖出后预期路径；风控减仓说明降低风险的依据，战术 TRIM 引用“卖出后路径参考”的概率数字；非 TRIM 写 N/A>
 
 EXECUTION_PLAN:
   mode: lump-sum | pyramid | grid | none
@@ -106,15 +106,17 @@ PERSONAL_NOTE:
 - 如果用户浮盈 > 10% 且 Quant bearish：考虑 TRIM 锁定利润
 - 不允许"待观察"——必须明确 verdict + 数字
 
-**🔁 TRIM 路径化规则（强制）**：
-TRIM（减仓）只在"预期能在更低价位买回"时才成立——否则就是卖了高价、回头高价接回，纯亏手续费。
-所以你每次出 VERDICT=TRIM，**必须**同时给出 REENTRY_PRICE / REENTRY_CONDITION / EXPECTED_PATH：
+**🔁 TRIM 类型规则（强制）**：
+TRIM 分两类，不能混用：
 
-- **REENTRY_PRICE 必须严格低于现价**。给不出一个低于现价的合理买回点 = 这个 TRIM 不成立，请改 HOLD。
-- 参考输入里的"卖出后路径 / 买回点参考"（regime 历史 forward return 分布）：
-  - 若历史显示该 regime 下"跌破现价概率"很低 / 悲观分位仍为正 → 卖出后大概率买不回更低 → **别 TRIM，给 HOLD**
-  - 若有明显低于现价的悲观分位 → 可把 REENTRY_PRICE 设在该价位附近，EXPECTED_PATH 引用其概率
-- 系统会做确定性校验：TRIM 但 REENTRY_PRICE 缺失或 ≥ 现价 → 自动降级 HOLD。别浪费这次裁决。
+- **风控型减仓**：`TRIM_REASON=stop_loss | bearish | risk | drawdown | exit_policy`。目标是降低已有持仓风险，不是卖出后马上买回。此时 `REENTRY_PRICE/REENTRY_CONDITION` 写 `N/A`，`EXPECTED_PATH` 写明风险依据，例如止损线、破位、卖出后净优势或回撤扩大。
+- **战术型减仓**：`TRIM_REASON=range_trade | take_profit_reentry | swing`。目标是高抛后低接，必须给 `REENTRY_PRICE/REENTRY_CONDITION/EXPECTED_PATH`。
+- **集中度减仓**：`TRIM_REASON=concentration` 只在真实财富兜底不足时使用；如果 SOLVENCY strong，系统会强制 HOLD，只限制继续加仓。
+
+战术型 TRIM 的确定性校验：
+- `REENTRY_PRICE` 必须严格低于现价。给不出一个低于现价的合理买回点 = 这个战术 TRIM 不成立，请改 HOLD。
+- 参考输入里的"卖出后路径 / 买回点参考"（regime 历史 forward return 分布）：若历史显示跌破现价概率很低 / 悲观分位仍为正 → 卖出后大概率买不回更低 → 别做战术 TRIM。
+- 系统只会对战术型 TRIM 做买回点强校验；风控型减仓不会因为缺少买回点被降级 HOLD。
 
 {{TRIM_CONSTRAINT}}
 

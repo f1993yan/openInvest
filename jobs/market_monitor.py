@@ -23,6 +23,8 @@ from jobs.market_monitor_alerts import (  # noqa: F401
     _math_review_position_scale,
     _review_conclusion,
     _review_score_adjustment,
+    _sell_committee_execution_edge,
+    _sell_committee_alert_threshold,
 )
 from jobs.market_monitor_common import (  # noqa: F401
     _clamp,

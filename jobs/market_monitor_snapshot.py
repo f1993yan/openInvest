@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from jobs.market_monitor_common import LATEST_WINDOW_PATH, REPORT_DIR, log, _fmt_price, _safe_num
-from jobs.market_monitor_alerts import _has_llm_hold_conflict
+from jobs.market_monitor_alerts import _has_llm_hold_conflict, _suppressed_reasons_by_symbol
 
 def _first_prefixed_line(text: str, prefixes: Tuple[str, ...]) -> str:
     for line in (text or "").splitlines():
@@ -19,7 +19,12 @@ def _first_prefixed_line(text: str, prefixes: Tuple[str, ...]) -> str:
     return ""
 
 
-def _operation_detail(result: Dict[str, Any], row: Dict[str, Any], actionable: Dict[str, Dict[str, Any]]) -> Dict[str, Any]:
+def _operation_detail(
+    result: Dict[str, Any],
+    row: Dict[str, Any],
+    actionable: Dict[str, Dict[str, Any]],
+    suppressed_reasons: Optional[List[str]] = None,
+) -> Dict[str, Any]:
     symbol = str(result.get("symbol") or row.get("symbol") or "").upper()
     action_row = actionable.get(symbol)
     verdict = str(result.get("verdict") or "UNKNOWN").upper()
@@ -37,7 +42,7 @@ def _operation_detail(result: Dict[str, Any], row: Dict[str, Any], actionable: D
         reason = "price_touched_one_round_trigger"
     elif verdict in {"TRIM", "SELL"} and abs(alloc) > 0 and not triggers:
         status = "candidate"
-        reason = "committee_sell_without_locked_exit_trigger"
+        reason = (suppressed_reasons or ["committee_sell_waiting_for_exit_trigger"])[0]
     elif verdict in {"BUY", "ACCUMULATE", "TRIM", "SELL"} and abs(alloc) > 0:
         status = "candidate"
         reason = "committee_has_direction_but_not_selected"
@@ -67,6 +72,7 @@ def _operation_detail(result: Dict[str, Any], row: Dict[str, Any], actionable: D
         "confirmed": bool(row.get("confirmed")),
         "llm_conflict": _has_llm_hold_conflict(result),
         "execution_blocked": bool(result.get("execution_blocked")),
+        "wait_reasons": suppressed_reasons or [],
     }
 
 
@@ -102,11 +108,7 @@ def build_monitor_window_snapshot(
     price_by_symbol = {str(k).upper(): v for k, v in prices.items()}
     watch_by_symbol = {str(row.get("symbol") or "").upper(): row for row in entry_exit_watch}
     actionable_by_symbol = {str(row.get("symbol") or "").upper(): row for row in actionable}
-    suppressed_by_symbol: Dict[str, List[str]] = {}
-    for item in suppressed_alerts:
-        symbol = str(item.get("symbol") or "").upper()
-        if symbol:
-            suppressed_by_symbol.setdefault(symbol, []).append(str(item.get("reason") or "suppressed"))
+    suppressed_by_symbol = _suppressed_reasons_by_symbol(suppressed_alerts)
 
     symbols = sorted(set(stock_by_symbol) | set(result_by_symbol) | set(price_by_symbol) | set(watch_by_symbol))
     rows: List[Dict[str, Any]] = []
@@ -153,7 +155,7 @@ def build_monitor_window_snapshot(
                 "plan_type": "pre_trade_estimate",
                 "locked_intraday": False,
             }
-        operation = _operation_detail(result, row, actionable_by_symbol)
+        operation = _operation_detail(result, row, actionable_by_symbol, suppressed_by_symbol.get(symbol, []))
         rows.append({
             "symbol": symbol,
             "name": result.get("name") or stock.get("name") or price_info.get("name") or symbol,

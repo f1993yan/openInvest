@@ -89,6 +89,8 @@ market_monitor_runtime.run_monitor_round()
   → scripts/monitor_desktop_window.py 监听 latest_window.json 并局部刷新 UI
 ```
 
+桌面窗口的手动单标的分析是同一状态源的增量路径：双击卡片后，窗口直接调用最新委员会分析，成功结果会合成一行监控快照并回写 `data/market_monitor/latest_window.json`，随后主窗口重新排序和渲染。它不会修改真实持仓，只有用户点击“我已遵循买入/卖出”或手动交易面板执行时才写 `AccountLedger(real)`。
+
 止盈止损和入场出场的边界要分清：
 
 - `entry_exit_points` 是委员会/技术模型给出的入场、突破、回调、重新入场和技术出场参考，会随行情刷新。

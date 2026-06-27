@@ -469,6 +469,37 @@ class MonitorWindow(MonitorNewsMixin, MonitorSelectionMixin, MonitorTradeMixin, 
         self._refresh_open_news_popover()
         self._render_selection_buttons()
 
+    def _apply_committee_row_update(self, row: Dict[str, Any]) -> None:
+        symbol = str(row.get("symbol") or "").upper()
+        if not symbol:
+            return
+        if self.demo:
+            rows = []
+            replaced = False
+            for item in self.current_rows:
+                if str(item.get("symbol") or "").upper() == symbol:
+                    rows.append(row)
+                    replaced = True
+                else:
+                    rows.append(item)
+            if not replaced:
+                rows.append(row)
+            self.current_rows = _sort_stock_rows(rows)
+            self.stock_page_index = 0
+            self._render_rows()
+            self._resize_to_rows(len(self._filtered_rows()))
+            self.status_text.set(
+                f"{len(self.current_rows)} 标的 / {sum(1 for item in self.current_rows if item.get('state') == 'action_required')} 操作"
+            )
+            self.last_update_text.set(_fmt_update_time(datetime.now().isoformat(timespec="seconds")))
+            self._maybe_alert(self.current_rows)
+            return
+
+        _update_snapshot_row(self.snapshot_path, row)
+        self.watched_mtime_signature = self._watched_file_signature()
+        self.last_payload_signature = ()
+        self.refresh()
+
     def upload_data(self) -> None:
         if not self.remote_server_url:
             messagebox.showerror("错误", "未配置远程服务器地址 (INVEST_REMOTE_SERVER_URL)")

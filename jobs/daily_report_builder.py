@@ -195,13 +195,20 @@ def assemble_full_report(
         sym = a["symbol"]
         c = asset_committees[sym]
         v = c["verdict"]
+        trim_reason = str(v.get("trim_reason") or "").lower()
         lines = [
             f"## {idx+2}. {a.get('display_name', sym)} ({sym})\n\n",
             f"**裁决**: {v['verdict']} | 置信度 {v['confidence']:.2f} | "
             f"主导方 {v['dominant_view']} | 建议金额 ¥{v['alloc_cny']}\n\n",
         ]
-        # TRIM 路径化：展示买回点 + 预期路径（让用户能判断"卖出是赚是亏"）
-        if v.get("verdict") == "TRIM":
+        # TRIM 分两类：风控型减仓不要求买回点；战术型减仓才展示低接路径。
+        if v.get("verdict") == "TRIM" and trim_reason in {"stop_loss", "bearish", "risk", "drawdown", "exit_policy"}:
+            path = v.get("expected_path") or "未给出"
+            lines.append(
+                f"**风控减仓**: 原因 {trim_reason}；目标是降低已有持仓风险，不是高抛低接。"
+                f"路径/依据：{path}\n\n"
+            )
+        elif v.get("verdict") == "TRIM":
             rp = v.get("reentry_price")
             rp_txt = f"¥{rp:,.2f}" if rp is not None else "未给出"
             cond = v.get("reentry_condition") or "未给出"

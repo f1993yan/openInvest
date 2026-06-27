@@ -225,38 +225,53 @@ def _trim_reentry_text(reentry_price="950", reason="bearish") -> str:
     )
 
 
-def test_sanity5_reentry_below_current_keeps_trim():
-    """买回点 ¥950 < 现价 ¥1000 → TRIM 成立，保留"""
-    r = parse_cio_memo(_trim_reentry_text("950"), current_price=1000.0)
+def test_sanity5_tactical_reentry_below_current_keeps_trim():
+    """战术 TRIM 买回点 ¥950 < 现价 ¥1000 → TRIM 成立，保留"""
+    r = parse_cio_memo(_trim_reentry_text("950", reason="range_trade"), current_price=1000.0)
     assert r["verdict"] == "TRIM"
+    assert r["trim_reason"] == "range_trade"
     assert r["reentry_price"] == 950.0
     assert r["reentry_condition"] and r["expected_path"]
 
 
-def test_sanity5_reentry_at_or_above_current_forces_hold():
-    """买回点 ≥ 现价 → 卖了高价接回 = 纯亏 → 降级 HOLD"""
-    r = parse_cio_memo(_trim_reentry_text("1050"), current_price=1000.0)
+def test_sanity5_tactical_reentry_at_or_above_current_forces_hold():
+    """战术 TRIM 买回点 ≥ 现价 → 卖了高价接回 = 纯亏 → 降级 HOLD"""
+    r = parse_cio_memo(_trim_reentry_text("1050", reason="range_trade"), current_price=1000.0)
     assert r["verdict"] == "HOLD"
     assert r["_original_verdict"] == "TRIM"
+    assert r["_original_alloc"] == -5000
+    assert r["alloc_cny"] == 0
     assert r["_sanity5_reason"] == "reentry_not_below_current"
 
 
-def test_sanity5_reentry_missing_forces_hold():
-    """TRIM 但没给 REENTRY_PRICE → 降级 HOLD"""
-    r = parse_cio_memo(_trim_reentry_text(None), current_price=1000.0)
+def test_sanity5_tactical_reentry_missing_forces_hold():
+    """战术 TRIM 但没给 REENTRY_PRICE → 降级 HOLD"""
+    r = parse_cio_memo(_trim_reentry_text(None, reason="range_trade"), current_price=1000.0)
     assert r["verdict"] == "HOLD"
+    assert r["_original_alloc"] == -5000
+    assert r["alloc_cny"] == 0
     assert r["_sanity5_reason"] == "reentry_missing"
+
+
+def test_sanity5_risk_reduction_trim_does_not_require_reentry():
+    """风控 TRIM 是降低暴露，不是做 T；缺少买回点也不能强制 HOLD。"""
+    for reason in ("stop_loss", "bearish", "risk", "drawdown", "exit_policy"):
+        r = parse_cio_memo(_trim_reentry_text(None, reason=reason), current_price=1000.0)
+        assert r["verdict"] == "TRIM"
+        assert r["trim_reason"] == reason
+        assert r["alloc_cny"] == -5000
+        assert "_sanity5_reason" not in r
 
 
 def test_sanity5_skipped_without_current_price():
     """current_price 未知（如存档 re-parse）→ Sanity5 不强制，保留原 verdict"""
-    r = parse_cio_memo(_trim_reentry_text("1050"), current_price=None)
+    r = parse_cio_memo(_trim_reentry_text("1050", reason="range_trade"), current_price=None)
     assert r["verdict"] == "TRIM"
 
 
 def test_sanity5_reentry_price_parses_currency_and_commas():
     """REENTRY_PRICE 支持 ¥ 和千分位"""
-    txt = _trim_reentry_text("¥1,234.56")
+    txt = _trim_reentry_text("¥1,234.56", reason="range_trade")
     r = parse_cio_memo(txt, current_price=2000.0)
     assert r["reentry_price"] == 1234.56
     assert r["verdict"] == "TRIM"

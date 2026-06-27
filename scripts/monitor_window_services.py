@@ -142,8 +142,9 @@ def _lot_size(row: Dict[str, Any]) -> int:
 def _operation_direction(row: Dict[str, Any]) -> str:
     op = row.get("operation") or {}
     verdict = str(op.get("verdict") or "").upper()
+    alloc = _safe_num(op.get("suggested_alloc_cny"))
     lots = _suggested_lots(row)
-    if verdict in {"SELL", "TRIM"} or lots < 0:
+    if verdict in {"SELL", "TRIM"} or alloc < 0 or lots < 0:
         return "SELL"
     return "BUY"
 
@@ -334,6 +335,56 @@ def _load_snapshot(path: Path) -> Dict[str, Any]:
         return payload
     except Exception as exc:  # noqa: BLE001
         return _load_config_snapshot(f"读取监控快照失败: {type(exc).__name__}: {exc}", source_path=path)
+
+
+def _write_snapshot(path: Path, payload: Dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    tmp.replace(path)
+
+
+def _recount_snapshot_rows(payload: Dict[str, Any]) -> Dict[str, Any]:
+    rows = list(payload.get("rows") or [])
+    counts = dict(payload.get("counts") or {})
+    counts.update(
+        {
+            "symbols": len(rows),
+            "action_required": sum(1 for row in rows if row.get("state") == "action_required"),
+            "errors": sum(1 for row in rows if not row.get("success", True)),
+        }
+    )
+    payload["counts"] = counts
+    return payload
+
+
+def _merge_snapshot_row(payload: Dict[str, Any], row: Dict[str, Any]) -> Dict[str, Any]:
+    symbol = str(row.get("symbol") or "").upper()
+    if not symbol:
+        return payload
+    rows = list(payload.get("rows") or [])
+    replaced = False
+    merged_rows: List[Dict[str, Any]] = []
+    for item in rows:
+        if str(item.get("symbol") or "").upper() == symbol:
+            merged_rows.append(row)
+            replaced = True
+        else:
+            merged_rows.append(item)
+    if not replaced:
+        merged_rows.append(row)
+    payload["rows"] = _sort_stock_rows(merged_rows)
+    now = datetime.now().isoformat(timespec="seconds")
+    payload["generated_at"] = now
+    payload["round_time"] = "manual_committee"
+    return _recount_snapshot_rows(payload)
+
+
+def _update_snapshot_row(path: Path, row: Dict[str, Any]) -> Dict[str, Any]:
+    payload = _load_snapshot(path)
+    payload = _merge_snapshot_row(payload, row)
+    _write_snapshot(path, payload)
+    return payload
 
 
 
@@ -899,6 +950,10 @@ __all__ = [
     "_fmt_pct",
     "_short",
     "_load_snapshot",
+    "_write_snapshot",
+    "_recount_snapshot_rows",
+    "_merge_snapshot_row",
+    "_update_snapshot_row",
     "_looks_like_sample_snapshot",
     "_load_config_snapshot",
     "_trade_panel_rows",

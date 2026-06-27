@@ -1,6 +1,6 @@
 import pandas as pd
 import numpy as np
-from scripts.monitor_window_text import _beginner_summary_lines
+from scripts.monitor_window_text import _beginner_summary_lines, _detail_line_style, _operation_summary
 
 def test_beginner_summary_lines_includes_chan_analysis(monkeypatch):
     # Prepare mock DataFrame with sufficient rows
@@ -79,3 +79,55 @@ def test_stop_take_and_alloc_fallback(monkeypatch):
 
     # 2. 验证仓位建议从 "- 元" 正确变成了 "0 元"
     assert "仓位建议: 0 元" in text
+
+
+def test_negative_alloc_overrides_hold_display_to_trim(monkeypatch):
+    import utils.market_data_provider
+    monkeypatch.setattr(utils.market_data_provider, "get_history_data", lambda symbol, period="2y": pd.DataFrame())
+
+    row = {
+        "symbol": "09988",
+        "name": "阿里巴巴-W",
+        "state": "candidate",
+        "price": {"current": 97.65, "change_pct": -1.31},
+        "operation": {"verdict": "HOLD", "status": "candidate", "confidence": 0.86, "suggested_alloc_cny": -17730},
+    }
+    result = {
+        "success": True,
+        "symbol": "09988",
+        "verdict": "HOLD",
+        "confidence": 0.86,
+        "suggested_alloc_cny": -17730,
+        "entry_exit_points": {"stop_loss_price": 75.13, "take_profit_price": 108.93},
+    }
+
+    assert _operation_summary(row) == "待确认卖"
+    text = "\n".join(_beginner_summary_lines(row, result=result))
+    assert "待确认卖出" in text
+    assert "持有不动" not in text
+
+
+def test_low_confidence_boilerplate_is_removed(monkeypatch):
+    import utils.market_data_provider
+    monkeypatch.setattr(utils.market_data_provider, "get_history_data", lambda symbol, period="2y": pd.DataFrame())
+
+    row = {
+        "symbol": "09988",
+        "name": "阿里巴巴-W",
+        "state": "candidate",
+        "price": {"current": 97.65, "change_pct": -1.31},
+        "entry_exit_points": {"low_confidence": True},
+        "operation": {"verdict": "SELL", "status": "candidate", "confidence": 0.78, "suggested_alloc_cny": -19530},
+    }
+
+    text = "\n".join(_beginner_summary_lines(row))
+
+    assert "买卖点模型置信度偏低" not in text
+
+
+def test_detail_line_style_prioritizes_risk_positive_and_muted_lines():
+    assert _detail_line_style("- 负预期回报") == "risk"
+    assert _detail_line_style("- 止损 75.13") == "risk"
+    assert _detail_line_style("- 右侧趋势闸门: 通过") == "positive"
+    assert _detail_line_style("1. 当前价: 97.65") == "muted"
+    assert _detail_line_style("下一步:") == "heading"

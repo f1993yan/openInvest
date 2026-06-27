@@ -46,6 +46,15 @@ Sanity check 4 是后处理兜底，两者不冲突：
 - SOLVENCY=weak/unknown 时的逻辑不变（账户可能就是全部身家，集中度该触发减仓）
 - stop_loss / bearish 原因的 TRIM 不受影响（这些是真实风险信号）
 
+## 2026-06-27 补充：TRIM 买回点规则只适用于战术减仓
+
+后续发现一个语义冲突：`TRIM` 同时被用于“高抛后低接”的战术减仓，以及“止损/看空/回撤扩大”的风控减仓。旧的 Sanity check 5 要求所有 `TRIM` 都提供低于现价的 `REENTRY_PRICE`，这会把强风控卖出错误降级成 `HOLD`。
+
+现行规则：
+- `TRIM_REASON=range_trade | take_profit_reentry | swing`：属于战术减仓，必须给出低于现价的 `REENTRY_PRICE`，否则降级 `HOLD`。
+- `TRIM_REASON=stop_loss | bearish | risk | drawdown | exit_policy`：属于风控减仓，目标是降低已有持仓风险，不要求买回点，不会因为缺少 `REENTRY_PRICE` 被降级。
+- `TRIM_REASON=concentration`：仍沿用本文规则，`SOLVENCY=strong` 时强制 `HOLD`。
+
 ## 待办：TRIM 路径化（概率表升级）
 
 TRIM 信号当前是纯静态快照决策，缺"卖出后预期路径 / 买回点"：

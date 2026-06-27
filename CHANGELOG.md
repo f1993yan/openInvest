@@ -1,5 +1,23 @@
 # Changelog
 
+## Unreleased (2026-06-27)
+
+### Improvements
+
+* **committee:** 将 `TRIM` 明确拆成风控型减仓与战术型减仓；`stop_loss/bearish/risk/drawdown/exit_policy` 不再因为缺少买回点被强制降级 `HOLD`，只有 `range_trade/take_profit_reentry/swing` 这类高抛低接动作仍要求低于现价的 `REENTRY_PRICE`。
+* **sell-alerts:** 已持仓 `SELL/TRIM` 的提醒选择加入持仓风险释放模型，综合委员会置信度、建议卖出比例、保守卖出胜率、卖出后路径效用和当日走弱程度，减少强卖出信号被长期压在候选态的问题。
+* **monitor-window:** 双击标的单独运行委员会分析后，会同步更新主窗口行、操作优先级排序、最后更新时间和 `data/market_monitor/latest_window.json`；明确 `SELL + 负金额 + 已持仓` 直接进入执行提醒，普通 `TRIM` 仍保持待确认。
+* **monitor-window:** 委员会详情弹窗改为按信息优先级渲染：最高风险内容红色加粗，主要正向证据绿色加粗，背景与辅助信息灰色显示，并删除低价值泛化提醒。
+
+### Bug Fixes
+
+* **committee:** 修复 `HOLD + 负 suggested_alloc_cny` 的语义冲突；被后处理强制 `HOLD` 时同步归零建议金额，避免接口语义和窗口显示互相矛盾。
+* **monitor-window:** 修复最新委员会正文已经显示卖出，但顶部摘要仍停留在“待确认卖”的弹窗刷新问题。
+
+### Docs
+
+* **wiki/readme:** 补充 TRIM 类型边界、卖出提醒模型、单标的手动委员会分析回写主窗口快照、详情弹窗颜色语义和 App 接口兼容说明。
+
 ## Unreleased (2026-06-19)
 
 ### Improvements

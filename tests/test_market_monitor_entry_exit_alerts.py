@@ -6,6 +6,7 @@ from jobs.market_monitor import (
     _action_score,
     _llm_hold_conflict_adjustment,
     _math_review_position_scale,
+    _sell_committee_execution_edge,
     _update_position_exit_plan,
     _review_conclusion,
     _review_score_adjustment,
@@ -850,11 +851,86 @@ def test_sell_trigger_uses_policy_aware_threshold_below_plain_45():
     assert selected[0]["alert_score"] >= selected[0]["alert_threshold"]
 
 
+def test_high_confidence_held_sell_can_alert_without_price_trigger():
+    result = {
+        "success": True,
+        "symbol": "002185",
+        "name": "华天科技",
+        "market": "a",
+        "verdict": "SELL",
+        "confidence": 0.66,
+        "suggested_alloc_cny": -12000,
+        "position_exit_policy": {
+            "policy_quality_score": 7.0,
+            "sell_count": 36,
+            "sell_win_rate_lower": 0.58,
+            "avg_sell_win_cny": 900.0,
+            "avg_sell_loss_cny": 350.0,
+            "avg_post_sell_avoided_drawdown_pct": 5.0,
+            "avg_post_sell_missed_rebound_pct": 1.5,
+            "avg_post_sell_net_edge_pct": 3.5,
+            "conservative_sell_expectancy_cny": 360.0,
+        },
+    }
+    stock = {"symbol": "002185", "position_pct": 18.0, "units": 1600, "cost": 18.0}
+    price = {"price": 18.2, "change_pct": -1.6}
+
+    selected, suppressed = select_optimal_actionable_alerts(
+        results=[result],
+        prices={"002185": price},
+        cash=10000,
+        stocks=[stock],
+        entry_exit_state={"symbols": {"002185": {"position_exit_plan": {"effective_stop_price": 16.5}}}},
+        max_alerts=4,
+    )
+
+    assert _sell_committee_execution_edge(result, stock, price) > 0.45
+    assert [row["symbol"] for row in selected] == ["002185"]
+    assert selected[0]["alert_threshold"] < 41.0
+    assert suppressed == []
+
+
+def test_weak_trim_without_trigger_stays_candidate_with_clear_reason():
+    result = {
+        "success": True,
+        "symbol": "600900",
+        "name": "长江电力",
+        "market": "a",
+        "verdict": "TRIM",
+        "confidence": 0.28,
+        "suggested_alloc_cny": -500,
+        "position_exit_policy": {
+            "policy_quality_score": -2.0,
+            "sell_count": 4,
+            "sell_win_rate_lower": 0.22,
+            "avg_sell_win_cny": 100.0,
+            "avg_sell_loss_cny": 300.0,
+            "avg_post_sell_avoided_drawdown_pct": 1.0,
+            "avg_post_sell_missed_rebound_pct": 3.0,
+            "avg_post_sell_net_edge_pct": -2.0,
+            "conservative_sell_expectancy_cny": -120.0,
+        },
+    }
+
+    selected, suppressed = select_optimal_actionable_alerts(
+        results=[result],
+        prices={"600900": {"price": 28.0, "change_pct": 0.3}},
+        cash=10000,
+        stocks=[{"symbol": "600900", "position_pct": 5.0, "units": 500, "cost": 27.5}],
+        entry_exit_state={"symbols": {"600900": {"position_exit_plan": {"effective_stop_price": 24.0}}}},
+        max_alerts=4,
+    )
+
+    assert selected == []
+    assert suppressed
+    assert suppressed[0]["reason"].startswith("sell_waiting_for_trigger_or_edge:")
+
+
 def test_candidate_sell_is_not_rendered_as_plain_observation():
     assert _operation_summary({
         "state": "candidate",
         "operation": {"status": "candidate", "verdict": "TRIM", "suggested_alloc_cny": -5000},
-    }) == "候选卖"
+    }) == "待确认卖"
 
 
 def test_position_exit_policy_loads_weekly_post_sell_path_metrics(tmp_path):

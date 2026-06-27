@@ -45,7 +45,12 @@ def _verdict_signal(verdict: Any) -> str:
 
 def _row_tag(row: Dict[str, Any]) -> str:
     state = str(row.get("state") or "")
+    op = row.get("operation") or {}
+    verdict = str(op.get("verdict") or "").upper()
+    alloc = _safe_num(op.get("suggested_alloc_cny"))
     change = _safe_num((row.get("price") or {}).get("change_pct"))
+    if state == "candidate" and (verdict in {"SELL", "TRIM"} or alloc < 0):
+        return "trigger"
     if state == "action_required":
         return "action"
     if state in {"trigger_confirmed", "watch_trigger"}:
@@ -136,17 +141,18 @@ def _exit_summary(row: Dict[str, Any]) -> str:
 def _operation_summary(row: Dict[str, Any]) -> str:
     op = row.get("operation") or {}
     status = str(op.get("status") or row.get("state") or "")
+    alloc = _safe_num(op.get("suggested_alloc_cny"))
     lots = _suggested_lots(row)
     verdict = str(op.get("verdict") or "").upper()
-    side = "卖" if verdict in {"SELL", "TRIM"} or lots < 0 else "买"
+    side = "卖" if verdict in {"SELL", "TRIM"} or alloc < 0 or lots < 0 else "买"
     if status == "action_required":
         return f"{side}{_fmt_lots(abs(lots))}" if lots else "操作"
     if status in {"trigger_confirmed", "watch_trigger"}:
         return "触发"
     if status == "candidate":
-        if verdict in {"SELL", "TRIM"}:
-            return "候选卖"
-        if verdict in {"BUY", "ACCUMULATE"}:
+        if verdict in {"SELL", "TRIM"} or alloc < 0:
+            return "待确认卖"
+        if verdict in {"BUY", "ACCUMULATE"} or alloc > 0:
             return "候选买"
         return "候选"
     if status == "blocked":
@@ -258,6 +264,79 @@ def _review_text_from_row(row: Dict[str, Any]) -> str:
     return str(llm.get("raw_excerpt") or llm.get("one_line") or llm.get("conclusion") or "")
 
 
+def _detail_line_style(line: str) -> str:
+    """Return a semantic style tag for monitor detail text lines."""
+    text = str(line or "").strip()
+    if not text:
+        return "normal"
+    lower = text.lower()
+    risk_markers = (
+        "风险",
+        "止损",
+        "跌破",
+        "破位",
+        "下行",
+        "回撤",
+        "亏损",
+        "负预期",
+        "负收益",
+        "卖出",
+        "减仓",
+        "降低风险",
+        "不通过",
+        "未通过",
+        "偏弱",
+        "低分",
+        "空头",
+        "bearish",
+        "downtrend",
+        "crash",
+        "risk_flags",
+        "需要小心",
+    )
+    positive_markers = (
+        "加分",
+        "正向",
+        "通过",
+        "偏强",
+        "上升趋势",
+        "买入",
+        "加仓",
+        "突破",
+        "收益为正",
+        "成功率",
+        "胜率",
+        "优势",
+        "支撑",
+        "bullish",
+        "uptrend",
+    )
+    muted_markers = (
+        "已用刚刚",
+        "下面是上次",
+        "当前价:",
+        "理想买点:",
+        "仓位建议:",
+        "持仓纪律",
+        "入场估算",
+        "缠论与技术形态分析",
+        "最新确认笔",
+        "最新中枢状态",
+        "形态警示",
+    )
+    if any(marker in text or marker in lower for marker in risk_markers):
+        return "risk"
+    if any(marker in text or marker in lower for marker in positive_markers):
+        return "positive"
+    if text.endswith(":") or text.startswith(("结论", "为什么", "下一步", "一致性检查")):
+        return "heading"
+    if text.startswith(("1.", "2.", "3.", "4.", "- 技术面", "- 基本面", "- 模型提醒")) or any(
+        marker in text for marker in muted_markers
+    ):
+        return "muted"
+    return "normal"
+
+
 def _beginner_summary_lines(
     row: Dict[str, Any],
     *,
@@ -272,6 +351,13 @@ def _beginner_summary_lines(
     verdict = (source or op).get("verdict")
     confidence = _safe_num((source or op).get("confidence"))
     alloc = _safe_num((source or op).get("suggested_alloc_cny"))
+    alloc_forced_side = ""
+    if alloc < 0 and str(verdict or "").upper() in {"", "HOLD", "WAIT"}:
+        verdict = "TRIM"
+        alloc_forced_side = "sell"
+    elif alloc > 0 and str(verdict or "").upper() in {"", "HOLD", "WAIT"}:
+        verdict = "ACCUMULATE"
+        alloc_forced_side = "buy"
     ee = (source or {}).get("entry_exit_points") or _entry_exit_from_row(row)
     right_gate = (source or {}).get("right_side_trend_gate") or row.get("right_side_trend_gate") or {}
     review = str((source or {}).get("optimizer_review") or (source or {}).get("cio_memo") or _review_text_from_row(row))
@@ -299,10 +385,6 @@ def _beginner_summary_lines(
     breakout_dist = _distance_pct(current, breakout)
     stop_dist = _distance_pct(current, stop)
     take_dist = _distance_pct(current, take)
-    low_confidence = bool(
-        (row.get("entry_exit_points") or {}).get("low_confidence")
-        or technical.get("low_confidence")
-    )
     if source:
         header = "结论（最新）"
         status_note = "已用刚刚跑完的委员会结果更新。"
@@ -314,6 +396,10 @@ def _beginner_summary_lines(
         action = str(decision_synthesis.get("action_label") or action)
         primary_reason = str(decision_synthesis.get("primary_reason") or "")
         decision = f"{action}，{primary_reason}" if primary_reason else f"{action}。"
+    elif alloc_forced_side == "sell":
+        decision = "待确认卖出，仓位建议为负数，但旧结果里 verdict 仍是 HOLD；请以最新重新分析后的 verdict 为准。"
+    elif alloc_forced_side == "buy":
+        decision = "候选买入，仓位建议为正数，但仍要核对买点和现金约束。"
     elif str(verdict or "").upper() in {"BUY", "ACCUMULATE"} and current > 0 and _safe_num(pullback) > 0 and current > _safe_num(pullback) * 1.03:
         decision = f"{action}，但当前价离回调买点偏高，别急着追。"
     elif str(verdict or "").upper() in {"BUY", "ACCUMULATE"}:
@@ -349,10 +435,8 @@ def _beginner_summary_lines(
         lines.append(f"- 模型提醒: {one_line}")
     synthesis_warnings = list((decision_synthesis.get("risk_warnings") or [])[:3]) if decision_synthesis else []
     signal_warning = str((buy_signal_backtest or {}).get("warning") or "")
-    if risk_flags or low_confidence or synthesis_warnings or signal_warning:
+    if risk_flags or synthesis_warnings or signal_warning:
         lines.extend(["", "需要小心:"])
-        if low_confidence:
-            lines.append("- 买卖点模型置信度偏低，价格线只能当参考，不能机械下单。")
         if plan_type == "a_share_position_exit":
             lines.append("- 已持仓标的的止盈止损盘中不重算，只在收盘后按追踪规则上移风险线。")
         for warning in synthesis_warnings:
@@ -365,7 +449,15 @@ def _beginner_summary_lines(
         [
             "",
             "下一步:",
-            _beginner_next_step(verdict, current, pullback, breakout, stop),
+            _beginner_next_step(
+                verdict,
+                current,
+                pullback,
+                breakout,
+                stop,
+                row=row,
+                result=source,
+            ),
         ]
     )
     if source is not None and not source.get("success"):
@@ -394,18 +486,35 @@ def _beginner_summary_lines(
     return lines
 
 
-def _beginner_next_step(verdict: Any, current: Any, pullback: Any, breakout: Any, stop: Any) -> str:
+def _beginner_next_step(
+    verdict: Any,
+    current: Any,
+    pullback: Any,
+    breakout: Any,
+    stop: Any,
+    *,
+    row: Optional[Dict[str, Any]] = None,
+    result: Optional[Dict[str, Any]] = None,
+) -> str:
     verdict_key = str(verdict or "").upper()
     current_num = _safe_num(current)
     pullback_num = _safe_num(pullback)
     breakout_num = _safe_num(breakout)
     stop_num = _safe_num(stop)
+    op = (row or {}).get("operation") or {}
+    status = str(op.get("status") or (row or {}).get("state") or "")
+    wait_reasons = op.get("wait_reasons") or (row or {}).get("suppressed_reasons") or []
     if verdict_key in {"BUY", "ACCUMULATE"}:
         if pullback_num > 0 and current_num > pullback_num * 1.03:
             return f"先等回调接近 {_fmt_price(pullback_num)}，或放量站上 {_fmt_price(breakout_num)} 后再看；当前不适合盲目追高。"
         return "如果价格仍在买点附近，才考虑小仓位；买入前先确认能接受止损线。"
     if verdict_key in {"TRIM", "SELL"}:
-        return f"如果跌破 {_fmt_price(stop_num)} 或反弹无力，优先降低风险。"
+        if status == "action_required":
+            lots = abs(_suggested_lots(row or {}))
+            return f"当前已进入卖出提醒，优先按最新价格核对并执行{'约 ' + _fmt_lots(lots) if lots else '减仓'}；不要等盘中动态止损反复变化。"
+        if wait_reasons:
+            return f"方向偏卖，但暂未进入执行提醒：{wait_reasons[0]}。若跌破 {_fmt_price(stop_num)} 或下一轮评分增强，再优先降风险。"
+        return f"方向偏卖，重点看是否跌破 {_fmt_price(stop_num)}，或卖出期望收益是否继续占优。"
     return "先不动，等价格接近买点/止损点，或下一轮监控给出明确触发。"
 
 
@@ -463,15 +572,22 @@ def _committee_action_assessment(row: Dict[str, Any], result: Dict[str, Any]) ->
     snapshot_verdict = str(op.get("verdict") or "").upper()
     latest_verdict = str(result.get("verdict") or "").upper()
     snapshot_state = str(row.get("state") or "")
+    snapshot_alloc = _safe_num(op.get("suggested_alloc_cny"))
     latest_alloc = _safe_num(result.get("suggested_alloc_cny"))
     if not result.get("success"):
         return "委员会分析失败，不能判断当前操作是否恰当。"
     if snapshot_state == "action_required" and latest_verdict in {"BUY", "ACCUMULATE"} and latest_alloc > 0:
         return "当前需要买入/加仓的操作与最新委员会方向一致，但仍需按止损和现金约束执行。"
-    if snapshot_state == "action_required" and latest_verdict in {"TRIM", "SELL"}:
-        return "快照提示需要操作，但最新委员会偏向减仓/卖出，当前买入类动作不恰当。"
+    if snapshot_state == "action_required" and latest_verdict in {"TRIM", "SELL"} and latest_alloc < 0:
+        return "当前卖出/减仓提醒与最新委员会方向一致，执行前按最新价格和可卖手数核对。"
+    if snapshot_state == "action_required" and snapshot_alloc > 0 and latest_verdict in {"TRIM", "SELL"}:
+        return "快照提示买入，但最新委员会偏向减仓/卖出，当前买入类动作不恰当。"
     if snapshot_verdict and latest_verdict and snapshot_verdict != latest_verdict:
         return f"快照是“{_verdict_label(snapshot_verdict)}”，最新分析是“{_verdict_label(latest_verdict)}”，需要以最新分析为准。"
+    if latest_alloc < 0:
+        return "最新委员会出现 verdict 与仓位方向不一致：金额为负数但文字结论偏观察。系统会按风险信号展示为待确认卖出，并建议重新跑一次分析。"
+    if latest_alloc > 0:
+        return "最新委员会虽然文字结论偏观察，但仓位建议为正数，应按候选买入处理，仍需核对买点和现金约束。"
     if latest_verdict in {"HOLD", "WAIT"} or latest_alloc == 0:
         return "最新委员会建议持仓观望，关注价格是否回到入场区间。"
     return "最新委员会仍给出方向性建议，操作前需要核对价格是否仍在买入/出场准则附近。"
@@ -519,6 +635,7 @@ __all__ = [
     "_fmt_distance",
     "_entry_exit_from_row",
     "_review_text_from_row",
+    "_detail_line_style",
     "_beginner_summary_lines",
     "_beginner_next_step",
     "_path_window",

@@ -221,3 +221,131 @@ def test_resolve_and_analyze_worker_success(monkeypatch):
         title_label.configure.assert_called_with(text="美的集团  000333")
 
 
+def test_dialog_row_from_committee_result_refreshes_negative_alloc_as_sell():
+    from scripts.monitor_window_analysis import _dialog_row_from_committee_result
+
+    row = {
+        "symbol": "09988",
+        "name": "阿里巴巴-W",
+        "state": "monitoring",
+        "operation": {"verdict": "HOLD", "status": "monitoring", "suggested_alloc_cny": 0},
+        "price": {"current": 97.65},
+    }
+    result = {
+        "success": True,
+        "verdict": "HOLD",
+        "confidence": 0.86,
+        "suggested_alloc_cny": -17730,
+    }
+
+    refreshed = _dialog_row_from_committee_result(row, result)
+
+    assert refreshed["state"] == "candidate"
+    assert refreshed["operation"]["status"] == "candidate"
+    assert refreshed["operation"]["verdict"] == "TRIM"
+    assert refreshed["operation"]["suggested_alloc_cny"] == -17730
+
+
+def test_dialog_row_from_committee_result_promotes_latest_sell_to_action_required():
+    from scripts.monitor_window_analysis import _dialog_row_from_committee_result
+    from scripts.monitor_window_text import _operation_summary
+
+    row = {
+        "symbol": "09988",
+        "name": "阿里巴巴-W",
+        "state": "candidate",
+        "is_holding": True,
+        "units": 200,
+        "position_pct": 20.0,
+        "min_lot_size": 100,
+        "operation": {"verdict": "TRIM", "status": "candidate", "suggested_alloc_cny": -10000},
+        "price": {"current": 97.65},
+    }
+    result = {
+        "success": True,
+        "verdict": "SELL",
+        "confidence": 0.78,
+        "suggested_alloc_cny": -19530,
+    }
+
+    refreshed = _dialog_row_from_committee_result(row, result)
+
+    assert refreshed["state"] == "action_required"
+    assert refreshed["operation"]["status"] == "action_required"
+    assert refreshed["operation"]["verdict"] == "SELL"
+    assert _operation_summary(refreshed) == "卖2手"
+
+
+def test_dialog_row_from_committee_result_keeps_latest_trim_as_candidate():
+    from scripts.monitor_window_analysis import _dialog_row_from_committee_result
+
+    row = {
+        "symbol": "09988",
+        "name": "阿里巴巴-W",
+        "state": "candidate",
+        "is_holding": True,
+        "units": 200,
+        "position_pct": 20.0,
+        "operation": {"verdict": "TRIM", "status": "candidate", "suggested_alloc_cny": -10000},
+        "price": {"current": 97.65},
+    }
+    result = {
+        "success": True,
+        "verdict": "TRIM",
+        "confidence": 0.62,
+        "suggested_alloc_cny": -5000,
+    }
+
+    refreshed = _dialog_row_from_committee_result(row, result)
+
+    assert refreshed["state"] == "candidate"
+    assert refreshed["operation"]["status"] == "candidate"
+
+
+def test_merge_snapshot_row_recounts_and_sorts_action_first():
+    from scripts.monitor_window_services import _merge_snapshot_row
+
+    payload = {
+        "version": 1,
+        "generated_at": "2026-06-01T10:00:00",
+        "round_time": "old",
+        "counts": {"symbols": 2, "action_required": 0, "errors": 0},
+        "rows": [
+            {"symbol": "600900", "name": "长江电力", "state": "monitoring", "operation": {"verdict": "HOLD"}},
+            {"symbol": "09988", "name": "阿里巴巴-W", "state": "candidate", "operation": {"verdict": "TRIM", "suggested_alloc_cny": -10000}},
+        ],
+    }
+    updated_row = {
+        "symbol": "09988",
+        "name": "阿里巴巴-W",
+        "state": "action_required",
+        "operation": {"verdict": "SELL", "status": "action_required", "suggested_alloc_cny": -19530},
+    }
+
+    merged = _merge_snapshot_row(payload, updated_row)
+
+    assert merged["round_time"] == "manual_committee"
+    assert merged["counts"]["symbols"] == 2
+    assert merged["counts"]["action_required"] == 1
+    assert merged["rows"][0]["symbol"] == "09988"
+    assert merged["rows"][0]["state"] == "action_required"
+
+
+def test_apply_committee_row_update_writes_snapshot_and_refreshes(monkeypatch):
+    import scripts.monitor_desktop_window as mod
+
+    win = MagicMock()
+    win.demo = False
+    win.snapshot_path = "snapshot.json"
+    win._watched_file_signature.return_value = ("sig",)
+    win.last_payload_signature = ("old",)
+    win.watched_mtime_signature = ("old",)
+
+    monkeypatch.setattr(mod, "_update_snapshot_row", MagicMock(return_value={}))
+
+    MonitorWindow._apply_committee_row_update(win, {"symbol": "09988", "state": "action_required"})
+
+    mod._update_snapshot_row.assert_called_once()
+    win.refresh.assert_called_once()
+    assert win.watched_mtime_signature == ("sig",)
+    assert win.last_payload_signature == ()

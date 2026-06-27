@@ -191,7 +191,10 @@ VERDICT_RE = re.compile(r"VERDICT:\s*(BUY|ACCUMULATE|HOLD|TRIM|SELL)", re.I)
 CONFIDENCE_RE = re.compile(r"CONFIDENCE:\s*([\d.]+)")
 DOMINANT_RE = re.compile(r"DOMINANT_VIEW:\s*(quant|macro|risk)", re.I)
 ALLOC_RE = re.compile(r"SUGGESTED_ALLOC_CNY:\s*(-?\d+)")
-TRIM_REASON_RE = re.compile(r"TRIM_REASON:\s*(concentration|stop_loss|bearish)", re.I)
+TRIM_REASON_RE = re.compile(
+    r"TRIM_REASON:\s*(concentration|stop_loss|bearish|risk|drawdown|exit_policy|range_trade|take_profit_reentry|swing)",
+    re.I,
+)
 # TRIM 路径化：买回点 + 预期路径（EXECUTION_PLAN/RISK_PLAN 仍丢弃，只解析这三个）
 REENTRY_PRICE_RE = re.compile(r"REENTRY_PRICE:\s*[¥$]?\s*(-?[\d,]+(?:\.\d+)?)", re.I)
 REENTRY_CONDITION_RE = re.compile(r"REENTRY_CONDITION:\s*(.+)")
@@ -235,6 +238,33 @@ def _force_hold(out: Dict[str, Any], *, confidence_ceiling: float) -> None:
     out["verdict"] = "HOLD"
     out["confidence"] = min(out["confidence"], confidence_ceiling)
     out["alloc_cny"] = 0
+
+
+_TRIM_REENTRY_REQUIRED_REASONS = {"range_trade", "take_profit_reentry", "swing"}
+_TRIM_RISK_REDUCTION_REASONS = {"stop_loss", "bearish", "risk", "drawdown", "exit_policy"}
+
+
+def _trim_requires_reentry(out: Dict[str, Any]) -> bool:
+    """Whether a TRIM is a sell-to-rebuy trade that needs a lower reentry price.
+
+    TRIM has two meanings in this project:
+
+    - tactical/swing TRIM: sell now and plan to buy back lower;
+    - risk-reduction TRIM: lower exposure because stop-loss, drawdown, bearish
+      regime, or exit-policy evidence says holding risk is too high.
+
+    Only the tactical form requires REENTRY_PRICE.  The risk-reduction form
+    must not be force-HOLDed merely because it does not plan to buy back.
+    """
+    reason = str(out.get("trim_reason") or "").lower()
+    if reason in _TRIM_RISK_REDUCTION_REASONS:
+        return False
+    if reason in _TRIM_REENTRY_REQUIRED_REASONS:
+        return True
+    # Backwards compatibility: old CIO prompt only allowed concentration /
+    # stop_loss / bearish.  A concentration trim not caught by Sanity4 is a
+    # tactical portfolio rebalance, so keep the historical reentry requirement.
+    return True
 
 
 def parse_cio_memo(
@@ -338,12 +368,14 @@ def parse_cio_memo(
         log.warning("parse_cio_memo: SOLVENCY=strong + TRIM(concentration) → "
                     "强制 HOLD（兜底充足，集中度不触发减仓）")
 
-    # Sanity check 5: TRIM 必须给出"低于现价的买回点"，否则降级 HOLD
-    # 卖出后买回点缺失 or 不低于现价 = 卖了高价大概率接回 = 纯亏，TRIM 不成立。
+    # Sanity check 5: 只有"卖出后准备买回"的战术 TRIM 才必须给出低于现价的买回点。
+    # 风控减仓（stop_loss/bearish/risk/drawdown/exit_policy）是为了降低暴露，不是
+    # 做 T，不能因为没有 REENTRY_PRICE 被降级 HOLD。
     # 只在拿得到 current_price 的 live 路径校验（re-parse 存档时 current_price=None 跳过）。
     if (current_price is not None
             and current_price > 0
-            and out["verdict"] == "TRIM"):
+            and out["verdict"] == "TRIM"
+            and _trim_requires_reentry(out)):
         rp = out.get("reentry_price")
         if rp is None or rp >= current_price:
             out["_original_verdict"] = "TRIM"
@@ -351,7 +383,9 @@ def parse_cio_memo(
                 "reentry_missing" if rp is None else "reentry_not_below_current"
             )
             out["_current_price"] = current_price
-            out["verdict"] = "HOLD"
+            out.setdefault("_original_confidence", out["confidence"])
+            out.setdefault("_original_alloc", out["alloc_cny"])
+            _force_hold(out, confidence_ceiling=_verdict_cfg.forced_hold_confidence_ceiling)
             log.warning(
                 "parse_cio_memo: TRIM 但买回点%s → 强制 HOLD（卖出后买不回更低 = 纯亏，TRIM 不成立）",
                 "缺失" if rp is None else f"¥{rp} ≥ 现价 ¥{current_price}",
