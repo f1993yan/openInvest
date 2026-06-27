@@ -85,6 +85,8 @@ class MonitorWindow(MonitorNewsMixin, MonitorSelectionMixin, MonitorTradeMixin, 
         self.filter_text = tk.StringVar(value="")
         self.status_text = tk.StringVar(value="等待监控快照")
         self.last_update_text = tk.StringVar(value="更新 -")
+        self.trading_mode_text = tk.StringVar(value="主动盈利")
+        self.trading_mode_switch: Optional[ModeSlider] = None
         self.card_widgets: Dict[str, tk.Frame] = {}
         self.dialogs: Dict[str, tk.Toplevel] = {}
         self.analysis_queue: queue.Queue[tuple[str, str, Optional[Dict[str, Any]]]] = queue.Queue()
@@ -206,10 +208,18 @@ class MonitorWindow(MonitorNewsMixin, MonitorSelectionMixin, MonitorTradeMixin, 
             fg=MUTED,
             font=("Microsoft YaHei UI", 8, "bold"),
         ).pack(side=tk.LEFT)
-        self.cash_bar = CashRatioBar(top, width=226, height=18)
+        self.cash_bar = CashRatioBar(top, width=178, height=18)
         self.cash_bar.pack(side=tk.RIGHT)
         self.cash_bar.configure(cursor="hand2")
         self.cash_bar.bind("<Button-1>", lambda _event: self._toggle_cash_correction_popover())
+        self.trading_mode_switch = ModeSlider(
+            top,
+            options=(("active_profit", "盈利"), ("cash_recovery", "回收"), ("risk_off", "避险")),
+            command=self._change_trading_mode,
+            width=92,
+            height=22,
+        )
+        self.trading_mode_switch.pack(side=tk.RIGHT, padx=(0, 8))
 
         search_wrap = tk.Frame(self.root, bg="#eef2f7", padx=10, pady=5)
         search_wrap.pack(fill=tk.X, padx=12, pady=(2, 7))
@@ -401,10 +411,14 @@ class MonitorWindow(MonitorNewsMixin, MonitorSelectionMixin, MonitorTradeMixin, 
                 "t2_pending_cash_cny": 5200,
                 "total_cash_cny": 33800,
                 "total_assets_cny": 100000,
+                "trading_mode": {"mode": "active_profit", "label": "主动盈利"},
             }
             if self.demo
             else _load_snapshot(self.snapshot_path)
         )
+        mode_payload = payload.get("trading_mode") or _current_trading_mode()
+        mode_key = str((mode_payload or {}).get("mode") or "active_profit")
+        mode_label = str((mode_payload or {}).get("label") or "主动盈利")
         rows = _sort_stock_rows(
             list(payload.get("rows") or [])
             if self.demo
@@ -436,6 +450,7 @@ class MonitorWindow(MonitorNewsMixin, MonitorSelectionMixin, MonitorTradeMixin, 
             _safe_num(payload.get("t2_pending_cash_cny")),
             _safe_num(payload.get("total_cash_cny")),
             _safe_num(payload.get("total_assets_cny")),
+            mode_key,
             counts.get("symbols", len(rows)),
             counts.get("action_required", 0),
             stock_signature,
@@ -457,6 +472,8 @@ class MonitorWindow(MonitorNewsMixin, MonitorSelectionMixin, MonitorTradeMixin, 
             f"{counts.get('symbols', len(rows))} 标的 / {counts.get('action_required', 0)} 操作"
         )
         self.last_update_text.set(_fmt_update_time(payload.get("generated_at")))
+        self.trading_mode_text.set(mode_label)
+        self._render_trading_mode_buttons(mode_key)
         self.cash_bar.set_values(
             payload.get("available_cash_cny", payload.get("cash_cny")),
             payload.get("total_assets_cny"),
@@ -468,6 +485,23 @@ class MonitorWindow(MonitorNewsMixin, MonitorSelectionMixin, MonitorTradeMixin, 
         self._maybe_alert(rows)
         self._refresh_open_news_popover()
         self._render_selection_buttons()
+
+    def _render_trading_mode_buttons(self, active_mode: str) -> None:
+        if self.trading_mode_switch is not None:
+            self.trading_mode_switch.set_active(active_mode)
+
+    def _change_trading_mode(self, mode: str) -> None:
+        try:
+            if self.demo:
+                payload = {"mode": mode, "label": {"active_profit": "主动盈利", "cash_recovery": "现金回收", "risk_off": "主动避险"}.get(mode, "主动盈利")}
+            else:
+                payload = _set_trading_mode(mode)
+            self.trading_mode_text.set(payload.get("label", "主动盈利"))
+            self._render_trading_mode_buttons(payload.get("mode", "active_profit"))
+            self.status_text.set(f"交易模式: {payload.get('label', '主动盈利')}")
+            self.refresh()
+        except Exception as exc:  # noqa: BLE001
+            messagebox.showerror("错误", f"切换交易模式失败: {exc}")
 
     def _apply_committee_row_update(self, row: Dict[str, Any]) -> None:
         symbol = str(row.get("symbol") or "").upper()
@@ -1155,8 +1189,9 @@ class MonitorWindow(MonitorNewsMixin, MonitorSelectionMixin, MonitorTradeMixin, 
         curr_t2 = 0.0
         if not self.demo:
             try:
-                from db.account_ledger import AccountLedger, REAL_ACCOUNT
                 from jobs.market_monitor import load_config
+                from db.account_ledger import AccountLedger, REAL_ACCOUNT
+
                 ledger = AccountLedger()
                 ledger.ensure_initialized(load_config())
                 summary = ledger.account_summary(REAL_ACCOUNT)
@@ -1207,11 +1242,7 @@ class MonitorWindow(MonitorNewsMixin, MonitorSelectionMixin, MonitorTradeMixin, 
                 if self.demo:
                     status_lbl.configure(text="演示模式: 未写入")
                 else:
-                    from db.account_ledger import AccountLedger, REAL_ACCOUNT
-                    from jobs.market_monitor import load_config
-                    ledger = AccountLedger()
-                    ledger.ensure_initialized(load_config())
-                    ledger.correct_cash(REAL_ACCOUNT, cash_val, t2_val)
+                    _correct_real_cash(cash_val, t2_val)
                     
                 status_lbl.configure(text="成功")
                 self.status_text.set("可用现金/待交收现金修正成功")

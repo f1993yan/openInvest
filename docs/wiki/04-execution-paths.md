@@ -179,6 +179,7 @@ start-invest-backend.bat
 - `policy_quality_score` 是 risk-adjusted expected utility，不是裸胜率：胜率先用 Wilson 下界保守化，再按卖出样本数可靠性收缩；监控只把它作为已持仓 `TRIM/SELL` 的小幅 likelihood-ratio 校准。
 - 卖出提醒阈值在 `jobs/market_monitor_alerts.py`，不是持仓止损线本身：`_sell_alert_threshold()` 会结合是否触发 `position_exit_plan`、`sell_win_rate_lower`、`conservative_sell_expectancy_cny`、`avg_post_sell_net_edge_pct` 和 `policy_quality_score` 调整提醒门槛。已经触发锁定出场线时可以低于基础 45 分；没有价格触发时仍保持更高约束。
 - `SELL + 负 suggested_alloc_cny + 已持仓` 在单标的最新分析弹窗中会直接升级为 `action_required`；普通 `TRIM` 仍是 `candidate`，除非被批量提醒优化器选中或触发纪律线。
+- 交易模式在 `jobs/trading_mode.py` 定义，并由 `jobs/market_monitor_alerts.py` 使用：`主动盈利` 保持旧的期望最大化，`现金回收` 增加现金保留和卖出释放现金效用，`主动避险` 提高买入门槛并强化风险卖出。它只改变提醒优化层，不改变 `entry_exit_points`、`position_exit_plan` 或委员会原始 verdict。
 - 主窗口文案在 `scripts/monitor_window_text.py`：方向性委员会结果但未成为可执行提醒时显示“候选卖/候选买”，避免和普通“观察”混淆。快照原因来自 `jobs/market_monitor_snapshot.py` 的 `operation.reason`。
 - 详情弹窗颜色也在 `scripts/monitor_window_text.py` / `scripts/monitor_window_analysis.py`：风险行红色加粗、正向证据绿色加粗、背景信息灰色。这是 Tk 桌面渲染层，不改变 `utils.phone_committee`、HTTP 或 Android App 的 JSON 接口。
 - 卖出阈值诊断脚本是 `scripts/diagnose_ashare_sell_threshold.py`。它比较不同 `committee_sell_stop_band` 的收益/回撤、卖出胜率下界、卖出后规避回撤和错过反弹成本；如果多组 band 结果完全一致，说明委员会卖出带不是约束点，应优先检查提醒筛选、止盈止损参数或 UI 状态。

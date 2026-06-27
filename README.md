@@ -17,6 +17,7 @@ openInvest 的目标不是替你下单，而是把投资决策过程变得可追
 - SMC 回测：支持 swing、BOS/CHOCH、FVG、流动性 sweep、ATR 止损、RR 止盈，A 股默认只做多。
 - PnL 快照：按日记录真实账户和委员会账户的收盘后盈亏，并生成基准对比图。
 - 独立桌面窗口：实时展示标的状态、买卖准则、出场点、评分、推荐手数、现金占比、持仓手数、日度选股和周末新闻机会。
+- 交易模式：桌面窗口可切换主动盈利、现金回收、主动避险，改变提醒优化层的现金保留和买卖执行门槛。
 - 可选 Web/API：保留委员会、账户、PnL、SMC 回测、系统规则、历史决策、数据源健康等接口，主要用于调试和外部集成。
 
 ## 数据源
@@ -94,6 +95,14 @@ backend_err.log
 
 `jobs/market_monitor_config.example.json` 是盘中监控配置模板。真实的 `jobs/market_monitor_config.json` 可能包含现金、持仓、自选股和账户同步设置，必须留在本地。
 
+交易模式字段在本地配置中为：
+
+```json
+"trading_mode": "active_profit"
+```
+
+可选值：`active_profit`（主动盈利，默认）、`cash_recovery`（现金回收，保留更多现金并优先释放风险/现金）、`risk_off`（主动避险，提高买入门槛、压缩买入手数并强化纪律卖出）。模式只作用于 `jobs/market_monitor_alerts.py` 的提醒优化层，不改变委员会原始结论字段。
+
 ## 运行入口
 
 推荐直接双击 Windows 启动脚本：
@@ -109,6 +118,8 @@ backend_err.log
 - 启动 `scheduler.runner`，负责交易日 11:30 和 15:00 日度选股及其他定时任务。
 - 打开独立桌面监控窗口，不再默认打开网页预览。
 - 跳过可选 HTTP 后端，窗口通过本地快照文件和 Python 直接调用通信。
+
+桌面窗口现金栏可点击修正可用现金和 T+2 待交收资金；修正会先写 `AccountLedger(real)`，再由账本同步 `jobs/market_monitor_config.json` 和 `data/market_monitor/latest_window.json`。
 
 关闭桌面主窗口时，会同步停止同一项目目录下由启动脚本拉起的 `jobs.market_monitor`、`scheduler.runner`、周末新闻和日度选股后台任务，避免窗口关闭后继续抓新闻或跑选股。
 

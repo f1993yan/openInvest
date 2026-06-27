@@ -8,6 +8,17 @@ from typing import Any, Dict, List, Optional, Tuple
 from jobs.market_monitor_common import _clamp, _safe_num
 from jobs.market_monitor_entry_exit import evaluate_entry_exit_triggers, evaluate_position_exit_plan_triggers, _stock_units
 from jobs.market_monitor_guards import _is_limit_up_buy_blocked
+from jobs.trading_mode import (
+    DEFAULT_TRADING_MODE,
+    normalize_trading_mode,
+    trading_mode_buy_lot_multiplier,
+    trading_mode_buy_threshold,
+    trading_mode_buy_value_adjustment,
+    trading_mode_cash_reserve_ratio,
+    trading_mode_label,
+    trading_mode_sell_score_bonus,
+    trading_mode_sell_threshold_adjustment,
+)
 
 SELL_ALERT_BASE_THRESHOLD = 45.0
 SELL_ALERT_TRIGGER_FLOOR = 38.0
@@ -270,6 +281,7 @@ def _sell_committee_alert_threshold(
     stock: Dict[str, Any],
     price_info: Dict[str, Any],
     triggers: List[Dict[str, Any]],
+    trading_mode: str = DEFAULT_TRADING_MODE,
 ) -> float:
     """Execution threshold for held TRIM/SELL decisions.
 
@@ -279,9 +291,16 @@ def _sell_committee_alert_threshold(
     removes the old buy/sell asymmetry: buys were allowed through on committee
     score alone, while sells were effectively forced to wait for a line touch.
     """
+    mode = normalize_trading_mode(trading_mode)
     threshold = _sell_alert_threshold(result, triggers)
+    threshold += trading_mode_sell_threshold_adjustment(
+        mode,
+        has_trigger=any(t.get("side") == "sell" for t in triggers),
+        policy_edge=_sell_policy_edge(result),
+    )
+    mode_floor_offset = 4.0 if mode != DEFAULT_TRADING_MODE else 0.0
     if any(t.get("side") == "sell" for t in triggers):
-        return threshold
+        return round(_clamp(threshold, SELL_ALERT_TRIGGER_FLOOR - mode_floor_offset, 52.0), 2)
     edge = _sell_committee_execution_edge(result, stock, price_info)
     if edge <= 0:
         return threshold
@@ -290,7 +309,7 @@ def _sell_committee_alert_threshold(
     # Edge is in [0, 1].  Strong evidence can reduce the no-trigger threshold
     # by up to 9 points, but the floor keeps marginal sells as candidates.
     threshold -= 9.0 * edge
-    return round(_clamp(threshold, floor, 52.0), 2)
+    return round(_clamp(threshold, floor - mode_floor_offset, 52.0), 2)
 
 
 def _sell_candidate_wait_reason(
@@ -608,6 +627,7 @@ def select_optimal_actionable_alerts(
     portfolio_value: Optional[float] = None,
     max_single_position_pct: float = 25.0,
     max_sector_position_pct: float = 35.0,
+    trading_mode: str = DEFAULT_TRADING_MODE,
 ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
     """Pick executable alerts under cash and risk-distribution budgets.
 
@@ -618,12 +638,19 @@ def select_optimal_actionable_alerts(
     than merely the highest raw score that fits the cash budget.
     """
     stock_by_symbol = {str(s.get("symbol", "")).upper(): s for s in stocks}
+    mode = normalize_trading_mode(trading_mode)
+    mode_label = trading_mode_label(mode)
     existing_sector_pct = _existing_sector_exposure(stocks)
     # If the caller does not provide total assets, treat available cash as
     # roughly a 20% cash sleeve. This keeps legacy tests/callers from being
     # over-penalized as if every buy consumed nearly the whole portfolio.
     inferred_portfolio_value = max(_safe_num(cash) * 5.0, _safe_num(cash), 1.0)
     base_portfolio_value = max(_safe_num(portfolio_value), inferred_portfolio_value)
+    reserve_cash = base_portfolio_value * trading_mode_cash_reserve_ratio(mode)
+    buy_cash_budget = max(0.0, _safe_num(cash) - reserve_cash)
+    buy_threshold = trading_mode_buy_threshold(mode)
+    buy_value_adjustment = trading_mode_buy_value_adjustment(mode)
+    buy_lot_multiplier = trading_mode_buy_lot_multiplier(mode)
     suppressed: List[Dict[str, Any]] = []
     sell_alerts: List[Dict[str, Any]] = []
     buy_groups: List[List[Dict[str, Any]]] = []
@@ -663,12 +690,21 @@ def select_optimal_actionable_alerts(
                 stock=stock,
                 price_info=price_info,
                 triggers=triggers,
+                trading_mode=mode,
+            )
+            release_cash_cny = abs(alloc)
+            score += trading_mode_sell_score_bonus(
+                mode,
+                release_cash_cny=release_cash_cny,
+                portfolio_value=base_portfolio_value,
             )
             if score >= threshold:
                 selected = dict(result)
                 selected["alert_score"] = round(score, 2)
                 selected["alert_threshold"] = threshold
                 selected["alert_triggers"] = triggers
+                selected["trading_mode"] = mode
+                selected["trading_mode_label"] = mode_label
                 sell_alerts.append(selected)
             else:
                 suppressed.append({
@@ -688,18 +724,25 @@ def select_optimal_actionable_alerts(
         if _is_limit_up_buy_blocked(result, price_info):
             suppressed.append({"symbol": symbol, "name": result.get("name"), "reason": "limit_up_buy_blocked"})
             continue
-        if score < BUY_ALERT_THRESHOLD:
-            suppressed.append({"symbol": symbol, "name": result.get("name"), "reason": f"low_score:{score:.1f}"})
+        if score < buy_threshold:
+            suppressed.append({
+                "symbol": symbol,
+                "name": result.get("name"),
+                "reason": f"low_score:{score:.1f}<{buy_threshold:.1f}:{mode}",
+            })
             continue
 
         lot = int(stock.get("min_lot_size") or result.get("min_lot_size") or 100)
         lot = max(lot, 1)
         lot_cost = price * lot
         suggested_lots = int(abs(alloc) // lot_cost)
-        affordable_lots = int(max(cash, 0.0) // lot_cost)
+        affordable_lots = int(max(buy_cash_budget, 0.0) // lot_cost)
         max_lots = min(max(suggested_lots, 1), affordable_lots)
+        if buy_lot_multiplier < 1.0:
+            max_lots = max(1, int(math.floor(max_lots * buy_lot_multiplier))) if max_lots > 0 else 0
         if max_lots <= 0:
-            suppressed.append({"symbol": symbol, "name": result.get("name"), "reason": "cash_insufficient"})
+            reason = "cash_reserve_insufficient" if buy_cash_budget < cash else "cash_insufficient"
+            suppressed.append({"symbol": symbol, "name": result.get("name"), "reason": f"{reason}:{mode}"})
             continue
 
         group: List[Dict[str, Any]] = []
@@ -736,7 +779,11 @@ def select_optimal_actionable_alerts(
             option["alert_score"] = round(score, 2)
             option["alert_raw_value"] = round(base_value, 4)
             option["alert_risk_penalty"] = round(risk_penalty, 4)
-            option["alert_value"] = round(base_value - risk_penalty, 4)
+            option["alert_value"] = round(base_value - risk_penalty + buy_value_adjustment, 4)
+            option["trading_mode"] = mode
+            option["trading_mode_label"] = mode_label
+            option["alert_buy_threshold"] = buy_threshold
+            option["alert_cash_reserve_cny"] = round(reserve_cash, 2)
             option["alert_cost_cny"] = cost
             option["alert_triggers"] = triggers
             option["alert_sector"] = _stock_sector(stock)
@@ -748,7 +795,7 @@ def select_optimal_actionable_alerts(
 
     buy_limit = max(0, max_alerts - len(sell_alerts))
     budget_unit = 10.0
-    budget = int(max(cash, 0.0) // budget_unit)
+    budget = int(max(buy_cash_budget, 0.0) // budget_unit)
     dp: Dict[int, Tuple[float, List[Dict[str, Any]]]] = {0: (0.0, [])}
     for group in buy_groups:
         next_dp = dict(dp)

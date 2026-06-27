@@ -32,6 +32,7 @@ from jobs.market_monitor_guards import apply_limit_up_guard, apply_repeated_trad
 from jobs.market_monitor_notify import is_scheduled_monitor_popup_time, send_windows_toast, should_send_monitor_summary_popup
 from jobs.market_monitor_quotes import call_committee, fetch_sina_prices
 from jobs.market_monitor_snapshot import build_monitor_window_snapshot, write_monitor_window_snapshot, write_report
+from jobs.trading_mode import DEFAULT_TRADING_MODE, normalize_trading_mode
 
 def is_trading_time() -> bool:
     """判断当前是否在交易时段内（交易日 9:30-15:00）"""
@@ -302,6 +303,7 @@ def run_monitor_round():
         time.sleep(1)
 
     # 3. 组合级提醒优化：现金预算 + 交易约束 + LLM/点位质量
+    trading_mode = normalize_trading_mode(config.get("trading_mode", DEFAULT_TRADING_MODE))
     actionable, suppressed_alerts = select_optimal_actionable_alerts(
         results=results,
         prices=prices,
@@ -312,6 +314,7 @@ def run_monitor_round():
         portfolio_value=total_assets,
         max_single_position_pct=float(config.get("max_single_position_pct", 25.0) or 25.0),
         max_sector_position_pct=float(config.get("max_sector_position_pct", 35.0) or 35.0),
+        trading_mode=trading_mode,
     )
 
     real_holding_symbols = {
@@ -339,6 +342,7 @@ def run_monitor_round():
         cash=cash,
         total_assets=total_assets,
         t2_pending_cash=t2_pending_cash,
+        trading_mode=trading_mode,
     )
     write_monitor_window_snapshot(window_snapshot)
 

@@ -204,6 +204,210 @@ class CashRatioBar(tk.Canvas):
         )
 
 
+class ModeSlider(tk.Canvas):
+    def __init__(
+        self,
+        master: tk.Misc,
+        *,
+        options: tuple[tuple[str, str], ...],
+        command: Any,
+        width: int = 92,
+        height: int = 22,
+    ) -> None:
+        super().__init__(
+            master,
+            width=width,
+            height=height,
+            bg=BOARD_BG,
+            highlightthickness=0,
+            bd=0,
+            cursor="hand2",
+        )
+        self.options = options
+        self.command = command
+        self.active = options[0][0] if options else ""
+        self._dragging = False
+        self._icon_cache: dict[tuple[str, bool, str], tk.PhotoImage] = {}
+        self.bind("<Configure>", lambda _event: self._draw())
+        self.bind("<ButtonPress-1>", self._on_press)
+        self.bind("<B1-Motion>", self._on_drag)
+        self.bind("<ButtonRelease-1>", self._on_release)
+        self._draw()
+
+    def set_active(self, value: str) -> None:
+        if value == self.active:
+            self._draw()
+            return
+        if any(key == value for key, _label in self.options):
+            self.active = value
+        self._draw()
+
+    def _rounded_rect(self, x1: float, y1: float, x2: float, y2: float, radius: float, *, fill: str, outline: str = "") -> None:
+        radius = min(radius, (x2 - x1) / 2, (y2 - y1) / 2)
+        points = [
+            x1 + radius, y1, x2 - radius, y1,
+            x2, y1, x2, y1 + radius,
+            x2, y2 - radius, x2 - radius, y2,
+            x1 + radius, y2, x1, y2,
+            x1, y2 - radius, x1, y1 + radius,
+            x1, y1,
+        ]
+        self.create_polygon(points, smooth=True, splinesteps=18, fill=fill, outline=outline)
+
+    def _index_for_x(self, x: int) -> int:
+        if not self.options:
+            return 0
+        width = max(self.winfo_width(), 1)
+        track_x1 = 13
+        track_x2 = width - 13
+        if len(self.options) <= 1:
+            return 0
+        step = max((track_x2 - track_x1) / (len(self.options) - 1), 1)
+        return max(0, min(len(self.options) - 1, int(round((x - track_x1) / step))))
+
+    def _set_by_index(self, index: int, *, notify: bool) -> None:
+        if not self.options:
+            return
+        key = self.options[index][0]
+        changed = key != self.active
+        self.active = key
+        self._draw()
+        if changed and notify:
+            self.command(key)
+
+    def _on_press(self, event: tk.Event) -> str:
+        self._dragging = True
+        self._set_by_index(self._index_for_x(event.x), notify=False)
+        return "break"
+
+    def _on_drag(self, event: tk.Event) -> str:
+        self._set_by_index(self._index_for_x(event.x), notify=False)
+        return "break"
+
+    def _on_release(self, event: tk.Event) -> str:
+        self._dragging = False
+        self._set_by_index(self._index_for_x(event.x), notify=True)
+        return "break"
+
+    def _blend(self, fg: tuple[int, int, int], bg: tuple[int, int, int], alpha: float) -> str:
+        alpha = max(0.0, min(alpha, 1.0))
+        mixed = tuple(round(bg[i] * (1 - alpha) + fg[i] * alpha) for i in range(3))
+        return "#%02x%02x%02x" % mixed
+
+    def _hex_rgb(self, color: str) -> tuple[int, int, int]:
+        return tuple(int(color[i:i + 2], 16) for i in (1, 3, 5))
+
+    def _aa_icon(self, key: str, *, active: bool, color: str) -> tk.PhotoImage:
+        cache_key = (key, active, color)
+        cached = self._icon_cache.get(cache_key)
+        if cached is not None:
+            return cached
+        size = 22 if active else 16
+        scale = 4
+        hi = size * scale
+        bg = self._hex_rgb(BOARD_BG)
+        fg = self._hex_rgb(color)
+        white = (255, 255, 255)
+        center = hi / 2
+        radius = (hi - 2 * scale) / 2
+        inner_radius = radius - (2.2 * scale if active else 1.4 * scale)
+        samples = ((0.20, 0.20), (0.80, 0.20), (0.20, 0.80), (0.80, 0.80))
+
+        def dist_to_segment(px: float, py: float, ax: float, ay: float, bx: float, by: float) -> float:
+            vx, vy = bx - ax, by - ay
+            wx, wy = px - ax, py - ay
+            denom = vx * vx + vy * vy
+            t = 0.0 if denom <= 0 else max(0.0, min(1.0, (wx * vx + wy * vy) / denom))
+            cx, cy = ax + t * vx, ay + t * vy
+            return ((px - cx) ** 2 + (py - cy) ** 2) ** 0.5
+
+        def in_profit(px: float, py: float) -> bool:
+            line = dist_to_segment(px, py, hi * 0.30, hi * 0.62, hi * 0.66, hi * 0.36) <= hi * 0.045
+            head_a = dist_to_segment(px, py, hi * 0.66, hi * 0.36, hi * 0.66, hi * 0.55) <= hi * 0.040
+            head_b = dist_to_segment(px, py, hi * 0.66, hi * 0.36, hi * 0.48, hi * 0.36) <= hi * 0.040
+            return line or head_a or head_b
+
+        def in_cash(px: float, py: float) -> bool:
+            outer = ((px - center) ** 2 + (py - center) ** 2) ** 0.5
+            bar = abs(px - center) <= hi * 0.045 and hi * 0.28 <= py <= hi * 0.72
+            arc_top = dist_to_segment(px, py, hi * 0.38, hi * 0.38, hi * 0.62, hi * 0.38) <= hi * 0.040
+            arc_mid = dist_to_segment(px, py, hi * 0.36, hi * 0.50, hi * 0.64, hi * 0.50) <= hi * 0.038
+            arc_bot = dist_to_segment(px, py, hi * 0.38, hi * 0.62, hi * 0.62, hi * 0.62) <= hi * 0.040
+            return (inner_radius * 0.58 <= outer <= inner_radius * 0.86) or bar or arc_top or arc_mid or arc_bot
+
+        def in_risk(px: float, py: float) -> bool:
+            stem = abs(px - center) <= hi * 0.040 and hi * 0.28 <= py <= hi * 0.57
+            dot = ((px - center) ** 2 + (py - hi * 0.70) ** 2) ** 0.5 <= hi * 0.055
+            return stem or dot
+
+        icon_test = {"active_profit": in_profit, "cash_recovery": in_cash, "risk_off": in_risk}.get(key, in_risk)
+        image = tk.PhotoImage(width=size, height=size)
+        for y in range(size):
+            row = []
+            for x in range(size):
+                fill_hits = 0
+                outline_hits = 0
+                glyph_hits = 0
+                for sx, sy in samples:
+                    px = (x + sx) * scale
+                    py = (y + sy) * scale
+                    d = ((px - center) ** 2 + (py - center) ** 2) ** 0.5
+                    if d <= inner_radius:
+                        fill_hits += 1
+                    if inner_radius < d <= radius:
+                        outline_hits += 1
+                    if icon_test(px, py):
+                        glyph_hits += 1
+                if glyph_hits:
+                    base = fg if not active else white
+                    row.append(self._blend(base, fg if active else bg, glyph_hits / len(samples)))
+                elif fill_hits:
+                    base = fg if active else bg
+                    row.append(self._blend(base, bg, fill_hits / len(samples)))
+                elif outline_hits:
+                    base = white if active else fg
+                    row.append(self._blend(base, bg, outline_hits / len(samples)))
+                else:
+                    row.append(BOARD_BG)
+            image.put("{" + " ".join(row) + "}", to=(0, y))
+        self._icon_cache[cache_key] = image
+        return image
+
+    def _draw(self) -> None:
+        self.delete("all")
+        width = max(self.winfo_width(), 2)
+        height = max(self.winfo_height(), 2)
+        count = max(len(self.options), 1)
+        track_x1 = 13
+        track_x2 = width - 13
+        track_y = height / 2
+        self.create_line(
+            track_x1,
+            track_y,
+            track_x2,
+            track_y,
+            fill="#d8e2f0",
+            width=3,
+            capstyle=tk.ROUND,
+        )
+        active_idx = next((idx for idx, (key, _label) in enumerate(self.options) if key == self.active), 0)
+        dot_step = (track_x2 - track_x1) / max(count - 1, 1)
+        colors = {
+            "active_profit": "#12b76a",
+            "cash_recovery": "#f79009",
+            "risk_off": "#f04438",
+        }
+        active_color = colors.get(self.active, BLUE)
+        active_x = track_x1 + active_idx * dot_step
+        self.create_line(track_x1, track_y, active_x, track_y, fill=active_color, width=3, capstyle=tk.ROUND)
+        for idx, (key, _label) in enumerate(self.options):
+            x = track_x1 + idx * dot_step
+            is_active = key == self.active
+            color = colors.get(key, BLUE)
+            image = self._aa_icon(key, active=is_active, color=color)
+            self.create_image(x, track_y, image=image)
+
+
 def _scrollable_frame(parent: tk.Misc, *, bg: str = PANEL_BG) -> tuple[tk.Canvas, tk.Frame]:
     shell = tk.Frame(parent, bg=bg)
     shell.pack(fill=tk.BOTH, expand=True)
@@ -258,5 +462,6 @@ __all__ = [
     "RoundedButton",
     "CircleButton",
     "CashRatioBar",
+    "ModeSlider",
     "_scrollable_frame",
 ]

@@ -343,9 +343,11 @@ def test_monitor_window_snapshot_contains_stable_status_fields():
         suppressed_alerts=[],
         cash=10000,
         total_assets=100000,
+        trading_mode="risk_off",
     )
 
     row = snapshot["rows"][0]
+    assert snapshot["trading_mode"] == {"mode": "risk_off", "label": "主动避险"}
     assert snapshot["counts"]["action_required"] == 1
     assert row["state"] == "action_required"
     assert row["buy_criteria"]["breakout_price"] == 10.5
@@ -525,6 +527,92 @@ def test_alert_optimizer_uses_cash_constrained_utility():
     assert [r["symbol"] for r in selected] == ["600900"]
     assert selected[0]["suggested_alloc_cny"] == 2000
     assert any(item["symbol"] == "000063" for item in suppressed)
+
+
+def test_cash_recovery_mode_preserves_cash_by_suppressing_marginal_buy():
+    result = {
+        "success": True,
+        "symbol": "600183",
+        "name": "生益科技",
+        "market": "a",
+        "verdict": "ACCUMULATE",
+        "confidence": 0.62,
+        "suggested_alloc_cny": 6000,
+        "fundamental_score": 75,
+        "entry_exit_points": {"reward_risk_ratio": 2.0},
+    }
+
+    active, _ = select_optimal_actionable_alerts(
+        results=[result],
+        prices={"600183": {"price": 20.0, "change_pct": 1.0}},
+        cash=10000,
+        stocks=[{"symbol": "600183", "position_pct": 0, "min_lot_size": 100}],
+        entry_exit_state={},
+        portfolio_value=100000,
+        trading_mode="active_profit",
+    )
+    recovery, suppressed = select_optimal_actionable_alerts(
+        results=[result],
+        prices={"600183": {"price": 20.0, "change_pct": 1.0}},
+        cash=10000,
+        stocks=[{"symbol": "600183", "position_pct": 0, "min_lot_size": 100}],
+        entry_exit_state={},
+        portfolio_value=100000,
+        trading_mode="cash_recovery",
+    )
+
+    assert [row["symbol"] for row in active] == ["600183"]
+    assert recovery == []
+    assert suppressed[0]["reason"].startswith("cash_reserve_insufficient:cash_recovery")
+
+
+def test_cash_recovery_mode_can_promote_cash_releasing_sell():
+    result = {
+        "success": True,
+        "symbol": "002185",
+        "name": "华天科技",
+        "market": "a",
+        "verdict": "SELL",
+        "confidence": 0.30,
+        "suggested_alloc_cny": -18000,
+        "position_exit_policy": {
+            "policy_quality_score": 5.0,
+            "sell_count": 30,
+            "sell_win_rate_lower": 0.55,
+            "avg_sell_win_cny": 600.0,
+            "avg_sell_loss_cny": 320.0,
+            "avg_post_sell_avoided_drawdown_pct": 4.0,
+            "avg_post_sell_missed_rebound_pct": 1.5,
+            "avg_post_sell_net_edge_pct": 2.5,
+            "conservative_sell_expectancy_cny": 220.0,
+        },
+    }
+    stock = {"symbol": "002185", "position_pct": 16.0, "units": 1600, "cost": 18.0}
+    price = {"price": 18.0, "change_pct": -1.0}
+    state = {"symbols": {"002185": {"position_exit_plan": {"effective_stop_price": 16.0}}}}
+
+    active, _ = select_optimal_actionable_alerts(
+        results=[result],
+        prices={"002185": price},
+        cash=10000,
+        stocks=[stock],
+        entry_exit_state=state,
+        portfolio_value=100000,
+        trading_mode="active_profit",
+    )
+    recovery, _ = select_optimal_actionable_alerts(
+        results=[result],
+        prices={"002185": price},
+        cash=10000,
+        stocks=[stock],
+        entry_exit_state=state,
+        portfolio_value=100000,
+        trading_mode="cash_recovery",
+    )
+
+    assert active == []
+    assert [row["symbol"] for row in recovery] == ["002185"]
+    assert recovery[0]["trading_mode"] == "cash_recovery"
 
 
 def test_review_conclusion_uses_structured_field_not_stray_words():

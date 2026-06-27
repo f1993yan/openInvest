@@ -83,13 +83,21 @@ market_monitor_runtime.run_monitor_round()
       ↳ 同一标的分别用 real 与 committee 账户上下文做独立评估
   → apply_repeated_trade_guard() / apply_limit_up_guard()
   → ledger.apply_committee_result() 只执行 shadow_result 到 committee 账户
-  → select_optimal_actionable_alerts()
+  → select_optimal_actionable_alerts() 按 trading_mode 做现金/风险效用优化
   → update_entry_exit_alert_state()
   → build_monitor_window_snapshot()
   → scripts/monitor_desktop_window.py 监听 latest_window.json 并局部刷新 UI
 ```
 
 桌面窗口的手动单标的分析是同一状态源的增量路径：双击卡片后，窗口直接调用最新委员会分析，成功结果会合成一行监控快照并回写 `data/market_monitor/latest_window.json`，随后主窗口重新排序和渲染。它不会修改真实持仓，只有用户点击“我已遵循买入/卖出”或手动交易面板执行时才写 `AccountLedger(real)`。
+
+交易模式位于提醒优化层，不改委员会原始 verdict：
+
+- `active_profit` / 主动盈利：默认模式，沿用胜率期望最大化和现金约束下的最优提醒选择。
+- `cash_recovery` / 现金回收：提高买入阈值、保留更高现金垫，给释放现金的卖出更高效用；目标是尽量回收现金，同时避免无条件清仓。
+- `risk_off` / 主动避险：提高买入门槛、压缩买入手数，并降低已持仓风险卖出的执行门槛；用于用户判断市场处于熊市或系统性风险偏高时。
+
+桌面窗口现金栏的可用现金/T+2修正也走同一状态源：UI 调用 `scripts.monitor_window_services._correct_real_cash()`，内部写 `AccountLedger(real).correct_cash()`，ledger 再同步本地 config 和快照。
 
 止盈止损和入场出场的边界要分清：
 

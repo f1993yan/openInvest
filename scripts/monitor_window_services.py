@@ -17,6 +17,7 @@ from scripts.monitor_window_constants import (
     VERDICT_PRIORITY,
     WEEKEND_NEWS_DIR,
 )
+from jobs.trading_mode import DEFAULT_TRADING_MODE, normalize_trading_mode, trading_mode_label, trading_mode_payload
 
 def _safe_num(value: Any, default: float = 0.0) -> float:
     try:
@@ -83,6 +84,43 @@ def _fmt_cash_line(cash: Any, total_assets: Any, pending_cash: Any = 0) -> str:
     if pending_value > 0:
         return f"可用 {_fmt_money(cash_value)} / {pct:.1f}% · T+2 {_fmt_money(pending_value)}"
     return f"现金 {_fmt_money(cash_value)} / {pct:.1f}%"
+
+
+def _correct_real_cash(cash: float, t2_pending: float) -> Dict[str, Any]:
+    if cash < 0 or t2_pending < 0:
+        raise ValueError("金额不能为负数")
+    from jobs.market_monitor import load_config
+    from db.account_ledger import AccountLedger, REAL_ACCOUNT
+
+    ledger = AccountLedger()
+    ledger.ensure_initialized(load_config())
+    ledger.correct_cash(REAL_ACCOUNT, cash, t2_pending)
+    return ledger.account_summary(REAL_ACCOUNT)
+
+
+def _current_trading_mode() -> Dict[str, str]:
+    try:
+        from jobs.market_monitor import load_config
+
+        config = load_config()
+        return trading_mode_payload(config.get("trading_mode", DEFAULT_TRADING_MODE))
+    except Exception:
+        return trading_mode_payload(DEFAULT_TRADING_MODE)
+
+
+def _set_trading_mode(mode: str) -> Dict[str, str]:
+    normalized = normalize_trading_mode(mode)
+    from jobs.market_monitor import CONFIG_PATH, load_config
+
+    config = load_config()
+    config["trading_mode"] = normalized
+    CONFIG_PATH.write_text(json.dumps(config, ensure_ascii=False, indent=2), encoding="utf-8")
+    payload = _load_snapshot(ROOT / "data" / "market_monitor" / "latest_window.json")
+    if payload:
+        payload["trading_mode"] = trading_mode_payload(normalized)
+        payload["message"] = f"交易模式已切换为{trading_mode_label(normalized)}"
+        _write_snapshot(ROOT / "data" / "market_monitor" / "latest_window.json", payload)
+    return trading_mode_payload(normalized)
 
 
 def _cash_ratio(cash: Any, total_assets: Any) -> float:
@@ -436,6 +474,7 @@ def _load_config_snapshot(message: str = "", *, source_path: Optional[Path] = No
         "version": 1,
         "generated_at": _file_timestamp(timestamp_path),
         "round_time": "config",
+        "trading_mode": trading_mode_payload(config.get("trading_mode", DEFAULT_TRADING_MODE)),
         "cash_cny": round(cash, 2),
         "available_cash_cny": round(cash, 2),
         "t2_pending_cash_cny": round(t2_pending_cash, 2),
@@ -934,6 +973,9 @@ __all__ = [
     "_fmt_price",
     "_fmt_money",
     "_fmt_cash_line",
+    "_correct_real_cash",
+    "_current_trading_mode",
+    "_set_trading_mode",
     "_cash_ratio",
     "_fmt_update_time",
     "_fmt_lots",

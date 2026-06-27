@@ -8,6 +8,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from jobs.market_monitor_common import LATEST_WINDOW_PATH, REPORT_DIR, log, _fmt_price, _safe_num
 from jobs.market_monitor_alerts import _has_llm_hold_conflict, _suppressed_reasons_by_symbol
+from jobs.trading_mode import DEFAULT_TRADING_MODE, trading_mode_payload
 
 def _first_prefixed_line(text: str, prefixes: Tuple[str, ...]) -> str:
     for line in (text or "").splitlines():
@@ -101,6 +102,7 @@ def build_monitor_window_snapshot(
     cash: float,
     total_assets: float,
     t2_pending_cash: float = 0.0,
+    trading_mode: str = DEFAULT_TRADING_MODE,
 ) -> Dict[str, Any]:
     """Build the stable monitor-window payload consumed by the desktop UI."""
     result_by_symbol = {str(r.get("symbol") or "").upper(): r for r in results if r}
@@ -218,6 +220,7 @@ def build_monitor_window_snapshot(
         "version": 1,
         "generated_at": datetime.now().isoformat(timespec="seconds"),
         "round_time": round_time,
+        "trading_mode": trading_mode_payload(trading_mode),
         "cash_cny": round(available_cash, 2),
         "available_cash_cny": round(available_cash, 2),
         "t2_pending_cash_cny": round(pending_cash, 2),
