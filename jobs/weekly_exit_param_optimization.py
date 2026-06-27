@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import os
 import time
+from contextlib import contextmanager, redirect_stderr, redirect_stdout
 from datetime import datetime, timezone
 from itertools import product
 from pathlib import Path
@@ -28,6 +29,7 @@ EASTMONEY_HEADERS = {
 }
 
 EASTMONEY_INDUSTRY_FALLBACK: Dict[str, str] = {}
+UNKNOWN_SECTORS = {"", "未分组", "全局", "unknown", "none", "null", "-"}
 
 
 def _load_dotenv_file(path: Path) -> None:
@@ -51,6 +53,20 @@ def _load_dotenv_file(path: Path) -> None:
             os.environ[key] = value
 
 
+@contextmanager
+def _quiet_market_data_output():
+    """Suppress noisy progress bars from data providers during scheduled runs."""
+    if _env_bool("INVEST_EXIT_PARAM_OPT_VERBOSE", False):
+        yield
+        return
+    try:
+        with open(os.devnull, "w", encoding="utf-8") as devnull:
+            with redirect_stdout(devnull), redirect_stderr(devnull):
+                yield
+    except Exception:
+        yield
+
+
 def _env_bool(name: str, default: bool = True) -> bool:
     value = os.getenv(name)
     if value is None:
@@ -66,8 +82,37 @@ def _load_monitor_config() -> Dict[str, Any]:
 
 def _sector_key(stock: Dict[str, Any], sector_by_symbol: Dict[str, str]) -> str:
     symbol = str(stock.get("symbol") or "").strip()
-    eastmoney_sector = sector_by_symbol.get(symbol)
-    return str(eastmoney_sector or stock.get("sector") or stock.get("industry") or "未分组").strip() or "未分组"
+    eastmoney_sector = _clean_sector(sector_by_symbol.get(symbol))
+    config_sector = _clean_sector(stock.get("sector"))
+    config_industry = _clean_sector(stock.get("industry"))
+    return eastmoney_sector or config_sector or config_industry or "未分组"
+
+
+def _clean_sector(value: Any) -> str:
+    sector = str(value or "").strip()
+    return "" if sector.lower() in UNKNOWN_SECTORS or sector in UNKNOWN_SECTORS else sector
+
+
+def _merge_sector_mapping(
+    base: Dict[str, str],
+    incoming: Dict[str, str],
+    *,
+    symbols: List[str],
+    overwrite_unknown: bool = True,
+) -> int:
+    changed = 0
+    target = set(symbols)
+    for symbol, sector in incoming.items():
+        symbol = str(symbol or "").strip()
+        sector = _clean_sector(sector)
+        if not symbol or symbol not in target or not sector:
+            continue
+        current = _clean_sector(base.get(symbol))
+        if not current or overwrite_unknown:
+            if base.get(symbol) != sector:
+                base[symbol] = sector
+                changed += 1
+    return changed
 
 
 def _sector_symbol_groups(
@@ -103,7 +148,7 @@ def _config_sector_mapping(config: Dict[str, Any]) -> Dict[str, str]:
         if str(stock.get("market", "a")).lower() != "a":
             continue
         symbol = str(stock.get("symbol") or "").strip()
-        sector = str(stock.get("sector") or stock.get("industry") or "").strip()
+        sector = _clean_sector(stock.get("sector")) or _clean_sector(stock.get("industry"))
         if symbol and sector and symbol not in mapping:
             mapping[symbol] = sector
     return mapping
@@ -256,17 +301,23 @@ def _fetch_eastmoney_industry_map(symbols: List[str]) -> Tuple[Dict[str, str], s
     if not target:
         return {}, "empty", []
     warnings: List[str] = []
+    merged: Dict[str, str] = {}
+    sources_used: List[str] = []
 
     for source, fetcher in (
         ("eastmoney_direct_browser_headers", _fetch_eastmoney_industry_map_direct),
         ("eastmoney_akshare", _fetch_eastmoney_industry_map_akshare),
     ):
+        missing = [symbol for symbol in symbols if not _clean_sector(merged.get(symbol))]
+        if not missing:
+            break
         try:
-            mapping, failures = fetcher(symbols)
+            mapping, failures = fetcher(missing)
             warnings.extend(f"{source}:{msg}" for msg in failures)
             if mapping:
+                _merge_sector_mapping(merged, mapping, symbols=symbols, overwrite_unknown=True)
                 _write_sector_cache(mapping, source=source)
-                return mapping, source, warnings[:10]
+                sources_used.append(source)
         except Exception as exc:  # noqa: BLE001
             warnings.append(f"{source}:{type(exc).__name__}:{str(exc)[:200]}")
 
@@ -274,10 +325,15 @@ def _fetch_eastmoney_industry_map(symbols: List[str]) -> Tuple[Dict[str, str], s
     cached_mapping = {
         symbol: str((cache.get("mapping") or {}).get(symbol) or "").strip()
         for symbol in symbols
+        if not _clean_sector(merged.get(symbol))
     }
     cached_mapping = {k: v for k, v in cached_mapping.items() if v}
     if cached_mapping:
-        return cached_mapping, f"sector_cache:{cache.get('source', 'unknown')}", warnings[:10]
+        _merge_sector_mapping(merged, cached_mapping, symbols=symbols, overwrite_unknown=True)
+        sources_used.append(f"sector_cache:{cache.get('source', 'unknown')}")
+
+    if merged:
+        return merged, "+".join(sources_used) if sources_used else "merged", warnings[:10]
 
     return {}, "sector_config_fallback", warnings[:10]
 
@@ -339,6 +395,49 @@ def _cap_param_grid(param_grid: List[Any], max_trials: int) -> List[Any]:
     return selected
 
 
+def _sector_sample_quality(
+    *,
+    symbol_count: int,
+    sell_count: int,
+    sell_path_sample_count: int,
+) -> Dict[str, Any]:
+    """Assess whether a sector policy has enough evidence for sell utility.
+
+    The weekly optimizer still keeps stop/take-profit parameters for sparse
+    sectors, but sell utility should not become aggressive when it comes from a
+    single name or only a few post-sell path samples.
+    """
+    symbol_score = min(max(symbol_count, 0) / 3.0, 1.0)
+    sell_score = min(max(sell_count, 0) / 12.0, 1.0)
+    path_score = min(max(sell_path_sample_count, 0) / 12.0, 1.0)
+    score = round(0.35 * symbol_score + 0.30 * sell_score + 0.35 * path_score, 6)
+    if symbol_count >= 2 and sell_count >= 8 and sell_path_sample_count >= 8:
+        level = "ok"
+    elif symbol_count >= 1 and sell_count >= 4 and sell_path_sample_count >= 4:
+        level = "thin"
+    else:
+        level = "sparse"
+    return {
+        "level": level,
+        "score": score,
+        "symbol_count": int(max(symbol_count, 0)),
+        "sell_count": int(max(sell_count, 0)),
+        "sell_path_sample_count": int(max(sell_path_sample_count, 0)),
+    }
+
+
+def _apply_sample_quality(metrics: Dict[str, Any], quality: Dict[str, Any]) -> None:
+    """Shrink sell-utility fields for thin sectors without hiding diagnostics."""
+    factor = float(quality.get("score") or 0.0)
+    if quality.get("level") == "ok":
+        return
+    for key in ("sell_reliability", "sell_evidence_score", "sell_utility_adjustment_pct"):
+        if key in metrics:
+            metrics[key] = round(float(metrics.get(key) or 0.0) * factor, 6)
+    metrics["sample_quality_score"] = factor
+    metrics["sample_quality_level"] = quality.get("level")
+
+
 def run() -> Dict[str, Any]:
     _load_dotenv_file(ROOT / ".env")
     from scripts.backtest_ashare_committee_exit import (
@@ -351,7 +450,7 @@ def run() -> Dict[str, Any]:
         update_env_sector_exit_policies,
     )
 
-    days = max(20, int(os.getenv("INVEST_EXIT_PARAM_OPT_DAYS", "31")))
+    days = max(20, int(os.getenv("INVEST_EXIT_PARAM_OPT_DAYS", "62")))
     initial_cash = float(os.getenv("INVEST_EXIT_PARAM_OPT_INITIAL_CASH", "100000"))
     fee_rate = float(os.getenv("INVEST_EXIT_PARAM_OPT_FEE_RATE", "0.0005"))
     max_ops = max(0, min(5, int(os.getenv("INVEST_EXIT_PARAM_OPT_MAX_OPS", "5"))))
@@ -383,7 +482,8 @@ def run() -> Dict[str, Any]:
         symbols = [row["symbol"] for row in stocks]
         names = {row["symbol"]: row["name"] for row in stocks}
         try:
-            histories = _fetch_histories(symbols, period=history_period)
+            with _quiet_market_data_output():
+                histories = _fetch_histories(symbols, period=history_period)
             signal_cache = build_signal_cache(histories=histories, start=start, end=end)
             param_grid, grid_diagnostics = build_discrete_param_grid(histories, start=start, end=end)
             original_trial_count = len(param_grid)
@@ -411,6 +511,12 @@ def run() -> Dict[str, Any]:
             continue
         best_params = dict(result["best"]["params"])
         best_metrics = dict(result["best"].get("metrics") or {})
+        sample_quality = _sector_sample_quality(
+            symbol_count=len(symbols),
+            sell_count=int(float(best_metrics.get("sell_count") or 0)),
+            sell_path_sample_count=int(float(best_metrics.get("sell_path_sample_count") or 0)),
+        )
+        _apply_sample_quality(best_metrics, sample_quality)
         metric_keys = (
             "objective_score",
             "policy_quality_score",
@@ -429,6 +535,9 @@ def run() -> Dict[str, Any]:
             "avg_post_sell_net_edge_pct",
             "post_sell_positive_edge_rate",
             "post_sell_positive_edge_lower",
+            "sell_reliability",
+            "sell_evidence_score",
+            "sell_utility_adjustment_pct",
             "total_return_pct",
             "max_drawdown_pct",
         )
@@ -440,6 +549,7 @@ def run() -> Dict[str, Any]:
             "trailing_atr_mult": best_params["trailing_atr_mult"],
             "sample_symbols": symbols,
             "sample_names": names,
+            "sample_quality": sample_quality,
             **{key: best_metrics.get(key) for key in metric_keys if key in best_metrics},
             "updated_at": datetime.now(ZoneInfo("Asia/Shanghai")).isoformat(timespec="seconds"),
         }
@@ -449,6 +559,7 @@ def run() -> Dict[str, Any]:
             "top_results": result["top_results"],
             "trial_count": result["trial_count"],
             "discrete_optimization": grid_diagnostics,
+            "sample_quality": sample_quality,
         }
 
     report = {

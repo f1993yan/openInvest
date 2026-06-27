@@ -6,6 +6,8 @@
 
 * **committee:** 将 `TRIM` 明确拆成风控型减仓与战术型减仓；`stop_loss/bearish/risk/drawdown/exit_policy` 不再因为缺少买回点被强制降级 `HOLD`，只有 `range_trade/take_profit_reentry/swing` 这类高抛低接动作仍要求低于现价的 `REENTRY_PRICE`。
 * **sell-alerts:** 已持仓 `SELL/TRIM` 的提醒选择加入持仓风险释放模型，综合委员会置信度、建议卖出比例、保守卖出胜率、卖出后路径效用和当日走弱程度，减少强卖出信号被长期压在候选态的问题。
+* **decision-optimizer:** 板块级周度止盈止损优化默认回看最近 62 天，并把 `sell_utility_adjustment_pct`、`sell_reliability`、`sell_evidence_score` 写入策略；确定性优化器对已有持仓按 Wilson 下界、卖出后路径净优势和样本可靠性折减继续持有的 30 日期望收益，避免高风险持仓只降为 `HOLD` 而不触发减仓。
+* **exit-policy:** 周度板块映射改为多源合并，东方财富直连/AkShare 只返回部分标的时继续用 `data/sector_cache.json` 和本地配置补缺；新增 `sample_quality` 并对薄样本板块收缩卖出效用，减少“未分组”和单票过拟合。
 * **monitor-window:** 双击标的单独运行委员会分析后，会同步更新主窗口行、操作优先级排序、最后更新时间和 `data/market_monitor/latest_window.json`；明确 `SELL + 负金额 + 已持仓` 直接进入执行提醒，普通 `TRIM` 仍保持待确认。
 * **monitor-window:** 委员会详情弹窗改为按信息优先级渲染：最高风险内容红色加粗，主要正向证据绿色加粗，背景与辅助信息灰色显示，并删除低价值泛化提醒。
 * **monitor-window:** 桌面窗口新增真实账户现金/T+2修正入口，写入路径统一为 `AccountLedger(real).correct_cash()`，再由 ledger 即时同步本地配置和窗口快照。
@@ -20,6 +22,8 @@
 
 * **wiki/readme:** 补充 TRIM 类型边界、卖出提醒模型、单标的手动委员会分析回写主窗口快照、详情弹窗颜色语义和 App 接口兼容说明。
 * **wiki/readme:** 补充交易模式、ledger-first 现金修正和模式字段向后兼容说明。
+* **wiki/readme:** 补充周度卖出效用参数的 62 天校准、Wilson 下界收缩和“只影响已有持仓、不影响入场点、不破坏 App 接口”的边界。
+* **wiki/readme:** 补充行业映射多源补缺和 `sample_quality` 对卖出效用的影响。
 
 ## Unreleased (2026-06-19)
 

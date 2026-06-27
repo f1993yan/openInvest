@@ -177,6 +177,7 @@ start-invest-backend.bat
 - 入场/出场点来自 `entry_exit_points`，服务于“现在能不能买/加/减”的技术确认。
 - 持仓止盈止损来自 `position_exit_plan`，服务于“已经持有后如何守纪律”，锚定成本和板块参数，不能拿来反推买入点。
 - `policy_quality_score` 是 risk-adjusted expected utility，不是裸胜率：胜率先用 Wilson 下界保守化，再按卖出样本数可靠性收缩；监控只把它作为已持仓 `TRIM/SELL` 的小幅 likelihood-ratio 校准。
+- `sell_utility_adjustment_pct` 是同一周度回测派生的确定性优化器输入：默认回看最近 62 天，同板块样本用 Wilson 下界、卖出后路径净优势和样本可靠性收缩，得到对“继续持有该仓位”的 30 日期望收益折减。证据不足时自动接近 0；它只作用于已有持仓，不参与空仓买入。
 - 卖出提醒阈值在 `jobs/market_monitor_alerts.py`，不是持仓止损线本身：`_sell_alert_threshold()` 会结合是否触发 `position_exit_plan`、`sell_win_rate_lower`、`conservative_sell_expectancy_cny`、`avg_post_sell_net_edge_pct` 和 `policy_quality_score` 调整提醒门槛。已经触发锁定出场线时可以低于基础 45 分；没有价格触发时仍保持更高约束。
 - `SELL + 负 suggested_alloc_cny + 已持仓` 在单标的最新分析弹窗中会直接升级为 `action_required`；普通 `TRIM` 仍是 `candidate`，除非被批量提醒优化器选中或触发纪律线。
 - 交易模式在 `jobs/trading_mode.py` 定义，并由 `jobs/market_monitor_alerts.py` 使用：`主动盈利` 保持旧的期望最大化，`现金回收` 增加现金保留和卖出释放现金效用，`主动避险` 提高买入门槛并强化风险卖出。它只改变提醒优化层，不改变 `entry_exit_points`、`position_exit_plan` 或委员会原始 verdict。
@@ -185,6 +186,7 @@ start-invest-backend.bat
 - 卖出阈值诊断脚本是 `scripts/diagnose_ashare_sell_threshold.py`。它比较不同 `committee_sell_stop_band` 的收益/回撤、卖出胜率下界、卖出后规避回撤和错过反弹成本；如果多组 band 结果完全一致，说明委员会卖出带不是约束点，应优先检查提醒筛选、止盈止损参数或 UI 状态。
 - 周度优化的 `policy_quality_score` 会纳入卖出后 5 日路径效用：`avg_post_sell_net_edge_pct = avoided_drawdown - missed_rebound`。这个指标为负时，说明卖出经常躲过一部分下跌但错过更大的反弹，参数优化会相应惩罚该策略。
 - 周度参数优化的行业映射会先用更像浏览器的东方财富直连，失败后尝试 AkShare，再读 `data/sector_cache.json`；缓存仍缺失时才使用本地配置里的 `sector`/`industry`。
+- 行业映射是多源合并，不再因为实时源返回了部分标的就跳过缓存补缺；`sample_quality` 会标记 `ok/thin/sparse`，薄样本板块仍保留止盈止损参数，但会收缩 `sell_utility_adjustment_pct`，避免单票卖出样本把委员会带偏。
 - `AccountLedger(real)` 是持仓单一可信源；ledger 更新后同步 config/snapshot，config 只作为旧路径兼容和新标的首次播种来源。
 
 ---

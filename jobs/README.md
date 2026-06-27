@@ -35,8 +35,10 @@ APScheduler 自动发现的定时任务。每个 `.py` 配套一个 `.yml` 描�
 - `call_committee()` 直接调用 `backend.server.run_committee_direct()`，不依赖 8766 HTTP。
 - `entry_exit_points` 是入场/出场技术参考，会随行情刷新。
 - `position_exit_plan` 是持仓后的成本锚定纪律计划，盘中只检查触发，收盘后才允许追踪止损上移。
-- `weekly_exit_param_optimization.py` 写入的 `policy_quality_score` 使用 Wilson 下界胜率、保守卖出期望、profit factor 和回撤惩罚，只校准已有持仓卖出/减仓提醒。
-- `weekly_exit_param_optimization.py` 的行业映射顺序是东方财富浏览器请求头直连、AkShare、`data/sector_cache.json`、本地配置 `sector`/`industry`；移植到新电脑时可把 `data/sector_cache.json` 一起带走。
+- `weekly_exit_param_optimization.py` 默认回看最近 62 天；写入的 `policy_quality_score` 使用 Wilson 下界胜率、保守卖出期望、profit factor 和回撤惩罚，校准已有持仓卖出/减仓提醒。
+- 同一任务还会写入 `sell_utility_adjustment_pct`、`sell_reliability`、`sell_evidence_score`，供 `core.decision_optimizer` 在已有持仓上评估“继续持有 vs 减仓”的期望效用；证据不足时会收缩到接近 0，不影响空仓买入。
+- `weekly_exit_param_optimization.py` 的行业映射会合并东方财富浏览器请求头直连、AkShare、`data/sector_cache.json` 和本地配置；实时源只返回部分标的时会继续用缓存补缺。移植到新电脑时可把 `data/sector_cache.json` 一起带走。
+- `sample_quality=thin/sparse` 时只收缩卖出效用字段，不丢弃止盈止损参数，避免单票板块过拟合。
 - 主窗口消费 `data/market_monitor/latest_window.json`，UI 改动优先看 `scripts/monitor_window_*.py`。
 
 - `INDEX.md` — 所有 job 的输入/输出 spec（人类参考）

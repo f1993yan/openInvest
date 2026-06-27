@@ -1037,7 +1037,10 @@ def test_position_exit_policy_loads_weekly_post_sell_path_metrics(tmp_path):
         '"avg_post_sell_missed_rebound_pct":2.0,'
         '"avg_post_sell_net_edge_pct":3.5,'
         '"post_sell_positive_edge_rate":0.61,'
-        '"post_sell_positive_edge_lower":0.43'
+        '"post_sell_positive_edge_lower":0.43,'
+        '"sell_reliability":0.72,'
+        '"sell_evidence_score":0.31,'
+        '"sell_utility_adjustment_pct":2.4'
         '}}\n',
         encoding="utf-8",
     )
@@ -1047,11 +1050,17 @@ def test_position_exit_policy_loads_weekly_post_sell_path_metrics(tmp_path):
     assert policy.avg_post_sell_net_edge_pct == 3.5
     assert policy.sell_path_sample_count == 31
     assert policy.post_sell_positive_edge_lower == 0.43
+    assert policy.sell_utility_adjustment_pct == 2.4
+    assert policy.sell_reliability == 0.72
     assert policy.as_dict()["avg_post_sell_missed_rebound_pct"] == 2.0
 
 
 def test_sell_policy_stats_shrink_small_sample_win_rate():
-    from scripts.backtest_ashare_committee_exit import _sell_policy_stats, _policy_quality_score
+    from scripts.backtest_ashare_committee_exit import (
+        _policy_quality_score,
+        _sell_evidence_adjustment,
+        _sell_policy_stats,
+    )
 
     stats = _sell_policy_stats([100.0, 80.0])
     assert stats["sell_win_rate"] == 1.0
@@ -1063,4 +1072,44 @@ def test_sell_policy_stats_shrink_small_sample_win_rate():
         "max_drawdown_pct": -5.0,
     }
     assert _policy_quality_score(metrics) < 2.0
+
+    enriched = {**metrics, "sell_path_sample_count": 2, "avg_post_sell_net_edge_pct": 3.0, "post_sell_positive_edge_lower": 0.34}
+    adjustment = _sell_evidence_adjustment(enriched)
+    assert 0.0 < adjustment["sell_reliability"] < 0.5
+    assert abs(adjustment["sell_utility_adjustment_pct"]) < 2.0
+
+
+def test_weekly_sector_mapping_merges_cache_for_missing_live_rows():
+    from jobs.weekly_exit_param_optimization import _merge_sector_mapping, _sector_key
+
+    symbols = ["600183", "600487", "601138"]
+    merged = {"600183": "未分组"}
+
+    changed = _merge_sector_mapping(
+        merged,
+        {"600183": "电子", "600487": "通信", "601138": "电子"},
+        symbols=symbols,
+        overwrite_unknown=True,
+    )
+
+    assert changed == 3
+    assert _sector_key({"symbol": "600183", "sector": ""}, merged) == "电子"
+    assert _sector_key({"symbol": "600487", "sector": ""}, merged) == "通信"
+    assert _sector_key({"symbol": "601138", "sector": ""}, merged) == "电子"
+
+
+def test_weekly_sample_quality_shrinks_sparse_sell_utility():
+    from jobs.weekly_exit_param_optimization import _apply_sample_quality, _sector_sample_quality
+
+    metrics = {
+        "sell_reliability": 0.8,
+        "sell_evidence_score": 0.6,
+        "sell_utility_adjustment_pct": 4.0,
+    }
+    quality = _sector_sample_quality(symbol_count=1, sell_count=2, sell_path_sample_count=2)
+    _apply_sample_quality(metrics, quality)
+
+    assert quality["level"] == "sparse"
+    assert metrics["sell_utility_adjustment_pct"] < 4.0
+    assert metrics["sample_quality_level"] == "sparse"
 

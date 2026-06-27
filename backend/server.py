@@ -650,6 +650,7 @@ def run_committee_direct(req: CommitteeRequest) -> CommitteeResponse:
                 regime_probability=regime_probability,
                 conditional_return_stats=conditional_return_stats,
                 fundamental_assessment=fundamental_assessment,
+                position_exit_policy=p_exit_policy,
             )
 
             entry_exit_plan = compute_entry_exit_points(

@@ -166,3 +166,60 @@ def test_fundamental_assessment_soft_adjusts_black_litterman_anchor():
     assert decision.fundamental_model == "growth_innovation"
     assert decision.fundamental_anchor_multiplier > 1.0
     assert "fundamental_model=growth_innovation" in decision.audit_text()
+
+
+def test_exit_policy_sell_evidence_can_shift_existing_position_to_trim():
+    policy = SimpleNamespace(
+        sell_utility_adjustment_pct=8.0,
+        sell_reliability=0.80,
+        sell_evidence_score=0.65,
+    )
+
+    decision = optimize_committee_decision(
+        parsed={"verdict": "HOLD", "confidence": 0.55, "alloc_cny": 0},
+        metrics=_metrics(
+            atr_pct=2.0,
+            volatility_annualized=0.16,
+            return_30d=0.02,
+            price_quantile_2y=0.95,
+            rsi14=72.0,
+        ),
+        symbol="600900",
+        regime_brief="REGIME: range_bound",
+        current_price=10.0,
+        total_assets=100_000,
+        available_cash=10_000,
+        position_pct=25.0,
+        target_position_pct=25.0,
+        min_lot_size=100,
+        position_exit_policy=policy,
+    )
+
+    assert decision.verdict in {"TRIM", "SELL"}
+    assert decision.alloc_cny < 0
+    assert decision.exit_policy_adjustment_pct > 0
+    assert "exit_policy_adjustment_30d=" in decision.audit_text()
+
+
+def test_exit_policy_sell_evidence_is_ignored_without_position():
+    policy = SimpleNamespace(
+        sell_utility_adjustment_pct=8.0,
+        sell_reliability=0.80,
+        sell_evidence_score=0.65,
+    )
+
+    decision = optimize_committee_decision(
+        parsed={"verdict": "HOLD", "confidence": 0.55, "alloc_cny": 0},
+        metrics=_metrics(price_quantile_2y=0.95, rsi14=72.0),
+        symbol="600900",
+        regime_brief="REGIME: range_bound",
+        current_price=10.0,
+        total_assets=100_000,
+        available_cash=10_000,
+        position_pct=0.0,
+        target_position_pct=0.0,
+        min_lot_size=100,
+        position_exit_policy=policy,
+    )
+
+    assert decision.exit_policy_adjustment_pct == 0.0

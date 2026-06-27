@@ -449,6 +449,36 @@ def _policy_quality_score(metrics: Dict[str, Any]) -> float:
         - 0.10 * drawdown_penalty
     )
     return round(score, 6)
+
+
+def _sell_evidence_adjustment(metrics: Dict[str, Any]) -> Dict[str, float]:
+    """Convert sell backtest diagnostics into optimizer-ready utility inputs.
+
+    This is the same discrete evidence used by weekly parameter selection.  It
+    deliberately uses conservative lower bounds and sample shrinkage, so a
+    one-off lucky sell cannot force future committee decisions.
+    """
+    sell_count = max(0.0, _safe_float(metrics.get("sell_count")))
+    path_count = max(0.0, _safe_float(metrics.get("sell_path_sample_count")))
+    n = min(sell_count, path_count) if path_count > 0 else sell_count
+    reliability = n / (n + 8.0) if n > 0 else 0.0
+    net_edge = _safe_float(metrics.get("avg_post_sell_net_edge_pct"))
+    avoided = _safe_float(metrics.get("avg_post_sell_avoided_drawdown_pct"))
+    missed = _safe_float(metrics.get("avg_post_sell_missed_rebound_pct"))
+    path_scale = max(abs(net_edge), avoided + missed, 1.0)
+    path_utility = _clamp(net_edge / path_scale, -1.0, 1.0)
+    win_lower = _clamp(_safe_float(metrics.get("sell_win_rate_lower")), 0.0, 1.0)
+    path_lower = _clamp(_safe_float(metrics.get("post_sell_positive_edge_lower")), 0.0, 1.0)
+    conservative_probability = _clamp(0.5 * win_lower + 0.5 * path_lower, 0.0, 1.0)
+    evidence = _clamp((conservative_probability - 0.5) * 2.0, -1.0, 1.0)
+    adjustment = 8.0 * reliability * (0.65 * path_utility + 0.35 * evidence)
+    return {
+        "sell_reliability": round(reliability, 6),
+        "sell_evidence_score": round(evidence, 6),
+        "sell_utility_adjustment_pct": round(_clamp(adjustment, -8.0, 8.0), 6),
+    }
+
+
 def run_backtest(
     *,
     histories: Dict[str, pd.DataFrame],
@@ -703,6 +733,7 @@ def run_backtest(
         **sell_path_stats,
         **objective,
     }
+    metrics.update(_sell_evidence_adjustment(metrics))
     metrics["policy_quality_score"] = _policy_quality_score(metrics)
     return {
         "params": asdict(params),

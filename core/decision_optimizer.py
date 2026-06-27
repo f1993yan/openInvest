@@ -53,6 +53,9 @@ class OptimizedDecision:
     fundamental_model: str = "none"
     fundamental_anchor_multiplier: float = 1.0
     fundamental_return_adjustment_pct: float = 0.0
+    exit_policy_adjustment_pct: float = 0.0
+    exit_policy_reliability: float = 0.0
+    exit_policy_evidence_score: float = 0.0
 
     def audit_text(self) -> str:
         side = "buy" if self.alloc_cny > 0 else "sell" if self.alloc_cny < 0 else "hold"
@@ -67,6 +70,9 @@ class OptimizedDecision:
             f"fundamental_model={self.fundamental_model} score={self.fundamental_score:.1f} "
             f"anchor_multiplier={self.fundamental_anchor_multiplier:.3f} "
             f"return_adj_30d={self.fundamental_return_adjustment_pct:+.2f}%\n"
+            f"exit_policy_adjustment_30d={self.exit_policy_adjustment_pct:+.2f}% "
+            f"exit_policy_reliability={self.exit_policy_reliability:.2f} "
+            f"exit_policy_evidence={self.exit_policy_evidence_score:+.2f}\n"
             f"conditional_cvar_95_loss={self.cvar_95_loss_pct:.2f}%\n"
             f"reason={self.reason}"
         )
@@ -198,6 +204,34 @@ def _estimate_expected_return_pct(
     )
 
 
+def _exit_policy_adjustment_pct(
+    *,
+    position_exit_policy: Optional[Any],
+    holding_value: float,
+    total: float,
+) -> tuple[float, float, float]:
+    """Return a conservative 30d holding-return adjustment from sell evidence.
+
+    The weekly optimizer computes this from two-month sector samples using
+    Wilson-lower sell win rates and post-sell path edge.  We only apply it to
+    existing positions; sparse or weak evidence shrinks to zero in
+    ``PositionExitPolicy`` before it reaches this function.
+    """
+    if position_exit_policy is None or holding_value <= 0 or total <= 0:
+        return 0.0, 0.0, 0.0
+    raw = _clamp(_safe_float(getattr(position_exit_policy, "sell_utility_adjustment_pct", 0.0)), -8.0, 8.0)
+    reliability = _clamp(_safe_float(getattr(position_exit_policy, "sell_reliability", 0.0)), 0.0, 1.0)
+    evidence = _clamp(_safe_float(getattr(position_exit_policy, "sell_evidence_score", 0.0)), -1.0, 1.0)
+    if reliability <= 0.0 or abs(raw) < 0.01:
+        return 0.0, reliability, evidence
+    exposure = _clamp(holding_value / total, 0.0, 1.0)
+    # A tiny position should not dominate the whole optimizer.  The adjustment
+    # is applied to the held asset's expected return and scaled by exposure
+    # when that position is below a normal 20% sleeve.
+    exposure_scale = _clamp(exposure / 0.20, 0.25, 1.0)
+    return _clamp(raw * exposure_scale, -8.0, 8.0), reliability, evidence
+
+
 def _sigma_30d_pct(metrics: Dict[str, Any]) -> float:
     # 30 个日历日的前瞻窗口 ≈ 21 个交易日。波动按 sqrt(交易日数) 缩放。
     # 用 21 而非 30：年化波动率本身以 252 个交易日为基，sqrt(21/252) 才是
@@ -273,6 +307,7 @@ def optimize_committee_decision(
     conditional_return_stats: Optional[Any] = None,
     bl_anchor_target_pct: Optional[float] = None,
     fundamental_assessment: Optional[Any] = None,
+    position_exit_policy: Optional[Any] = None,
 ) -> OptimizedDecision:
     """Choose the executable action with maximum expected utility vs HOLD.
 
@@ -321,6 +356,9 @@ def optimize_committee_decision(
             fundamental_model=fundamental_model,
             fundamental_anchor_multiplier=fundamental_anchor_multiplier,
             fundamental_return_adjustment_pct=fundamental_return_adj,
+            exit_policy_adjustment_pct=0.0,
+            exit_policy_reliability=0.0,
+            exit_policy_evidence_score=0.0,
         )
 
     mu_pct = _estimate_expected_return_pct(
@@ -329,6 +367,12 @@ def optimize_committee_decision(
         conditional_return_stats=conditional_return_stats,
         fundamental_assessment=fundamental_assessment,
     )
+    exit_policy_adj, exit_policy_reliability, exit_policy_evidence = _exit_policy_adjustment_pct(
+        position_exit_policy=position_exit_policy,
+        holding_value=holding_value,
+        total=total,
+    )
+    mu_pct = _clamp(mu_pct - exit_policy_adj, -15.0, 15.0)
     sigma_pct = _sigma_30d_pct(metrics)
     mu = mu_pct / 100.0
     sigma = sigma_pct / 100.0
@@ -464,4 +508,7 @@ def optimize_committee_decision(
         fundamental_model=fundamental_model,
         fundamental_anchor_multiplier=fundamental_anchor_multiplier,
         fundamental_return_adjustment_pct=fundamental_return_adj,
+        exit_policy_adjustment_pct=exit_policy_adj,
+        exit_policy_reliability=exit_policy_reliability,
+        exit_policy_evidence_score=exit_policy_evidence,
     )

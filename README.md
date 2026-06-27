@@ -243,6 +243,8 @@ uv run pytest tests/test_gold_price.py tests/test_backtest_no_lookahead.py tests
 - `TRIM` 分两类：`stop_loss/bearish/risk/drawdown/exit_policy` 是风控型减仓，不要求买回点；`range_trade/take_profit_reentry/swing` 是战术型高抛低接，必须给低于现价的买回点，否则降级 `HOLD`。
 - 已触发持仓纪律线的卖出提醒会用板块策略质量、Wilson 胜率下界、保守卖出期望和卖出后路径效用调整提醒阈值，避免该卖时被普通观察状态淹没。
 - 未触发纪律线但委员会给出强 `SELL/TRIM` 时，提醒层会额外评估持仓风险释放：委员会置信度、建议卖出金额占持仓比例、保守卖出胜率、卖出后路径效用和当日走弱程度共同决定是否进入 `需要操作`。
+- 每周止盈止损优化默认回看最近 62 天，同步写入 `sell_utility_adjustment_pct`、`sell_reliability` 和 `sell_evidence_score`。这些参数用 Wilson 下界和样本收缩得到，只影响已有持仓的确定性卖出效用，不改变入场点，也不新增/删除 App 接口字段。
+- 板块参数按东方财富行业优先，实时源只返回部分标的时会继续用 `data/sector_cache.json` 和本地配置补齐；单票或卖出路径样本偏少的板块会标记 `sample_quality=thin/sparse` 并收缩卖出效用，降低过拟合。
 
 诊断卖出阈值是否过严：
 
