@@ -52,6 +52,7 @@
 | 11 | [RL 训练 / Backtest](11-rl-training.md) | Optuna 调参 + paper trade simulation + DSPy（不是真 ML 训练）|
 | 12 | [Verification 实测验证](12-verification.md) | 7 个核心主张的实测数据 + negative results + 复现命令 |
 | 13 | [参数调优可行性诊断](13-param-tuning-feasibility.md) | 50+ 硬编码常数清单 + 耦合分析 + Optuna 回顾 + sweep 策略 |
+| 15 | [App-Python 接口规范](15-app-python-interface-spec.md) | Android App 与 Python 算法基座的对外接口与字段规范 |
 
 ## 架构决策记录 (ADR)
 
