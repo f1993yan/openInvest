@@ -281,6 +281,8 @@ uv run python scripts/diagnose_ashare_sell_threshold.py --symbols "600183,002185
 - **同步服务器配置**：支持从远程服务器一键同步/同步云端或备份上传本地的持仓、自选列表与每周止盈参数配置。
 - **周末新闻机会标的互动**：在“周末新闻与机会”中，标的建议的龙头股名称可点击，点击后弹出悬浮气泡，展示当前价格、今日涨跌（如已在监视列表中）或研判原因。
 - **移动端本地 AI 投委会辩论**：点击气泡或详情中的“查看分析详情”，对未追踪的股票会自动通过网络接口解析 symbol，并在手机本地的 Chaquopy Python 环境下调用 LLM（Gemini/DeepSeek）异步执行多角色辩论与优化仓位策略。
+- **后台悬浮信号岛**：自动刷新服务在 App 退到后台后可显示系统悬浮窗，分析中展示进度，出现买卖信号时以紧凑卡片提醒；需要 Android 悬浮窗权限，可在设置中关闭。
+- **交易模式同步**：App 设置中的 `主动盈利 / 现金回收 / 主动避险` 会传入手机本地 `run_committee_local`，影响委员会提示语和提醒优化口径；旧版调用不传该参数时默认 `active_profit`。
 - **账户划转动画**：支持 A 股/港股 T+2 待交收资金一键确认可用，并伴随流畅的划转与可用金额递增计数动画，自动更新本地持仓配置及同步云端。
 - **选股推荐底栏**：以白底阴影精美卡片（`Card`）和薄边框形式融入整体视觉设计，并使用红/橙/灰状态点标识推荐个股的分值高低（$\ge 80$ 分为红，$\ge 60$ 分为橙）。
 
@@ -314,7 +316,7 @@ sequenceDiagram
     User->>UI: 点击龙头建议中的股票名称
     UI->>UI: 寻找 Snapshot 匹配价格数据
     UI->>User: 弹出气泡 AlertDialog (展示现价/涨跌幅/原因/查看详情)
-    
+
     %% 阶段 2: 详情分析与决策链启动
     User->>UI: 点击“查看分析详情”
     alt 标的在监视列表中 (Tracked)
@@ -327,7 +329,7 @@ sequenceDiagram
 
     %% 阶段 3: 本地异步多角色辩论执行 (Chaquopy 线程)
     Runner->>Py: 异步调用 run_committee_local(symbol, _is_resolving...)
-    
+
     alt _is_resolving == true (未追踪标的)
         Py->>Serv: 1. 请求 /api/stock/fundamental (拉取解析该股基本面)
         Serv-->>Py: 返回基本面数据结构
@@ -338,7 +340,7 @@ sequenceDiagram
 
     Py->>Py: 调用 OpenAI/Gemini 兼容的接口跑多角色辩论
     Note over Py: 1. Macro 角色判定宏观趋势<br/>2. Quant 角色审视价格指标<br/>3. Risk 角色过滤硬规则阻拦<br/>4. CIO 综合输出终审决议与期望收益
-    
+
     Py->>Py: 调用优化器决策与买卖点模型 (计算回调/突破买点、止损/止盈线)
     Py->>Py: 缓存辩论结果到本地目录 (pkl 序列化)
     Py->>Py: 格式化投资建议文本

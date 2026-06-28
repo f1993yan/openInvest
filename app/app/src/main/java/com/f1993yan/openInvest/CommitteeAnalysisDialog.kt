@@ -45,19 +45,19 @@ fun CommitteeAnalysisDialog(
     val prefs = remember { context.getSharedPreferences("open_invest_prefs", Context.MODE_PRIVATE) }
     val committeeAnalysisEnabled = remember { prefs.getBoolean("committee_analysis_enabled", true) }
 
-    var statusLog by remember { mutableStateOf("正在获取最新价格并运行委员会分析...") }
-    var taskStatus by remember { mutableStateOf<CommitteeStatusResponse?>(null) }
-    var streamCall by remember { mutableStateOf<Call?>(null) }
-    var isResolving by remember { mutableStateOf(row._is_resolving) }
+    var statusLog by remember(symbol) { mutableStateOf("正在获取最新价格并运行委员会分析...") }
+    var taskStatus by remember(symbol) { mutableStateOf<CommitteeStatusResponse?>(null) }
+    var streamCall by remember(symbol) { mutableStateOf<Call?>(null) }
+    var isResolving by remember(symbol) { mutableStateOf(row._is_resolving) }
 
-    var resolvedRow by remember { mutableStateOf<HoldingRow?>(if (row._is_resolving) null else row) }
+    var resolvedRow by remember(symbol) { mutableStateOf<HoldingRow?>(if (row._is_resolving) null else row) }
 
-    var addingWatchlist by remember { mutableStateOf(false) }
+    var addingWatchlist by remember(symbol) { mutableStateOf(false) }
 
     // Execute Trade Dialogue State
-    var showTradeDialog by remember { mutableStateOf(false) }
-    var showUpdateHoldingDialog by remember { mutableStateOf(false) }
-    var tradeVerdict by remember { mutableStateOf("") }
+    var showTradeDialog by remember(symbol) { mutableStateOf(false) }
+    var showUpdateHoldingDialog by remember(symbol) { mutableStateOf(false) }
+    var tradeVerdict by remember(symbol) { mutableStateOf("") }
 
     val startCommitteeTask: (String) -> Unit = { targetSymbol ->
         statusLog = "正在运行本地投资委员会辩论 (可能需要 1~2 分钟)..."
@@ -79,7 +79,7 @@ fun CommitteeAnalysisDialog(
         )
 
         val targetRow = resolvedRow ?: row
-        
+
         LocalCommitteeRunner.runCommitteeLocally(
             context = context,
             symbol = targetSymbol,
@@ -146,13 +146,13 @@ fun CommitteeAnalysisDialog(
                     val brief = regimeMap["brief"] as? String ?: "获取数据成功，无详细指标报告"
                     val inputs = regimeMap["inputs"] as? Map<*, *>
                     val currentPrice = (inputs?.get("current_price") as? Double) ?: 0.0
-                    
+
                     // Update resolvedRow price
                     val curRow = resolvedRow ?: row
                     resolvedRow = curRow.copy(
                         price = curRow.price.copy(current = currentPrice)
                     )
-                    
+
                     // Build dummy completed task status
                     taskStatus = CommitteeStatusResponse(
                         task_id = "data_only",
@@ -405,11 +405,11 @@ fun CommitteeAnalysisDialog(
                                             color = changeColor
                                         )
                                     }
-                                    
+
                                     val finalVerdict = symbolDetails?.get("verdict") as? String ?: resRow.operation?.verdict ?: "HOLD"
                                     val verdictColor = if (finalVerdict.uppercase() in listOf("BUY", "ACCUMULATE")) Color(0xFF067647) else if (finalVerdict.uppercase() in listOf("SELL", "TRIM")) Color(0xFFB42318) else Color(0xFF18202B)
                                     val verdictBg = if (finalVerdict.uppercase() in listOf("BUY", "ACCUMULATE")) Color(0xFFE8F8EE) else if (finalVerdict.uppercase() in listOf("SELL", "TRIM")) Color(0xFFFEECEB) else Color(0xFFEEF3F8)
-                                    
+
                                     Box(
                                         modifier = Modifier
                                             .clip(RoundedCornerShape(6.dp))
@@ -540,7 +540,7 @@ fun CommitteeAnalysisDialog(
                                         Text(if (reentryVal > 0) "¥${String.format("%.2f", reentryVal)}" else "-", fontSize = 11.sp, fontWeight = FontWeight.SemiBold, color = Color(0xFF18202B))
                                     }
                                 }
-                                
+
                                 val rrVal = buy?.reward_risk_ratio ?: 0.0
                                 if (rrVal > 0) {
                                     Spacer(modifier = Modifier.height(4.dp))
@@ -588,31 +588,33 @@ fun CommitteeAnalysisDialog(
                         }
                     }
 
-                    Spacer(modifier = Modifier.height(12.dp))
-
-                    Text(
-                        text = "辩论过程与流式分析",
-                        fontSize = 13.sp,
-                        fontWeight = FontWeight.Bold,
-                        color = Color(0xFF18202B),
-                        modifier = Modifier.padding(bottom = 6.dp)
-                    )
-
-                    // Text Debate logs
-                    Box(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .clip(RoundedCornerShape(8.dp))
-                            .background(Color.White)
-                            .border(0.5.dp, Color(0xFFE6EBF2), RoundedCornerShape(8.dp))
-                            .padding(12.dp)
-                    ) {
+                    if (isDebatingDone && debateLog.isNotEmpty()) {
+                        Spacer(modifier = Modifier.height(12.dp))
+                        FormattedReportCard(reportText = debateLog)
+                    } else if (debateLog.isNotEmpty()) {
+                        Spacer(modifier = Modifier.height(12.dp))
                         Text(
-                            text = debateLog,
+                            text = "流式分析与进度过程",
                             fontSize = 13.sp,
+                            fontWeight = FontWeight.Bold,
                             color = Color(0xFF18202B),
-                            lineHeight = 18.sp
+                            modifier = Modifier.padding(bottom = 6.dp)
                         )
+                        Box(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clip(RoundedCornerShape(8.dp))
+                                .background(Color.White)
+                                .border(0.5.dp, Color(0xFFE6EBF2), RoundedCornerShape(8.dp))
+                                .padding(12.dp)
+                        ) {
+                            Text(
+                                text = debateLog,
+                                fontSize = 13.sp,
+                                color = Color(0xFF18202B),
+                                lineHeight = 18.sp
+                            )
+                        }
                     }
                 }
             }
@@ -651,5 +653,92 @@ fun CommitteeAnalysisDialog(
                 onClose()
             }
         )
+    }
+}
+
+@Composable
+fun FormattedReportCard(reportText: String) {
+    Card(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(bottom = 12.dp),
+        colors = CardDefaults.cardColors(containerColor = Color.White),
+        border = BorderStroke(0.5.dp, Color(0xFFE6EBF2)),
+        shape = RoundedCornerShape(10.dp)
+    ) {
+        Column(modifier = Modifier.padding(16.dp)) {
+            Text(
+                text = "📋 投资委员会决策报告",
+                fontSize = 14.sp,
+                fontWeight = FontWeight.Bold,
+                color = Color(0xFF1B4E7A)
+            )
+            Spacer(modifier = Modifier.height(10.dp))
+
+            val lines = reportText.split("\n")
+            var skippedHeader = false
+            var underNeedCare = false
+
+            for (line in lines) {
+                val trimmed = line.trim()
+                if (trimmed.isEmpty()) continue
+
+                // Skip the duplicate stock title and its decoration line at the top
+                if (!skippedHeader && (trimmed.contains("(") || trimmed.contains(")") || trimmed.contains("=="))) {
+                    if (trimmed.startsWith("==")) {
+                        skippedHeader = true
+                    }
+                    continue
+                }
+
+                // Filter out debug logs, internal config parameters, and optimizer raw traces
+                if (trimmed.startsWith("==") || trimmed.startsWith("--") || trimmed.startsWith("——") || trimmed.startsWith("—")) continue
+                if (trimmed.contains("[") && trimmed.contains("]")) continue
+                if (trimmed.startsWith("###")) continue
+                if (trimmed.contains("交易约束")) continue
+                if (trimmed.startsWith("- 🔴")) continue
+                if (trimmed.contains("suggested_alloc_cny")) continue
+                if (trimmed.contains("止盈止损纪律")) continue
+                if (trimmed.contains("plan_type")) continue
+                if (trimmed.contains("audit_text")) continue
+                if (trimmed.contains("optimizer_review")) continue
+                if (trimmed.startsWith("lots=") || trimmed.startsWith("side=") || trimmed.startsWith("reason=") || trimmed.startsWith("black_litterman")) continue
+
+                // Track if we are under the "需要小心" warning section to color items red
+                if (trimmed.contains("需要小心")) {
+                    underNeedCare = true
+                } else if (trimmed.startsWith("你最该先看") || trimmed.startsWith("为什么这么判断") || trimmed.startsWith("下一步")) {
+                    underNeedCare = false
+                }
+
+                // Determine styling category
+                val isHeader = trimmed.startsWith("你最该先看") || trimmed.startsWith("为什么这么判断") || trimmed.startsWith("下一步") || trimmed.contains("需要小心")
+                val isVerdictLine = trimmed.startsWith("结论") || trimmed.contains("决策结论")
+                val isGreen = isVerdictLine || trimmed.contains("理想买点") || trimmed.contains("技术面") || trimmed.contains("右侧趋势闸门")
+                val isRed = underNeedCare || trimmed.contains("风险线") || trimmed.contains("止损") || trimmed.contains("波动率风险") || trimmed.contains("买点不匹配") || trimmed.contains("低置信度")
+                val isGray = trimmed.startsWith("- 基本面") || trimmed.contains("决策证据") || trimmed.contains("口径冲突") || trimmed.contains("模型提醒")
+
+                val textColor = when {
+                    isHeader && trimmed.contains("需要小心") -> Color(0xFFC62828)
+                    isHeader -> Color(0xFF18202B)
+                    isRed -> Color(0xFFC62828) // Deep Crimson Red
+                    isGreen -> Color(0xFF2E7D32) // Forest Green
+                    isGray -> Color(0xFF757575) // Cool Gray
+                    else -> Color(0xFF2E2E2E) // Soft Black
+                }
+
+                val fontWeight = if (isHeader || isVerdictLine) FontWeight.Bold else FontWeight.Normal
+                val fontSize = if (isHeader) 13.sp else 12.sp
+
+                Text(
+                    text = line,
+                    fontSize = fontSize,
+                    fontWeight = fontWeight,
+                    color = textColor,
+                    lineHeight = 18.sp,
+                    modifier = Modifier.padding(vertical = 3.dp)
+                )
+            }
+        }
     }
 }

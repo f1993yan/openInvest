@@ -4,6 +4,10 @@
 
 ### Improvements
 
+* **android:** 新增可选后台悬浮信号岛；App 退到后台后展示自动刷新/委员会分析进度，触发买卖信号时用紧凑悬浮卡片提醒，并可从设置关闭。
+* **android:** App 交易模式 `主动盈利/现金回收/主动避险` 透传到本地 Chaquopy 委员会入口，Python 侧保持尾部可选参数默认值，旧版调用仍兼容。
+* **exit-policy:** 手机端/桌面端止盈止损参数读取兼容 `sector_exit_policies` 与旧 `sector_policies` 字段，避免不同同步路径写入字段名不一致导致板块参数回退到全局默认值。
+* **weekend-news:** 国内热点新闻板块龙头改为“内置行业锚点 + AkShare 动态成分股”合并去重，避免实时概念排行覆盖掉工业富联、胜宏科技等明确龙头。
 * **committee:** 将 `TRIM` 明确拆成风控型减仓与战术型减仓；`stop_loss/bearish/risk/drawdown/exit_policy` 不再因为缺少买回点被强制降级 `HOLD`，只有 `range_trade/take_profit_reentry/swing` 这类高抛低接动作仍要求低于现价的 `REENTRY_PRICE`。
 * **sell-alerts:** 已持仓 `SELL/TRIM` 的提醒选择加入持仓风险释放模型，综合委员会置信度、建议卖出比例、保守卖出胜率、卖出后路径效用和当日走弱程度，减少强卖出信号被长期压在候选态的问题。
 * **decision-optimizer:** 板块级周度止盈止损优化默认回看最近 62 天，并把 `sell_utility_adjustment_pct`、`sell_reliability`、`sell_evidence_score` 写入策略；确定性优化器对已有持仓按 Wilson 下界、卖出后路径净优势和样本可靠性折减继续持有的 30 日期望收益，避免高风险持仓只降为 `HOLD` 而不触发减仓。

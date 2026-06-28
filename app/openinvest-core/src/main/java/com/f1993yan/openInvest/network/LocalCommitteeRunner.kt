@@ -42,7 +42,8 @@ object LocalCommitteeRunner {
         val apiKey = prefs.getString("llm_api_key", "") ?: ""
         val model = prefs.getString("llm_model", "gemini-2.5-pro") ?: "gemini-2.5-pro"
         val llmBaseUrl = prefs.getString("llm_base_url", "") ?: ""
-        
+        val tradingMode = prefs.getString("trading_mode", "active_profit") ?: "active_profit"
+
         // Extract server IP and port from backend URL to pass to python for macro/history queries
         val backendUrl = NetworkClient.getBaseUrl()
         val serverIp = extractIpOrHostname(backendUrl)
@@ -57,9 +58,9 @@ object LocalCommitteeRunner {
             try {
                 val py = Python.getInstance()
                 val pyModule = py.getModule("utils.phone_committee")
-                
-                Log.d(TAG, "Calling run_committee_local for $symbol ($name) with base_url: $llmBaseUrl")
-                
+
+                Log.d(TAG, "Calling run_committee_local for $symbol ($name) with base_url: $llmBaseUrl and trading_mode: $tradingMode")
+
                 val pyResult = pyModule.callAttr(
                     "run_committee_local",
                     symbol,
@@ -86,15 +87,16 @@ object LocalCommitteeRunner {
                     optimizerReviewEnabled,
                     maxDebateRounds,
                     serverPort,
-                    changePct
+                    changePct,
+                    tradingMode
                 )
 
                 val jsonResult = pyResult.toString()
                 Log.d(TAG, "Local committee run raw result length: ${jsonResult.length}")
-                
+
                 val gson = Gson()
                 val map = gson.fromJson<Map<String, Any>>(jsonResult, object : com.google.gson.reflect.TypeToken<Map<String, Any>>() {}.type)
-                
+
                 val success = map["success"] as? Boolean ?: false
                 if (!success) {
                     val errorMsg = map["error"] as? String ?: "Unknown python error"
@@ -161,7 +163,7 @@ object LocalCommitteeRunner {
             try {
                 val py = Python.getInstance()
                 val pyModule = py.getModule("utils.phone_committee")
-                
+
                 val pyResult = pyModule.callAttr(
                     "evaluate_alerts_local",
                     resultsJson,

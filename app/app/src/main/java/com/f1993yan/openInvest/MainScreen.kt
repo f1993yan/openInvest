@@ -75,6 +75,59 @@ import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.delay
 import org.json.JSONObject
 
+private val STATE_PRIORITY = mapOf(
+    "action_required" to 0,
+    "trigger_confirmed" to 1,
+    "watch_trigger" to 2,
+    "candidate" to 3,
+    "monitoring" to 4,
+    "blocked" to 5,
+    "error" to 6
+)
+
+private val VERDICT_PRIORITY = mapOf(
+    "SELL" to 0,
+    "TRIM" to 1,
+    "BUY" to 2,
+    "ACCUMULATE" to 3,
+    "HOLD" to 4,
+    "WAIT" to 5
+)
+
+private val executionOrderComparator = Comparator<HoldingRow> { a, b ->
+    val stateA = STATE_PRIORITY[a.state] ?: 99
+    val stateB = STATE_PRIORITY[b.state] ?: 99
+    if (stateA != stateB) return@Comparator stateA.compareTo(stateB)
+
+    val statusAStr = a.operation?.status ?: a.state
+    val statusBStr = b.operation?.status ?: b.state
+    val statusA = STATE_PRIORITY[statusAStr] ?: 99
+    val statusB = STATE_PRIORITY[statusBStr] ?: 99
+    if (statusA != statusB) return@Comparator statusA.compareTo(statusB)
+
+    val confA = if (a.operation?.confirmed == true) 1 else 0
+    val confB = if (b.operation?.confirmed == true) 1 else 0
+    if (confA != confB) return@Comparator confB.compareTo(confA)
+
+    val alertA = a.operation?.alert_score ?: 0.0
+    val alertB = b.operation?.alert_score ?: 0.0
+    if (alertA != alertB) return@Comparator alertB.compareTo(alertA)
+
+    val verdA = VERDICT_PRIORITY[a.operation?.verdict?.uppercase()] ?: 99
+    val verdB = VERDICT_PRIORITY[b.operation?.verdict?.uppercase()] ?: 99
+    if (verdA != verdB) return@Comparator verdA.compareTo(verdB)
+
+    val allocA = a.operation?.suggested_alloc_cny ?: 0.0
+    val allocB = b.operation?.suggested_alloc_cny ?: 0.0
+    if (allocA != allocB) return@Comparator allocB.compareTo(allocA)
+
+    val changeA = Math.abs(a.price.change_pct)
+    val changeB = Math.abs(b.price.change_pct)
+    if (changeA != changeB) return@Comparator changeB.compareTo(changeA)
+
+    return@Comparator a.symbol.compareTo(b.symbol)
+}
+
 @Composable
 fun MainScreen(modifier: Modifier = Modifier, onSaveUrl: (String) -> Unit) {
     val context = LocalContext.current
@@ -151,6 +204,40 @@ fun MainScreen(modifier: Modifier = Modifier, onSaveUrl: (String) -> Unit) {
         initialMap
     }
     var isBackgroundRunning by remember { mutableStateOf(false) }
+    var isCommitteeUpdated by remember { mutableStateOf(false) }
+
+    LaunchedEffect(snapshot) {
+        while (true) {
+            val pendingSymbol = MainActivity.pendingTradeSymbol
+            if (pendingSymbol != null) {
+                val matchingRow = snapshot?.rows?.find { it.symbol.equals(pendingSymbol, ignoreCase = true) }
+                    ?: com.f1993yan.openInvest.network.HoldingRow(
+                        symbol = pendingSymbol,
+                        name = pendingSymbol,
+                        market = "A股",
+                        price = com.f1993yan.openInvest.network.HoldingRowPrice(current = 0.0, prev_close = 0.0, change_pct = 0.0),
+                        units = 0.0,
+                        cost = 0.0,
+                        position_pct = 0.0,
+                        target_position_pct = 0.0,
+                        is_holding = false,
+                        min_lot_size = 100,
+                        state = "MONITORING"
+                    )
+
+                activeTradeSymbol = pendingSymbol
+                activeTradeRow = matchingRow
+                activeTradeVerdict = MainActivity.pendingTradeVerdict ?: "BUY"
+                activeTradeSuggestedAlloc = MainActivity.pendingTradeSuggestedAlloc
+
+                // Clear pending fields
+                MainActivity.pendingTradeSymbol = null
+                MainActivity.pendingTradeVerdict = null
+                MainActivity.pendingTradeSuggestedAlloc = 0.0
+            }
+            kotlinx.coroutines.delay(500)
+        }
+    }
 
     fun updateSnapshotRow(symbol: String, updateBlock: (HoldingRow) -> HoldingRow) {
         snapshot = snapshot?.let { snap ->
@@ -199,7 +286,23 @@ fun MainScreen(modifier: Modifier = Modifier, onSaveUrl: (String) -> Unit) {
             val rowsToAnalyze = mutableListOf<HoldingRow>()
 
             for (row in rows) {
-                val cachedRow = cachedSnap?.rows?.find { it.symbol.equals(row.symbol, ignoreCase = true) }
+                var cachedRow = cachedSnap?.rows?.find { it.symbol.equals(row.symbol, ignoreCase = true) }
+                if ((cachedRow == null || cachedRow.operation == null) && localCommitteeResults.containsKey(row.symbol.uppercase())) {
+                    val cachedJson = localCommitteeResults[row.symbol.uppercase()]
+                    if (cachedJson != null) {
+                        val parsedFields = parseCachedResult(row.symbol, cachedJson)
+                        if (parsedFields != null) {
+                            cachedRow = row.copy(
+                                exit_points = parsedFields.exitPoints,
+                                buy_criteria = parsedFields.buyCriteria,
+                                operation = parsedFields.operation,
+                                fundamental = parsedFields.fundamental,
+                                llm_review = parsedFields.llmReview,
+                                success = true
+                            )
+                        }
+                    }
+                }
                 val holdingsJson = try {
                     val list = rows.filter { it.is_holding && it.symbol != row.symbol }.map { h ->
                         mapOf(
@@ -237,9 +340,9 @@ fun MainScreen(modifier: Modifier = Modifier, onSaveUrl: (String) -> Unit) {
                                cachedRow.cost == row.cost &&
                                cachedRow.position_pct == row.position_pct &&
                                cachedRow.target_position_pct == row.target_position_pct &&
-                               snap.generated_at == cachedSnap.generated_at &&
-                               snap.cash_cny == cachedSnap.cash_cny &&
-                               snap.total_assets_cny == cachedSnap.total_assets_cny &&
+                               snap.generated_at == cachedSnap?.generated_at &&
+                               snap.cash_cny == cachedSnap?.cash_cny &&
+                               snap.total_assets_cny == cachedSnap?.total_assets_cny &&
                                holdingsJson == cachedHoldingsJson &&
                                cachedRow.buy_criteria != null &&
                                cachedRow.exit_points != null &&
@@ -267,6 +370,7 @@ fun MainScreen(modifier: Modifier = Modifier, onSaveUrl: (String) -> Unit) {
             if (rowsToAnalyze.isEmpty()) {
                 Log.d("MainActivity", "All symbols are cached and up-to-date. Skipping committee run entirely.")
                 isBackgroundRunning = false
+                isCommitteeUpdated = true
 
                 val resultsList = localCommitteeResults.values.toList()
                 if (resultsList.isNotEmpty()) {
@@ -367,12 +471,16 @@ fun MainScreen(modifier: Modifier = Modifier, onSaveUrl: (String) -> Unit) {
                 return@launch
             }
 
-            Log.d("MainActivity", "Starting background local committee analysis for ${rowsToAnalyze.size} symbols...")
+            val totalCount = rowsToAnalyze.size
+            val completedCount = java.util.concurrent.atomic.AtomicInteger(0)
+            DynamicIslandManager.startAnalysis(context, rowsToAnalyze.firstOrNull()?.name ?: rowsToAnalyze.firstOrNull()?.symbol ?: "", totalCount)
+            Log.d("MainActivity", "Starting background local committee analysis for $totalCount symbols...")
 
             val semaphore = Semaphore(3)
             val jobs = rowsToAnalyze.map { row ->
                 launch {
                     semaphore.withPermit {
+                        DynamicIslandManager.updateAnalysisProgress(context, row.name ?: row.symbol, completedCount.get(), totalCount)
                         withContext(Dispatchers.Main) {
                             updateSnapshotRow(row.symbol) { it.copy(_is_resolving = true) }
                         }
@@ -434,6 +542,8 @@ fun MainScreen(modifier: Modifier = Modifier, onSaveUrl: (String) -> Unit) {
                                     val rawJson = done.rawJsonResult ?: ""
                                     if (rawJson.isNotEmpty()) {
                                         localCommitteeResults[row.symbol.uppercase()] = rawJson
+                                        val resultsCacheJson = gson.toJson(localCommitteeResults.toMap())
+                                        saveLocalFile(context, "committee_results_cache.json", resultsCacheJson)
                                     }
 
                                     val symbolSummary = (done.result?.get("by_asset") as? Map<*, *>)?.get(row.symbol) as? Map<*, *>
@@ -483,12 +593,16 @@ fun MainScreen(modifier: Modifier = Modifier, onSaveUrl: (String) -> Unit) {
                                     updateSnapshotRow(row.symbol) { it.copy(_is_resolving = false, error = err.message) }
                                 }
                             )
+                            val currentCompleted = completedCount.incrementAndGet()
+                            DynamicIslandManager.updateAnalysisProgress(context, row.name ?: row.symbol, currentCompleted, totalCount)
                         }
                     }
                 }
             }
             jobs.joinAll()
+            DynamicIslandManager.finishAnalysis()
             isBackgroundRunning = false
+            isCommitteeUpdated = true
             Log.d("MainActivity", "All background local committee runs completed! Evaluating triggers...")
 
             val resultsList = localCommitteeResults.values.toList()
@@ -598,16 +712,16 @@ fun MainScreen(modifier: Modifier = Modifier, onSaveUrl: (String) -> Unit) {
             val cash = configObj.optDouble("cash", 0.0)
             val totalAssets = configObj.optDouble("total_assets", 0.0)
             val t2PendingCash = configObj.optDouble("t2_pending_cash", 0.0)
-            
+
             val holdingsArr = configObj.optJSONArray("holdings")
             val watchlistArr = configObj.optJSONArray("watchlist")
-            
+
             val newRows = mutableListOf<HoldingRow>()
-            
+
             fun findExistingRow(sym: String): HoldingRow? {
                 return snapshot?.rows?.find { it.symbol.equals(sym, ignoreCase = true) }
             }
-            
+
             if (holdingsArr != null) {
                 for (i in 0 until holdingsArr.length()) {
                     val item = holdingsArr.getJSONObject(i)
@@ -620,16 +734,16 @@ fun MainScreen(modifier: Modifier = Modifier, onSaveUrl: (String) -> Unit) {
                     var units = item.optDouble("units", 0.0)
                     val cost = item.optDouble("cost", 0.0)
                     var posPct = item.optDouble("position_pct", 0.0)
-                    
+
                     if (units <= 0.0 && kotlin.math.abs(posPct) > 0.0 && kotlin.math.abs(cost) > 0.0 && totalAssets > 0.0) {
                         units = (totalAssets * kotlin.math.abs(posPct) / 100.0) / kotlin.math.abs(cost)
                     } else if (kotlin.math.abs(posPct) <= 0.0 && units > 0.0 && kotlin.math.abs(cost) > 0.0 && totalAssets > 0.0) {
                         posPct = (units * kotlin.math.abs(cost)) / totalAssets * 100.0
                     }
-                    
+
                     val existing = findExistingRow(sym)
                     val price = existing?.price ?: HoldingRowPrice(cost, cost, 0.0)
-                    
+
                     newRows.add(
                         HoldingRow(
                             symbol = sym,
@@ -654,7 +768,7 @@ fun MainScreen(modifier: Modifier = Modifier, onSaveUrl: (String) -> Unit) {
                     )
                 }
             }
-            
+
             if (watchlistArr != null) {
                 for (i in 0 until watchlistArr.length()) {
                     val item = watchlistArr.getJSONObject(i)
@@ -663,10 +777,10 @@ fun MainScreen(modifier: Modifier = Modifier, onSaveUrl: (String) -> Unit) {
                     val market = item.optString("market", "a")
                     val sector = item.optString("sector", "")
                     val industry = item.optString("industry", "")
-                    
+
                     val existing = findExistingRow(sym)
                     val price = existing?.price ?: HoldingRowPrice(0.0, 0.0, 0.0)
-                    
+
                     newRows.add(
                         HoldingRow(
                             symbol = sym,
@@ -691,7 +805,7 @@ fun MainScreen(modifier: Modifier = Modifier, onSaveUrl: (String) -> Unit) {
                     )
                 }
             }
-            
+
             val newSnapshot = SnapshotResponse(
                 version = snapshot?.version ?: 1,
                 generated_at = java.text.SimpleDateFormat("yyyy-MM-dd HH:mm:ss", java.util.Locale.getDefault()).format(java.util.Date()),
@@ -703,7 +817,7 @@ fun MainScreen(modifier: Modifier = Modifier, onSaveUrl: (String) -> Unit) {
                 counts = mapOf("symbols" to newRows.size),
                 rows = newRows
             )
-            
+
             snapshot = newSnapshot
             saveLocalFile(context, "resolved_snapshot.json", gson.toJson(newSnapshot))
             Log.d("MainActivity", "Successfully rebuilt snapshot from config with ${newRows.size} rows")
@@ -714,6 +828,7 @@ fun MainScreen(modifier: Modifier = Modifier, onSaveUrl: (String) -> Unit) {
 
     val refreshData = {
         isLoading = true
+        isCommitteeUpdated = false
         isConnected = null
         NetworkClient.testConnection { connectionResult ->
             isConnected = connectionResult.getOrDefault(false)
@@ -1080,15 +1195,20 @@ fun MainScreen(modifier: Modifier = Modifier, onSaveUrl: (String) -> Unit) {
             Spacer(modifier = Modifier.height(8.dp))
 
             // --- Monitored List ---
-            val filteredRows = remember(snapshot, searchQuery) {
+            val filteredRows = remember(snapshot, searchQuery, isCommitteeUpdated) {
                 val rows = snapshot?.rows ?: emptyList()
-                if (searchQuery.isEmpty()) {
+                val list = if (searchQuery.isEmpty()) {
                     rows
                 } else {
                     rows.filter {
                         it.symbol.contains(searchQuery, ignoreCase = true) ||
                                 it.name.contains(searchQuery, ignoreCase = true)
                     }
+                }
+                if (isCommitteeUpdated) {
+                    list.sortedWith(executionOrderComparator)
+                } else {
+                    list.sortedByDescending { it.units * it.price.current }
                 }
             }
 
@@ -1330,38 +1450,38 @@ fun MainScreen(modifier: Modifier = Modifier, onSaveUrl: (String) -> Unit) {
                         if (currentSnap != null && currentSnap.t2_pending_cash_cny > 0.0) {
                             val originalT2 = currentSnap.t2_pending_cash_cny
                             val originalCash = currentSnap.cash_cny
-                            
+
                             // Start animation
                             displayCashTarget = originalCash + originalT2
                             displayT2Target = 0.0
-                            
-                            coroutineScope.launch {
-                                delay(1000) // Wait for animation
-                                val updatedSnap = currentSnap.copy(
-                                    cash_cny = originalCash + originalT2,
-                                    t2_pending_cash_cny = 0.0
-                                )
-                                snapshot = updatedSnap
-                                
-                                // Update resolved_snapshot.json
-                                val snapJson = gson.toJson(updatedSnap)
-                                saveLocalFile(context, "resolved_snapshot.json", snapJson)
-                                
-                                if (NetworkClient.getBaseUrl().isNotEmpty()) {
-                                    NetworkClient.correctCash(originalCash + originalT2, 0.0) { res ->
-                                        coroutineScope.launch(Dispatchers.Main) {
-                                            res.fold(
-                                                onSuccess = {
-                                                    Toast.makeText(context, "已更新且同步至云端", Toast.LENGTH_SHORT).show()
-                                                    refreshData()
-                                                },
-                                                onFailure = { err ->
-                                                    Toast.makeText(context, "同步云端失败: ${err.message}", Toast.LENGTH_LONG).show()
-                                                }
-                                            )
-                                        }
+
+                            if (NetworkClient.getBaseUrl().isNotEmpty()) {
+                                NetworkClient.correctCash(originalCash + originalT2, 0.0) { res ->
+                                    coroutineScope.launch(Dispatchers.Main) {
+                                        res.fold(
+                                            onSuccess = {
+                                                Toast.makeText(context, "已更新且同步至云端", Toast.LENGTH_SHORT).show()
+                                                refreshData()
+                                            },
+                                            onFailure = { err ->
+                                                Toast.makeText(context, "同步云端失败: ${err.message}", Toast.LENGTH_LONG).show()
+                                            }
+                                        )
                                     }
-                                } else {
+                                }
+                            } else {
+                                coroutineScope.launch {
+                                    delay(1000) // Wait for animation
+                                    val updatedSnap = currentSnap.copy(
+                                        cash_cny = originalCash + originalT2,
+                                        t2_pending_cash_cny = 0.0
+                                    )
+                                    snapshot = updatedSnap
+
+                                    // Update resolved_snapshot.json
+                                    val snapJson = gson.toJson(updatedSnap)
+                                    saveLocalFile(context, "resolved_snapshot.json", snapJson)
+
                                     // Update market_monitor_config.json locally (offline fallback)
                                     val configStr = readLocalFile(context, "market_monitor_config.json")
                                     if (configStr != null) {
@@ -1562,6 +1682,86 @@ fun MainScreen(modifier: Modifier = Modifier, onSaveUrl: (String) -> Unit) {
             }
         )
     }
+}
+
+class ParsedCommitteeFields(
+    val exitPoints: com.f1993yan.openInvest.network.ExitPoints?,
+    val buyCriteria: com.f1993yan.openInvest.network.BuyCriteria?,
+    val operation: com.f1993yan.openInvest.network.Operation?,
+    val fundamental: com.f1993yan.openInvest.network.Fundamental?,
+    val llmReview: com.f1993yan.openInvest.network.LlmReview?
+)
+
+fun parseCachedResult(symbol: String, rawJson: String): ParsedCommitteeFields? {
+    try {
+        val root = org.json.JSONObject(rawJson)
+        val result = root.optJSONObject("result")
+        val byAsset = result?.optJSONObject("by_asset") ?: root.optJSONObject("by_asset") ?: return null
+        val cleanSym = symbol.uppercase()
+        val symbolObj = byAsset.optJSONObject(cleanSym) ?: byAsset.optJSONObject(cleanSym.split(".")[0]) ?: return null
+
+        val eePoints = symbolObj.optJSONObject("entry_exit_points")
+        val exitPoints = com.f1993yan.openInvest.network.ExitPoints(
+            stop_loss_price = eePoints?.optDouble("stop_loss_price")?.takeIf { !it.isNaN() && it > 0.0 },
+            take_profit_price = eePoints?.optDouble("take_profit_price")?.takeIf { !it.isNaN() && it > 0.0 },
+            trim_price = eePoints?.optDouble("trim_price")?.takeIf { !it.isNaN() && it > 0.0 }
+        )
+
+        val buyCriteria = com.f1993yan.openInvest.network.BuyCriteria(
+            pullback_price = eePoints?.optDouble("buy_pullback_price")?.takeIf { !it.isNaN() && it > 0.0 },
+            breakout_price = eePoints?.optDouble("buy_breakout_price")?.takeIf { !it.isNaN() && it > 0.0 },
+            reentry_price = eePoints?.optDouble("reentry_price")?.takeIf { !it.isNaN() && it > 0.0 },
+            reward_risk_ratio = eePoints?.optDouble("reward_risk_ratio")?.takeIf { !it.isNaN() && it > 0.0 },
+            reason = eePoints?.optString("reason")?.takeIf { it.isNotEmpty() }
+        )
+
+        val verdict = symbolObj.optString("verdict", "HOLD")
+        val suggestedAlloc = symbolObj.optDouble("suggested_alloc_cny", 0.0)
+
+        val triggersList = mutableListOf<com.f1993yan.openInvest.network.TriggerItem>()
+        val triggersArr = symbolObj.optJSONArray("triggers")
+        if (triggersArr != null) {
+            for (i in 0 until triggersArr.length()) {
+                val t = triggersArr.getJSONObject(i)
+                triggersList.add(
+                    com.f1993yan.openInvest.network.TriggerItem(
+                        side = t.optString("side"),
+                        kind = t.optString("kind"),
+                        level = t.optDouble("level"),
+                        price = t.optDouble("price")
+                    )
+                )
+            }
+        }
+
+        val operation = com.f1993yan.openInvest.network.Operation(
+            verdict = verdict,
+            suggested_alloc_cny = suggestedAlloc,
+            status = "monitoring",
+            triggers = triggersList
+        )
+
+        val fundamental = com.f1993yan.openInvest.network.Fundamental(
+            model = symbolObj.optString("fundamental_model"),
+            score = symbolObj.optDouble("fundamental_score", 50.0),
+            coverage = symbolObj.optDouble("fundamental_coverage", 0.0),
+            anchor_multiplier = symbolObj.optDouble("fundamental_anchor_multiplier", 1.0)
+        )
+
+        val reviewObj = symbolObj.optJSONObject("llm_review")
+        val llmReview = com.f1993yan.openInvest.network.LlmReview(
+            conclusion = reviewObj?.optString("conclusion"),
+            one_line = reviewObj?.optString("one_line"),
+            risk_note = reviewObj?.optString("risk_note"),
+            execution_plan = reviewObj?.optString("execution_plan"),
+            raw_excerpt = reviewObj?.optString("raw_excerpt")
+        )
+
+        return ParsedCommitteeFields(exitPoints, buyCriteria, operation, fundamental, llmReview)
+    } catch (e: Exception) {
+        android.util.Log.e("MainActivity", "Failed to parse cached committee result", e)
+    }
+    return null
 }
 
 

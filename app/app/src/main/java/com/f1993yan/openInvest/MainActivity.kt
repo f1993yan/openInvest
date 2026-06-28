@@ -1,6 +1,7 @@
 package com.f1993yan.openInvest
 
 import android.content.Context
+import android.content.Intent
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
@@ -13,8 +14,20 @@ import com.f1993yan.openInvest.network.NetworkClient
 import com.f1993yan.openInvest.ui.theme.OpenInvestTheme
 
 class MainActivity : ComponentActivity() {
+    companion object {
+        var pendingTradeSymbol: String? = null
+        var pendingTradeVerdict: String? = null
+        var pendingTradeSuggestedAlloc: Double = 0.0
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+
+        // Initialize DynamicIslandManager
+        DynamicIslandManager.init(this)
+
+        // Process incoming trade execution intent from expanded floating window
+        handleIntent(intent)
 
         // Initialize Python
         if (!com.chaquo.python.Python.isStarted()) {
@@ -40,5 +53,29 @@ class MainActivity : ComponentActivity() {
                 }
             }
         }
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        handleIntent(intent)
+    }
+
+    private fun handleIntent(intent: Intent?) {
+        if (intent != null && intent.action == "com.f1993yan.openInvest.ACTION_EXECUTE_TRADE") {
+            pendingTradeSymbol = intent.getStringExtra("symbol")
+            pendingTradeVerdict = intent.getStringExtra("verdict")
+            pendingTradeSuggestedAlloc = intent.getDoubleExtra("suggestedAlloc", 0.0)
+            android.util.Log.d("MainActivity", "Parsed execution request: $pendingTradeSymbol $pendingTradeVerdict")
+        }
+    }
+
+    override fun onResume() {
+        super.onResume()
+        DynamicIslandManager.onAppForeground(this)
+    }
+
+    override fun onPause() {
+        super.onPause()
+        DynamicIslandManager.onAppBackground(this)
     }
 }

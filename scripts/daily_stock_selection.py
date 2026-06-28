@@ -8,6 +8,9 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
+import socket
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Iterable, List
@@ -17,6 +20,8 @@ from services.news_sources import RawNewsItem, fetch_all
 from services.news_sources.domestic_hot_news import enrich_news_items, extract_stock_symbols_from_text
 from utils.akshare_data import get_history_data
 
+log = logging.getLogger(__name__)
+
 
 ROOT = Path(__file__).resolve().parents[1]
 OUT_DIR = ROOT / "data" / "daily_stock_selection"
@@ -24,6 +29,32 @@ MONITOR_CONFIG_PATH = ROOT / "jobs" / "market_monitor_config.json"
 
 
 def run_daily_stock_selection(
+    *,
+    trade_date: str | None = None,
+    max_news: int = 30,
+    max_stocks: int = 20,
+    write_file: bool = True,
+    available_cash_cny: float | None = None,
+    use_portfolio_cash: bool = True,
+) -> Dict[str, Any]:
+    # Prevent any single network call from hanging the entire pipeline.
+    # All akshare / yfinance / requests calls share the default socket timeout.
+    _old_timeout = socket.getdefaulttimeout()
+    socket.setdefaulttimeout(25)  # 25s per socket operation
+    try:
+        return _run_daily_stock_selection(
+            trade_date=trade_date,
+            max_news=max_news,
+            max_stocks=max_stocks,
+            write_file=write_file,
+            available_cash_cny=available_cash_cny,
+            use_portfolio_cash=use_portfolio_cash,
+        )
+    finally:
+        socket.setdefaulttimeout(_old_timeout)
+
+
+def _run_daily_stock_selection(
     *,
     trade_date: str | None = None,
     max_news: int = 30,
@@ -55,11 +86,13 @@ def run_daily_stock_selection(
                 raw_meta=meta,
             )
 
-    sector_fund_flows = _fetch_sector_fund_flows()
+    sector_fund_flows = _call_with_timeout(_fetch_sector_fund_flows, timeout=45, label="sector_fund_flows")
     flow_items = _fund_flow_items(sector_fund_flows)
 
     # 北向个股资金流（大幅净买入标的）
-    northbound_stocks = _fetch_northbound_individual_flow(max_stocks=15)
+    northbound_stocks = _call_with_timeout(
+        lambda: _fetch_northbound_individual_flow(max_stocks=15), timeout=30, label="northbound_flow"
+    )
     northbound_items = _northbound_flow_items(northbound_stocks)
 
     combined_items = [*enriched, *flow_items, *northbound_items]
@@ -130,13 +163,34 @@ def _cash_constraint_source(cash_constraint: float | None) -> str:
 def _load_candidate_history(items: Iterable[RawNewsItem]) -> Dict[str, Any]:
     symbols = _candidate_symbols(items)
     history: Dict[str, Any] = {}
-    for symbol in symbols:
+
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    def fetch_history(symbol):
         try:
             df = get_history_data(symbol, "3mo")
+            return symbol, df
         except Exception:
-            continue
-        if df is not None and not df.empty:
-            history[symbol] = df
+            return symbol, None
+
+    pool = ThreadPoolExecutor(max_workers=10)
+    try:
+        futures = {pool.submit(fetch_history, s): s for s in symbols}
+        for future in as_completed(futures, timeout=60):
+            try:
+                symbol, df = future.result(timeout=30)
+            except FutureTimeoutError:
+                log.warning("fetch_history timeout for %s", futures[future])
+                continue
+            except Exception:
+                continue
+            if df is not None and not df.empty:
+                history[symbol] = df
+        # Cancel any remaining futures
+        for future in futures:
+            future.cancel()
+    finally:
+        pool.shutdown(wait=False, cancel_futures=True)
     return history
 
 
@@ -147,30 +201,61 @@ def _load_candidate_fundamentals(items: Iterable[RawNewsItem]) -> Dict[str, Dict
         from utils.fundamental_data import get_fundamental_snapshot
     except Exception:
         return out
+
+    # Collect all unique candidate symbols and their info
+    candidates = []
+    seen = set()
     for item in items:
         for sector in (item.raw_meta or {}).get("sectors", []) or []:
             sector_name = str(sector.get("sector") or "")
             for leader in sector.get("leaders", []) or []:
                 symbol = str(leader.get("symbol") or "").strip()
-                if not _is_a_share(symbol) or symbol in out:
+                if not _is_a_share(symbol) or symbol in seen:
                     continue
+                seen.add(symbol)
                 name = str(leader.get("name") or symbol)
-                try:
-                    snapshot = get_fundamental_snapshot(symbol, "a")
-                    assessment = assess_fundamentals(
-                        symbol=symbol,
-                        name=name,
-                        sector=sector_name,
-                        market="a",
-                        metrics=snapshot.get("metrics") or {},
-                    )
-                    out[symbol] = {
-                        "score": assessment.score,
-                        "model": assessment.model_key,
-                        "reason": f"基本面 {assessment.score:.0f}，覆盖度 {assessment.coverage:.0%}",
-                    }
-                except Exception:
-                    continue
+                candidates.append((symbol, name, sector_name))
+
+    # Fetch in parallel
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    def fetch_one(cand):
+        symbol, name, sector_name = cand
+        try:
+            snapshot = get_fundamental_snapshot(symbol, "a")
+            assessment = assess_fundamentals(
+                symbol=symbol,
+                name=name,
+                sector=sector_name,
+                market="a",
+                metrics=snapshot.get("metrics") or {},
+            )
+            return symbol, {
+                "score": assessment.score,
+                "model": assessment.model_key,
+                "reason": f"基本面 {assessment.score:.0f}，覆盖度 {assessment.coverage:.0%}",
+            }
+        except Exception:
+            return symbol, None
+
+    pool = ThreadPoolExecutor(max_workers=10)
+    try:
+        futures = {pool.submit(fetch_one, c): c for c in candidates}
+        for future in as_completed(futures, timeout=90):
+            try:
+                symbol, res = future.result(timeout=30)
+            except FutureTimeoutError:
+                log.warning("fetch_fundamentals timeout for %s", futures[future])
+                continue
+            except Exception:
+                continue
+            if res:
+                out[symbol] = res
+        for future in futures:
+            future.cancel()
+    finally:
+        pool.shutdown(wait=False, cancel_futures=True)
+
     return out
 
 
@@ -199,6 +284,7 @@ def _fetch_legacy_sector_fund_flows(*, max_sectors: int = 8, max_leaders: int = 
     if df is None or df.empty:
         return []
     rows: List[Dict[str, Any]] = []
+    sectors_to_fetch: List[tuple[int, Any]] = []
     for index, (_, row) in enumerate(df.head(max_sectors).iterrows(), start=1):
         sector = str(_pick(row, ("名称", "行业", "板块", "板块名称", "name")) or "").strip()
         if not sector:
@@ -209,9 +295,24 @@ def _fetch_legacy_sector_fund_flows(*, max_sectors: int = 8, max_leaders: int = 
             "change_pct": _safe_float(_pick(row, ("今日涨跌幅", "涨跌幅", "板块涨跌幅", "change_pct"))),
             "main_net_inflow_cny": _safe_float(_pick(row, ("今日主力净流入-净额", "主力净流入-净额", "主力净流入", "净额", "net_inflow_cny"))),
             "fund_flow_source": "stock_sector_fund_flow_rank",
-            "leaders": _fetch_sector_flow_leaders(sector, max_leaders=max_leaders),
         }
         rows.append(flow)
+        sectors_to_fetch.append((len(rows) - 1, sector))
+
+    # Fetch leaders in parallel to avoid N×timeout serial wait
+    if sectors_to_fetch:
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+        with ThreadPoolExecutor(max_workers=min(len(sectors_to_fetch), 8)) as pool:
+            futures = {
+                pool.submit(_fetch_sector_flow_leaders, sector, max_leaders=max_leaders): idx
+                for idx, sector in sectors_to_fetch
+            }
+            for future in as_completed(futures, timeout=30):
+                idx = futures[future]
+                try:
+                    rows[idx]["leaders"] = future.result(timeout=28)
+                except Exception:
+                    rows[idx]["leaders"] = []
     return rows
 
 
@@ -455,6 +556,28 @@ def _candidate_symbols(items: Iterable[RawNewsItem]) -> List[str]:
 
 def _is_a_share(symbol: str) -> bool:
     return symbol.isdigit() and len(symbol) == 6 and symbol[0] in {"0", "2", "3", "4", "6", "8"}
+
+
+def _call_with_timeout(fn, *, timeout: float, label: str = "unknown", default=None):
+    """Run fn() in a thread with a hard timeout; return default on timeout.
+
+    Uses socket.setdefaulttimeout as the primary guard; this function
+    provides an extra safety net for pure-Python blocking (e.g. DNS).
+    """
+    from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
+    pool = ThreadPoolExecutor(max_workers=1)
+    try:
+        future = pool.submit(fn)
+        return future.result(timeout=timeout)
+    except FutureTimeoutError:
+        log.warning("%s timed out after %.0fs", label, timeout)
+        future.cancel()
+        return default if default is not None else []
+    except Exception:
+        log.exception("%s failed", label)
+        return default if default is not None else []
+    finally:
+        pool.shutdown(wait=False, cancel_futures=True)
 
 
 def main() -> None:

@@ -49,7 +49,8 @@ def run_committee_local(
     optimizer_review_enabled: bool = True,# 是否开启 CIO 决策优化器校验
     max_debate_rounds: int = 4,         # 多 Agent 最大辩论轮数
     server_port: str = "8765",          # 远程服务器端口
-    change_pct: float = 0.0             # 今日涨跌幅百分比 (如 5.3 代表 +5.3%)
+    change_pct: float = 0.0,            # 今日涨跌幅百分比 (如 5.3 代表 +5.3%)
+    trading_mode: str = "active_profit" # 可选交易模式: active_profit/cash_recovery/risk_off
 ) -> str:                               # 返回结果 JSON 字符串
 ```
 
@@ -101,6 +102,7 @@ def run_committee_local(
 - `verdict` 枚举保持不变，只能是 `BUY, ACCUMULATE, HOLD, WAIT, TRIM, SELL`。
 - `suggested_alloc_cny` 语义保持不变：正数表示买入/加仓，负数表示卖出/减仓。
 - Python 侧可能额外返回 `trim_reason`、`reentry_price`、`reentry_condition`、`expected_path` 等解释字段；客户端应按可选字段处理。风控型减仓（如 `stop_loss/bearish/risk/drawdown/exit_policy`）不要求买回点，战术型减仓才要求低于现价的 `reentry_price`。
+- `trading_mode` 是新增尾部可选参数，旧版 App 不传时仍按 `active_profit` 执行。该参数只进入手机本地 Python 的委员会上下文与提醒优化口径，不改变 `verdict`、`suggested_alloc_cny` 等既有字段语义。
 
 #### 2.1.3 失败返回 JSON 结构 (`success: false`)
 ```json

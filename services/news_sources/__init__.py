@@ -121,33 +121,40 @@ def fetch_all(
         return []
 
     all_items: List[RawNewsItem] = []
-    pool = ThreadPoolExecutor(max_workers=min(8, len(tasks)))
-    try:
-        futures = {pool.submit(t["fn"], **t["kwargs"]): t["label"] for t in tasks}
-        # PR #5 Copilot CR 修复: as_completed(timeout=) 整体 wall-clock 用完后抛
-        # concurrent.futures.TimeoutError，原版没 catch → 一个 slow source 拖
-        # 整个 fetch_all 抛异常丢光其他源 result。改为 try/except + 把没完成的
-        # 那些 future cancel 掉，已收到的 result 保留返回。
+
+    import threading
+    import time
+
+    results = {}
+    threads = []
+
+    def worker(label, fn, kwargs):
         try:
-            for fut in as_completed(futures, timeout=timeout_sec):
-                label = futures[fut]
-                try:
-                    items = fut.result()
-                    all_items.extend(items)
-                    log.info(f"[news_sources] {label} → {len(items)} items")
-                except Exception as e:
-                    log.warning(f"[news_sources] {label} 失败: {type(e).__name__}: {e}")
-        except FuturesTimeoutError:
-            unfinished = [futures[f] for f in futures if not f.done()]
-            log.warning(
-                f"[news_sources] fetch_all 超时 ({timeout_sec}s)，"
-                f"未完成 sources={unfinished}；保留已收到 {len(all_items)} 条继续",
-            )
-            for f in futures:
-                if not f.done():
-                    f.cancel()
-    finally:
-        pool.shutdown(wait=False, cancel_futures=True)
+            results[label] = fn(**kwargs)
+        except Exception as e:
+            log.warning(f"[news_sources] {label} 失败: {type(e).__name__}: {e}")
+
+    for t in tasks:
+        th = threading.Thread(target=worker, args=(t["label"], t["fn"], t["kwargs"]), daemon=True)
+        th.start()
+        threads.append((t["label"], th))
+
+    # Wait for all threads with timeout
+    t0 = time.time()
+    for label, th in threads:
+        rem = timeout_sec - (time.time() - t0)
+        if rem > 0:
+            th.join(timeout=rem)
+
+    # Collect results
+    for label, th in threads:
+        if th.is_alive():
+            log.warning(f"[news_sources] {label} 超时 (>{timeout_sec}s)，已跳过")
+        elif label in results:
+            items = results[label]
+            if items:
+                all_items.extend(items)
+                log.info(f"[news_sources] {label} → {len(items)} items")
 
     # 同 url 去重（保留先到的）
     seen_urls = set()
@@ -157,11 +164,13 @@ def fetch_all(
             continue
         seen_urls.add(it.url)
         dedup.append(it)
+
     if domestic:
         try:
             from services.news_sources.domestic_hot_news import enrich_news_items
             dedup = enrich_news_items(dedup)
         except Exception as e:
             log.warning(f"[news_sources] 新闻板块提炼失败: {type(e).__name__}: {e}")
+
     log.info(f"[news_sources] 总计 {len(all_items)} 条 → 去重后 {len(dedup)} 条")
     return dedup

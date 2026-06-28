@@ -53,31 +53,78 @@ fun getDisplayUpdateTime(roundTime: String?, generatedAt: String?): String {
     return "-"
 }
 
+private fun parseSymbolFromText(text: String): String? {
+    val codeRegex = "\\((\\d{6})\\)".toRegex()
+    val matchResult = codeRegex.find(text) ?: return null
+    val code = matchResult.groupValues[1]
+    return when {
+        code.startsWith("6") -> "$code.SH"
+        code.startsWith("0") || code.startsWith("3") -> "$code.SZ"
+        code.startsWith("4") || code.startsWith("8") -> "$code.BJ"
+        else -> "$code.SZ"
+    }
+}
+
 fun showNotification(context: Context, title: String, content: String) {
     val prefs = context.getSharedPreferences("open_invest_prefs", Context.MODE_PRIVATE)
     val notificationsEnabled = prefs.getBoolean("notifications_enabled", true)
     if (!notificationsEnabled) return
 
-    val channelId = "open_invest_notifications"
+    val isTradeSignal = title.contains("触发") || title.contains("信号") ||
+                        content.contains("买") || content.contains("卖") ||
+                        content.contains("BUY") || content.contains("SELL")
+
+    val islandEnabled = prefs.getBoolean("dynamic_island_enabled", true)
+    if (islandEnabled && android.provider.Settings.canDrawOverlays(context)) {
+        DynamicIslandManager.addTrigger(context, title, content)
+        if (!isTradeSignal) {
+            // Non-critical background updates are handled entirely by the floating island overlay
+            return
+        }
+    }
+
+    val channelId = "open_invest_alerts"
     val notificationManager = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
 
     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
         val channel = NotificationChannel(
             channelId,
-            "OpenInvest Notifications",
-            NotificationManager.IMPORTANCE_DEFAULT
+            "交易决策信号",
+            NotificationManager.IMPORTANCE_HIGH
         ).apply {
-            description = "Notification Channel for OpenInvest Analysis updates"
+            description = "交易提醒和买卖建议信号通知"
+            lockscreenVisibility = android.app.Notification.VISIBILITY_PUBLIC
         }
         notificationManager.createNotificationChannel(channel)
     }
 
+    // Parse symbol, verdict from content to route to the interactive trade flow
+    val symbol = parseSymbolFromText(content)
+    val verdict = if (content.contains("买") || content.contains("BUY")) "BUY" else "SELL"
+
+    val intent = Intent(context, MainActivity::class.java).apply {
+        action = "com.f1993yan.openInvest.ACTION_EXECUTE_TRADE"
+        putExtra("symbol", symbol)
+        putExtra("verdict", verdict)
+        addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP)
+    }
+
+    val pendingIntent = android.app.PendingIntent.getActivity(
+        context,
+        System.currentTimeMillis().toInt(),
+        intent,
+        android.app.PendingIntent.FLAG_UPDATE_CURRENT or android.app.PendingIntent.FLAG_IMMUTABLE
+    )
+
     val builder = NotificationCompat.Builder(context, channelId)
-        .setSmallIcon(android.R.drawable.ic_dialog_info)
+        .setSmallIcon(R.drawable.deepseek_whale)
         .setContentTitle(title)
         .setContentText(content)
-        .setPriority(NotificationCompat.PRIORITY_DEFAULT)
+        .setPriority(NotificationCompat.PRIORITY_HIGH)
+        .setVisibility(NotificationCompat.VISIBILITY_PUBLIC) // Make visible on lockscreen
+        .setContentIntent(pendingIntent)
         .setAutoCancel(true)
+        .setCategory(NotificationCompat.CATEGORY_ALARM)
 
     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
         if (ContextCompat.checkSelfPermission(
@@ -133,12 +180,12 @@ fun triggerRefreshService(context: Context) {
         val refreshNews = prefs.getBoolean("auto_refresh_news_enabled", true)
         val refreshSelection = prefs.getBoolean("auto_refresh_selection_enabled", true)
         val refreshPrices = prefs.getBoolean("auto_refresh_prices_enabled", true)
-        
+
         intent.putExtra("interval", interval)
         intent.putExtra("refresh_news", refreshNews)
         intent.putExtra("refresh_selection", refreshSelection)
         intent.putExtra("refresh_prices", refreshPrices)
-        
+
         try {
             context.startService(intent)
             Log.d("MainActivity", "Started AutoRefreshService with interval=$interval, news=$refreshNews, selection=$refreshSelection, prices=$refreshPrices")

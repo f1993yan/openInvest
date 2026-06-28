@@ -1,0 +1,63 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
+    android:orientation="vertical"
+    android:padding="14dp"
+    android:background="#0C0E14">
+
+    <!-- Header -->
+    <TextView
+        android:id="@+id/island_panel_title"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:text="OpenInvest 智能决策中心"
+        android:textColor="#FFFFFF"
+        android:textSize="13sp"
+        android:textStyle="bold" />
+
+    <!-- Progress description -->
+    <TextView
+        android:id="@+id/island_panel_progress_text"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="4dp"
+        android:text="评估决策中..."
+        android:textColor="#94A3B8"
+        android:textSize="11sp" />
+
+    <!-- Whale Swimming Progress Track (FrameLayout Padding based) -->
+    <FrameLayout
+        android:id="@+id/island_panel_whale_container"
+        android:layout_width="match_parent"
+        android:layout_height="24dp"
+        android:layout_marginTop="6dp"
+        android:layout_marginBottom="6dp"
+        android:visibility="gone">
+
+        <!-- Grey track line -->
+        <View
+            android:layout_width="match_parent"
+            android:layout_height="3dp"
+            android:layout_gravity="center_vertical"
+            android:background="#1E293B" />
+
+        <!-- DeepSeek swimming whale icon -->
+        <ImageView
+            android:id="@+id/island_panel_whale"
+            android:layout_width="20dp"
+            android:layout_height="20dp"
+            android:layout_gravity="left|center_vertical"
+            android:src="@drawable/deepseek_whale" />
+    </FrameLayout>
+
+    <!-- Details/Alert list text area -->
+    <TextView
+        android:id="@+id/island_panel_details"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="4dp"
+        android:text="• 服务监听就绪"
+        android:textColor="#E2E8F0"
+        android:textSize="11sp" />
+</LinearLayout>

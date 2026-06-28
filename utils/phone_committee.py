@@ -109,7 +109,7 @@ def _beginner_next_step(verdict: Any, current: Any, pullback: Any, breakout: Any
     pullback_num = _safe_num(pullback)
     breakout_num = _safe_num(breakout)
     stop_num = _safe_num(stop)
-    
+
     if verdict_key in {"BUY", "ACCUMULATE"}:
         if pullback_num > 0 and current_num <= pullback_num:
             return "当前价已低于回调买点，符合低吸要求，可分批买入。"
@@ -138,68 +138,102 @@ def build_mobile_recommendation_text(
     fundamental_score: float,
     regime_brief: str,
     cio_memo: str,
-    is_from_cache: bool = False
+    is_from_cache: bool = False,
+    decision_synthesis: Optional[Dict[str, Any]] = None,
+    buy_signal_backtest: Optional[Dict[str, Any]] = None
 ) -> str:
     current = _safe_num(current_price)
     confidence_val = _safe_num(confidence)
     alloc = _safe_num(suggested_alloc_cny)
-    
+
     pullback = _safe_num(entry_exit_points.get("buy_pullback_price"))
     breakout = _safe_num(entry_exit_points.get("buy_breakout_price"))
-    
+
     stop = _safe_num(position_exit_policy.get("stop_loss_price"))
     if not stop or stop <= 0:
         stop = _safe_num(entry_exit_points.get("stop_loss_price"))
-        
+
     take = _safe_num(position_exit_policy.get("take_profit_price"))
     if not take or take <= 0:
         take = _safe_num(entry_exit_points.get("take_profit_price"))
-        
+
     plan_type = str(position_exit_policy.get("plan_type") or "")
-    
+
     pullback_dist = _distance_pct(current, pullback)
     breakout_dist = _distance_pct(current, breakout)
     stop_dist = _distance_pct(current, stop)
     take_dist = _distance_pct(current, take)
-    
+
+    action = _verdict_label(verdict)
+    if decision_synthesis:
+        action = str(decision_synthesis.get("action_label") or action)
+        primary_reason = str(decision_synthesis.get("primary_reason") or "")
+        decision = f"{action}，{primary_reason}" if primary_reason else f"{action}。"
+    elif str(verdict or "").upper() in {"BUY", "ACCUMULATE"} and current > 0 and _safe_num(pullback) > 0 and current > _safe_num(pullback) * 1.03:
+        decision = f"{action}，但当前价离回调买点偏高，别急着追。"
+    elif str(verdict or "").upper() in {"BUY", "ACCUMULATE"}:
+        decision = f"{action}，先看是否接近买点。"
+    elif str(verdict or "").upper() in {"SELL", "TRIM"}:
+        decision = f"{action}，注意减仓离场防范风险。"
+    else:
+        decision = f"{action}。"
+
     # Text formatting
     lines = [
         "你最该先看这儿呗:",
         f"1. 当前价: {_fmt_price(current)}，今日涨跌 {_fmt_pct(change_pct)}。",
-        f"2. 理想买点: 回调 {_fmt_price(pullback)} (在当前价 {_fmt_distance(pullback_dist)})；突破 {_fmt_price(breakout)} (在当前价 {_fmt_distance(breakout_dist)})。",
-        f"3. 风险线: {'持仓纪律' if plan_type == 'a_share_position_exit' else '入场估算'}，止损 {_fmt_price(stop)} (在当前价 {_fmt_distance(stop_dist)})；止盈 {_fmt_price(take)} (在当前价 {_fmt_distance(take_dist)})。",
-        f"4. 仓位建议: {_fmt_money(alloc)} 元；置信度 {int(confidence_val * 100)}%；当前{'已有持仓' if is_holding else '没有持仓'}。",
+        f"2. 决策结论: {decision}",
+        f"3. 理想买点: 回调 {_fmt_price(pullback)} (在当前价 {_fmt_distance(pullback_dist)})；突破 {_fmt_price(breakout)} (在当前价 {_fmt_distance(breakout_dist)})。",
+        f"4. 风险线: {'持仓纪律' if plan_type == 'a_share_position_exit' else '入场估算'}，止损 {_fmt_price(stop)} (在当前价 {_fmt_distance(stop_dist)})；止盈 {_fmt_price(take)} (在当前价 {_fmt_distance(take_dist)})。",
+        f"5. 仓位建议: {_fmt_money(alloc)} 元；置信度 {int(confidence_val * 100)}%；当前{'已有持仓' if is_holding else '没有持仓'}。",
         "",
         "为什么这么判断:",
         f"- 技术面: {_regime_label(regime_brief)}",
         f"- 右侧趋势闸门: {'通过' if right_side_trend_gate.get('allow') else '未通过'} ({right_side_trend_gate.get('reason') or '未提供'}) 。",
         f"- 基本面: {fundamental_score:.0f} 分，属于{'偏强' if fundamental_score >= 70 else '一般' if fundamental_score >= 45 else '偏弱'}。"
     ]
-    
+
+    if decision_synthesis:
+        for item in (decision_synthesis.get("evidence") or [])[:3]:
+            lines.append(f"- 决策证据: {item}")
+        for item in (decision_synthesis.get("conflicts") or [])[:2]:
+            lines.append(f"- 口径冲突: {item}；最终按确定性优化器执行。")
+
+    if buy_signal_backtest:
+        from core.buy_signal_miner import buy_signal_summary_text
+        lines.append(f"- {buy_signal_summary_text(buy_signal_backtest)}")
+
     one_line = _extract_one_line(cio_memo)
     if is_from_cache:
         lines.append("- 模型提醒: 从本地缓存载入上一次委员会分析结果")
     elif one_line and one_line != "-":
         lines.append(f"- 模型提醒: {one_line}")
-        
+
     risk_flags = _extract_risk_flags(cio_memo)
     low_confidence = bool(entry_exit_points.get("low_confidence"))
-    
-    if risk_flags or low_confidence:
+
+    synthesis_warnings = list((decision_synthesis.get("risk_warnings") or [])[:3]) if decision_synthesis else []
+    signal_warning = str((buy_signal_backtest or {}).get("warning") or "") if buy_signal_backtest else ""
+
+    if risk_flags or low_confidence or synthesis_warnings or signal_warning:
         lines.extend(["", "需要小心:"])
         if low_confidence:
             lines.append("- 买卖点模型置信度偏低，价格线只能当参考，不能机械下单。")
         if plan_type == "a_share_position_exit":
             lines.append("- 已持仓标的的止盈止损盘中不重算，只在收盘后按追踪规则上移风险线。")
+        for warning in synthesis_warnings:
+            lines.append(f"- {warning}")
+        if signal_warning:
+            lines.append(f"- {signal_warning}")
         for flag in risk_flags:
             lines.append(f"- {flag}")
-            
+
     lines.extend([
         "",
         "下一步:",
         _beginner_next_step(verdict, current, pullback, breakout, stop)
     ])
-            
+
     return "\n".join(lines)
 
 def _save_committee_cache(**kwargs):
@@ -241,7 +275,8 @@ def run_committee_local(
     optimizer_review_enabled: bool = True,
     max_debate_rounds: int = 4,
     server_port: str = "8765",
-    change_pct: float = 0.0
+    change_pct: float = 0.0,
+    trading_mode: str = "active_profit"
 ) -> str:
     """本地手机端执行投资委员会分析的入口"""
     t0 = datetime.now()
@@ -257,7 +292,8 @@ def run_committee_local(
     os.environ["INVEST_SERVER_IP"] = server_ip
     os.environ["INVEST_SERVER_PORT"] = server_port
     os.environ["INVEST_RUNNING_ON_PHONE"] = "1"
-    
+    os.environ["INVEST_TRADING_MODE"] = trading_mode
+
     # Configure LLM provider
     if "gemini" in llm_model.lower():
         os.environ["LLM_PROVIDER"] = "gemini"
@@ -604,11 +640,23 @@ def run_committee_local(
                 parsed["alloc_cny"] = opt.alloc_cny
             cio_memo += opt_audit_text
 
-        cio_memo += entry_exit_audit_text
-        cio_memo += right_side_gate_text
-        cio_memo += position_exit_policy_text
-        if optimizer_review:
-            cio_memo += f"\n\n[OPTIMIZER_LLM_REVIEW]\n{optimizer_review}"
+        from core.buy_signal_miner import mine_historical_buy_signals
+        buy_signal_backtest = mine_historical_buy_signals(symbol, df_2y)
+
+        from core.decision_synthesis import synthesize_decision
+        decision_synthesis = synthesize_decision(
+            symbol=symbol,
+            name=name,
+            optimizer=opt,
+            parsed=parsed,
+            entry_exit_points=entry_exit_plan.as_dict(),
+            right_side_gate=right_side_gate.as_dict(),
+            position_exit_policy=position_exit_policy.as_dict(),
+            optimizer_review=optimizer_review,
+            current_price=current_price or 0.0,
+            is_holding=(position_pct > 0),
+        )
+        cio_memo += decision_synthesis.audit_text()
 
         elapsed = (datetime.now() - t0).total_seconds()
         log.info(f"本地委员会完成: verdict={parsed['verdict']} confidence={parsed['confidence']:.2f} elapsed={elapsed:.1f}s")
@@ -648,7 +696,9 @@ def run_committee_local(
             fundamental_score=float(fundamental_assessment.score),
             regime_brief=regime_brief,
             cio_memo=cio_memo,
-            is_from_cache=False
+            is_from_cache=False,
+            decision_synthesis=decision_synthesis.as_dict(),
+            buy_signal_backtest=buy_signal_backtest.as_dict()
         )
 
         response = {
@@ -677,6 +727,8 @@ def run_committee_local(
             "position_exit_policy": position_exit_policy.as_dict(),
             "right_side_trend_gate": right_side_gate.as_dict(),
             "optimizer_review": optimizer_review,
+            "decision_synthesis": decision_synthesis.as_dict(),
+            "buy_signal_backtest": buy_signal_backtest.as_dict(),
             "elapsed_sec": round(elapsed, 1)
         }
         return json.dumps(response, ensure_ascii=False)
@@ -710,10 +762,10 @@ def evaluate_alerts_local(
         prices = json.loads(prices_json)
         holding_symbols = set(json.loads(holding_symbols_json))
         stocks = json.loads(stocks_json)
-        
+
         import tempfile
         state_path = Path(tempfile.gettempdir()) / "entry_exit_alert_state.json"
-        
+
         from jobs.market_monitor_entry_exit import update_entry_exit_alert_state
         confirmed_alerts, watch_rows = update_entry_exit_alert_state(
             results=results,
@@ -722,7 +774,7 @@ def evaluate_alerts_local(
             stocks=stocks,
             state_path=state_path
         )
-        
+
         return json.dumps({
             "success": True,
             "confirmed_alerts": confirmed_alerts,
@@ -736,4 +788,3 @@ def evaluate_alerts_local(
             "error": f"{type(e).__name__}: {str(e)[:300]}",
             "elapsed_sec": (datetime.now() - t0).total_seconds()
         }, ensure_ascii=False)
-

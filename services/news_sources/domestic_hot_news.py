@@ -330,12 +330,33 @@ def infer_sectors(text: str, *, limit: int = 3) -> List[SectorTheme]:
 
 
 def find_sector_leaders(theme: SectorTheme, *, max_leaders: int = 5) -> List[Dict[str, Any]]:
-    """Use akshare concept constituents when available, otherwise fallback."""
+    """Use akshare concept constituents when available and keep theme anchors."""
+    fallback = [dict(item, source="fallback_theme_map") for item in theme.leaders]
     if os.getenv("INVEST_NEWS_AKSHARE_LEADERS", "1") == "1":  # 默认开启
         ak_leaders = _find_akshare_leaders(theme, max_leaders=max_leaders)
         if ak_leaders:
-            return ak_leaders
-    return [dict(item, source="fallback_theme_map") for item in theme.leaders[:max_leaders]]
+            return _merge_leaders(ak_leaders, fallback, max_leaders=max_leaders)
+    return fallback[:max_leaders]
+
+
+def _merge_leaders(
+    primary: Sequence[Dict[str, Any]],
+    anchors: Sequence[Dict[str, Any]],
+    *,
+    max_leaders: int,
+) -> List[Dict[str, Any]]:
+    rows: List[Dict[str, Any]] = []
+    seen: set[str] = set()
+    for source in (anchors, primary):
+        for item in source:
+            symbol = str(item.get("symbol") or "").strip()
+            if not symbol or symbol in seen:
+                continue
+            rows.append(dict(item))
+            seen.add(symbol)
+            if len(rows) >= max_leaders:
+                return rows
+    return rows
 
 
 # 股票代码提取：从新闻标题/正文中找 A股代码（6位数字）和港股代码（5位数字）

@@ -2,8 +2,11 @@ package com.f1993yan.openInvest
 
 import android.Manifest
 import android.content.Context
+import android.content.Intent
 import android.content.pm.PackageManager
+import android.net.Uri
 import android.os.Build
+import android.provider.Settings
 import android.util.Log
 import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -11,6 +14,7 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -49,12 +53,14 @@ fun SettingsDialog(
     var apiKey by remember { mutableStateOf(prefs.getString("llm_api_key", "") ?: "") }
     var llmBaseUrl by remember { mutableStateOf(prefs.getString("llm_base_url", "") ?: "") }
     var model by remember { mutableStateOf(prefs.getString("llm_model", "gemini-2.5-pro") ?: "gemini-2.5-pro") }
+    var tradingMode by remember { mutableStateOf(prefs.getString("trading_mode", "active_profit") ?: "active_profit") }
     var autoRefresh by remember { mutableStateOf(prefs.getBoolean("auto_refresh_enabled", false)) }
     var interval by remember { mutableStateOf(prefs.getInt("auto_refresh_interval", 30).toString()) }
     var refreshNews by remember { mutableStateOf(prefs.getBoolean("auto_refresh_news_enabled", true)) }
     var refreshSelection by remember { mutableStateOf(prefs.getBoolean("auto_refresh_selection_enabled", true)) }
     var refreshPrices by remember { mutableStateOf(prefs.getBoolean("auto_refresh_prices_enabled", true)) }
     var notificationsEnabled by remember { mutableStateOf(prefs.getBoolean("notifications_enabled", true)) }
+    var dynamicIslandEnabled by remember { mutableStateOf(prefs.getBoolean("dynamic_island_enabled", true)) }
     var committeeAnalysisEnabled by remember { mutableStateOf(prefs.getBoolean("committee_analysis_enabled", true)) }
     var retentionLimit by remember { mutableStateOf(prefs.getInt("cache_retention_limit_months", 2).toString()) }
 
@@ -93,8 +99,14 @@ fun SettingsDialog(
                 val t2 = json.optDouble("t2_pending_cash", 0.0)
                 cashStr = cash.toString()
                 t2CashStr = t2.toString()
+                val tm = json.opt("trading_mode")
+                if (tm is String) {
+                    tradingMode = tm
+                } else if (tm is org.json.JSONObject) {
+                    tradingMode = tm.optString("mode", "active_profit")
+                }
             } catch (e: Exception) {
-                Log.e("SettingsDialog", "Failed to parse cash/t2_pending_cash from config", e)
+                Log.e("SettingsDialog", "Failed to parse config values", e)
             }
         }
     }
@@ -153,7 +165,7 @@ fun SettingsDialog(
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     Text("系统与连接设置", fontSize = 18.sp, fontWeight = FontWeight.Bold, color = TextPrimary)
-                    
+
                     val serviceRunning = AutoRefreshService.isRunning
                     val serviceBg = if (serviceRunning) Color(0xFFECFDF5) else Color(0xFFF1F5F9)
                     val serviceTextCol = if (serviceRunning) Color(0xFF047857) else TextSecondary
@@ -321,6 +333,52 @@ fun SettingsDialog(
                     HorizontalDivider(color = SlateBorder, thickness = 1.dp)
                     Spacer(modifier = Modifier.height(12.dp))
 
+                    Text("系统交易模式 (控制委员会策略)", fontSize = 13.sp, fontWeight = FontWeight.Bold, color = IndigoPrimary)
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .background(Color(0xFF1E293B), RoundedCornerShape(10.dp))
+                            .padding(4.dp),
+                        horizontalArrangement = Arrangement.spacedBy(4.dp)
+                    ) {
+                        listOf(
+                            "active_profit" to "主动盈利",
+                            "cash_recovery" to "现金回收",
+                            "risk_off" to "主动避险"
+                        ).forEach { (mode, label) ->
+                            val isSelected = tradingMode == mode
+                            val activeBgColor = when(mode) {
+                                "active_profit" -> Color(0xFF6366F1)
+                                "cash_recovery" -> Color(0xFFD97706)
+                                "risk_off" -> Color(0xFFEF4444)
+                                else -> Color(0xFF6366F1)
+                            }
+                            Box(
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .height(36.dp)
+                                    .background(
+                                        if (isSelected) activeBgColor else Color.Transparent,
+                                        RoundedCornerShape(8.dp)
+                                    )
+                                    .clickable { tradingMode = mode },
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Text(
+                                    text = label,
+                                    color = if (isSelected) Color.White else TextSecondary,
+                                    fontSize = 12.sp,
+                                    fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal
+                                )
+                            }
+                        }
+                    }
+
+                    Spacer(modifier = Modifier.height(12.dp))
+                    HorizontalDivider(color = SlateBorder, thickness = 1.dp)
+                    Spacer(modifier = Modifier.height(12.dp))
+
                     Text("数据自动刷新", fontSize = 13.sp, fontWeight = FontWeight.Bold, color = IndigoPrimary)
                     Spacer(modifier = Modifier.height(6.dp))
                     Row(
@@ -330,7 +388,7 @@ fun SettingsDialog(
                     ) {
                         Text("开启自动刷新", fontSize = 14.sp, color = TextPrimary)
                         Switch(
-                            checked = autoRefresh, 
+                            checked = autoRefresh,
                             onCheckedChange = { autoRefresh = it },
                             colors = SwitchDefaults.colors(checkedTrackColor = IndigoPrimary)
                         )
@@ -359,7 +417,7 @@ fun SettingsDialog(
                         ) {
                             Text("刷新周末新闻", fontSize = 14.sp, color = TextPrimary)
                             Switch(
-                                checked = refreshNews, 
+                                checked = refreshNews,
                                 onCheckedChange = { refreshNews = it },
                                 colors = SwitchDefaults.colors(checkedTrackColor = IndigoPrimary)
                             )
@@ -371,7 +429,7 @@ fun SettingsDialog(
                         ) {
                             Text("刷新每日选股", fontSize = 14.sp, color = TextPrimary)
                             Switch(
-                                checked = refreshSelection, 
+                                checked = refreshSelection,
                                 onCheckedChange = { refreshSelection = it },
                                 colors = SwitchDefaults.colors(checkedTrackColor = IndigoPrimary)
                             )
@@ -383,7 +441,7 @@ fun SettingsDialog(
                         ) {
                             Text("刷新标的价格", fontSize = 14.sp, color = TextPrimary)
                             Switch(
-                                checked = refreshPrices, 
+                                checked = refreshPrices,
                                 onCheckedChange = { refreshPrices = it },
                                 colors = SwitchDefaults.colors(checkedTrackColor = IndigoPrimary)
                             )
@@ -449,7 +507,7 @@ fun SettingsDialog(
                     ) {
                         Text("启用 AI 委员会分析", fontSize = 14.sp, color = TextPrimary)
                         Switch(
-                            checked = committeeAnalysisEnabled, 
+                            checked = committeeAnalysisEnabled,
                             onCheckedChange = { committeeAnalysisEnabled = it },
                             colors = SwitchDefaults.colors(checkedTrackColor = IndigoPrimary)
                         )
@@ -480,6 +538,34 @@ fun SettingsDialog(
                                     }
                                 } else {
                                     notificationsEnabled = false
+                                }
+                            }
+                        )
+                    }
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Text("启用灵动岛悬浮通知", fontSize = 14.sp, color = TextPrimary)
+                        Switch(
+                            checked = dynamicIslandEnabled,
+                            colors = SwitchDefaults.colors(checkedTrackColor = IndigoPrimary),
+                            onCheckedChange = { checked ->
+                                if (checked) {
+                                    if (!Settings.canDrawOverlays(context)) {
+                                        Toast.makeText(context, "请授予悬浮窗权限以启用灵动岛", Toast.LENGTH_LONG).show()
+                                        val intent = Intent(
+                                            Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
+                                            Uri.parse("package:${context.packageName}")
+                                        )
+                                        context.startActivity(intent)
+                                        dynamicIslandEnabled = false
+                                    } else {
+                                        dynamicIslandEnabled = true
+                                    }
+                                } else {
+                                    dynamicIslandEnabled = false
                                 }
                             }
                         )
@@ -537,10 +623,10 @@ fun SettingsDialog(
                                     Toast.makeText(context, "没有本地数据可上传，请先导入配置", Toast.LENGTH_LONG).show()
                                     return@Button
                                 }
-                                
+
                                 var completedCount = 0
                                 val totalToUpload = (if (configContent != null) 1 else 0) + (if (exitContent != null) 1 else 0)
-                                
+
                                 fun checkComplete() {
                                     completedCount++
                                     if (completedCount == totalToUpload) {
@@ -558,7 +644,7 @@ fun SettingsDialog(
                                         )
                                     }
                                 }
-                                
+
                                 exitContent?.let {
                                     NetworkClient.uploadExitParams(it) { res ->
                                         res.fold(
@@ -780,8 +866,8 @@ fun SettingsDialog(
                     TextButton(
                         onClick = onClose,
                         colors = ButtonDefaults.textButtonColors(contentColor = TextSecondary)
-                    ) { 
-                        Text("取消", fontWeight = FontWeight.SemiBold) 
+                    ) {
+                        Text("取消", fontWeight = FontWeight.SemiBold)
                     }
                     Spacer(modifier = Modifier.width(12.dp))
                     Button(
@@ -791,24 +877,49 @@ fun SettingsDialog(
                             val intervalVal = interval.toIntOrNull() ?: 30
                             val limitMonths = retentionLimit.toIntOrNull() ?: 2
                             val remoteFreq = remoteCrawlerInterval.toIntOrNull() ?: 60
-                            
+
                             prefs.edit()
                                 .putString("server_url", url)
                                 .putString("llm_api_key", apiKey)
                                 .putString("llm_base_url", llmBaseUrl)
                                 .putString("llm_model", model)
+                                .putString("trading_mode", tradingMode)
                                 .putBoolean("auto_refresh_enabled", autoRefresh)
                                 .putInt("auto_refresh_interval", intervalVal)
                                 .putBoolean("auto_refresh_news_enabled", refreshNews)
                                 .putBoolean("auto_refresh_selection_enabled", refreshSelection)
                                 .putBoolean("auto_refresh_prices_enabled", refreshPrices)
                                 .putBoolean("notifications_enabled", notificationsEnabled)
+                                .putBoolean("dynamic_island_enabled", dynamicIslandEnabled)
                                 .putBoolean("committee_analysis_enabled", committeeAnalysisEnabled)
                                 .putInt("cache_retention_limit_months", limitMonths)
                                 .putInt("remote_crawler_interval_minutes", remoteFreq)
                                 .putBoolean("remote_target_refresh_enabled", remoteTargetRefresh)
                                 .putBoolean("remote_news_refresh_enabled", remoteNewsRefresh)
                                 .apply()
+
+                            // Update market_monitor_config.json
+                            val configStr = readLocalFile(context, "market_monitor_config.json")
+                            if (configStr != null) {
+                                try {
+                                    val json = org.json.JSONObject(configStr)
+                                    val modeObj = org.json.JSONObject().apply {
+                                        put("mode", tradingMode)
+                                        put("label", when(tradingMode) {
+                                            "active_profit" -> "主动盈利"
+                                            "cash_recovery" -> "现金回收"
+                                            "risk_off" -> "主动避险"
+                                            else -> "主动盈利"
+                                        })
+                                    }
+                                    json.put("trading_mode", modeObj)
+                                    saveLocalFile(context, "market_monitor_config.json", json.toString(2))
+                                } catch (e: java.lang.Exception) {
+                                    android.util.Log.e("SettingsDialog", "Failed to update config file with trading mode", e)
+                                }
+                            }
+
+                            triggerRefreshService(context)
 
                             NetworkClient.updateCrawlerSettings(
                                 CrawlerSettings(

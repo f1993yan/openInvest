@@ -23,7 +23,9 @@ To improve codebase maintainability and readability, the app is split into funct
 - **`CommitteeAnalysisDialog.kt`**: Visualizes local or remote multi-agent debate tabs (Macro, Quant, Risk, CIO) and triggers live Server-Sent Events (SSE) updates.
 - **`TradeExecutionDialog.kt`**: Quick accounting interface to log transactions to the ledger.
 - **`UpdateHoldingDialog.kt`**: Popover to edit holding quantities, average cost, and watchlist statuses.
+- **`DynamicIslandManager.kt` / `DynamicIslandView.kt`**: Optional Android overlay used by the auto-refresh service. It stays hidden while the app is foregrounded, shows analysis progress in the background, and escalates confirmed trade alerts into compact floating cards.
 
 ## Synchronization & Cache
 - **Local JSON Cache**: Persists snapshots (`resolved_snapshot.json`), Daily Selection results (`selection_cache.json`), and debate logs (`committee_results_cache.json`) using secure app-private storage.
 - **Auto-Refresh Service**: Implements a background Android `Service` (`AutoRefreshService`) polling the backend server at user-defined intervals to fetch pricing, news, and screening updates.
+- **Trading Mode Propagation**: `SettingsDialog.kt` stores `active_profit`, `cash_recovery`, or `risk_off`; `LocalCommitteeRunner.kt` passes it as the optional tail argument of `utils.phone_committee.run_committee_local`, preserving older Python interface compatibility through the default value.

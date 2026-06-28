@@ -1,4 +1,4 @@
-﻿"""A-share position exit policy loaded from local .env.
+"""A-share position exit policy loaded from local .env.
 
 This module is intentionally separate from ``core.entry_exit_points``.  The
 policy here is for already-held A-share positions anchored to actual cost.  It
@@ -220,19 +220,52 @@ def _read_dotenv(path: Path) -> Dict[str, str]:
 
 
 def _env_value(key: str, default: str, values: Dict[str, str]) -> str:
-    # Prefer .env on each call so weekly optimization takes effect without restart.
     return values.get(key) or os.getenv(key, default)
 
 
 def load_position_exit_policy(env_path: Optional[Path] = None, sector: str = "") -> PositionExitPolicy:
+    explicit_env_path = env_path is not None
     env_path = env_path or (ROOT / ".env")
     values = _read_dotenv(env_path)
     normalized_sector = _normalize_sector(sector)
-    sector_policies = _decode_sector_policies(_env_value("INVEST_A_SHARE_SECTOR_EXIT_POLICIES", "", values))
-    if normalized_sector in sector_policies:
+
+    sector_policies = {}
+    json_paths = [] if explicit_env_path else [
+        ROOT / "reports" / "weekly_exit_param_optimization.json",
+        Path("/data/data/com.f1993yan.openInvest/files/weekly_exit_param_optimization.json"),
+        ROOT / "weekly_exit_param_optimization.json",
+    ]
+    for path in json_paths:
+        if path.exists():
+            try:
+                data = json.loads(path.read_text(encoding="utf-8"))
+                policies = data.get("sector_exit_policies") or data.get("sector_policies")
+                if policies:
+                    if isinstance(policies, dict):
+                        sector_policies = {
+                            _normalize_sector(k).lower(): v
+                            for k, v in policies.items()
+                            if isinstance(v, dict)
+                        }
+                    elif isinstance(policies, str):
+                        sector_policies = {k.lower(): v for k, v in _decode_sector_policies(policies).items()}
+                    if sector_policies:
+                        break
+            except Exception:
+                pass
+
+    if not sector_policies:
+        sector_policies = {
+            k.lower(): v
+            for k, v in _decode_sector_policies(
+                _env_value("INVEST_A_SHARE_SECTOR_EXIT_POLICIES", "", values)
+            ).items()
+        }
+
+    if normalized_sector.lower() in sector_policies:
         return _policy_from_values(
-            sector_policies[normalized_sector],
-            source=f"{env_path}#sector:{normalized_sector}",
+            sector_policies[normalized_sector.lower()],
+            source=f"sector_exit_policies#sector:{normalized_sector}",
             sector=normalized_sector,
         )
 

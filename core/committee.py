@@ -40,6 +40,33 @@ LLM_BASE_DELAY = float(os.getenv("INVEST_LLM_BASE_DELAY", "2.0"))
 LLM_MAX_DELAY = float(os.getenv("INVEST_LLM_MAX_DELAY", "20.0"))
 
 
+def _load_trading_mode() -> str:
+    import os
+    from pathlib import Path
+    mode = os.getenv("INVEST_TRADING_MODE")
+    if mode:
+        return mode
+
+    root = Path(__file__).resolve().parent.parent
+    for path in [
+        root / "jobs" / "market_monitor_config.json",
+        Path("/data/data/com.f1993yan.openInvest/files/market_monitor_config.json")
+    ]:
+        if path.exists():
+            try:
+                import json
+                with open(path, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                    val = data.get("trading_mode")
+                    if val:
+                        if isinstance(val, dict):
+                            return val.get("mode", "active_profit")
+                        return str(val)
+            except Exception:
+                pass
+    return "active_profit"
+
+
 @dataclass
 class CommitteeReport:
     """4 角色 + cross-challenge round 的完整输出"""
@@ -57,8 +84,15 @@ class CommitteeReport:
 
     def to_cio_brief(self) -> str:
         """组装给 CIO 看的输入 - 含 cross-challenge round 后的调整"""
+        trading_mode = _load_trading_mode()
+        trading_mode_desc = {
+            "active_profit": "主动盈利模式 (Active Profit Mode): 交易策略偏向进取，积极捕捉上升趋势与超额收益机会。",
+            "cash_recovery": "现金回收模式 (Cash Recovery Mode): 交易策略偏向防守，保留较多现金，优先减仓释放流动性，且对新买入标的有更严格的估值/胜率要求，非极高胜率不建议加仓。",
+            "risk_off": "主动避险模式 (Risk-Off Mode): 交易策略极度保守，避险情绪主导。必须严格遵守止损纪律，拒绝弱势反弹加仓，新入场门槛极高，优先削减仓位避险。"
+        }.get(trading_mode, "主动盈利模式")
         lines = [
             f"=== ASSET: {self.asset.get('display_name', self.asset.get('symbol'))} ===",
+            f"\n=== 系统当前运行交易模式 ===\n- {trading_mode_desc}",
             f"\n=== MACRO STRATEGIST (跨资产共享) ===\n{self.macro_view}",
         ]
         if self.wealth_context_view:
@@ -770,9 +804,18 @@ def run_committee(
     # ===== Round 1: Quant 和 Risk 独立陈述（信息分隔 + 真并行）=====
     emit("round_1_start", round=1, mode="independent")
 
+    trading_mode = _load_trading_mode()
+    trading_mode_desc = {
+        "active_profit": "主动盈利模式 (Active Profit Mode): 交易策略偏向进取，积极捕捉上升趋势与超额收益机会。",
+        "cash_recovery": "现金回收模式 (Cash Recovery Mode): 交易策略偏向防守，保留较多现金，优先减仓释放流动性，且对新买入标的有更严格的估值/胜率要求，非极高胜率不建议加仓。",
+        "risk_off": "主动避险模式 (Risk-Off Mode): 交易策略极度保守，避险情绪主导。必须严格遵守止损纪律，拒绝弱势反弹加仓，新入场门槛极高，优先削减仓位避险。"
+    }.get(trading_mode, "主动盈利模式")
+    mode_section = f"# 系统当前运行交易模式:\n- {trading_mode_desc}\n\n"
+
     quant_input_r1 = (
         f"# 资产: {asset.get('display_name', sym)} ({sym})\n"
         f"{regime_section}"
+        f"{mode_section}"
         f"# 市场数据 (技术指标 + 多周期):\n{market_data}\n\n"
         f"请按 Quant Analyst 格式输出技术信号。"
     )
@@ -784,6 +827,7 @@ def run_committee(
         f"# 资产: {asset.get('display_name', sym)} ({sym})\n"
         f"# 用户当前持仓:\n{portfolio_summary}\n\n"
         f"{wealth_section}"
+        f"{mode_section}"
         f"# 长期行为模式 (Dreaming):\n{prior_insights or '(暂无)'}\n\n"
         f"请按 Risk Officer 格式输出风险评估。"
         f"**注意**：如果 WealthContextOfficer 报告 TRUE_LIQUIDITY=ample 或 moderate，"
