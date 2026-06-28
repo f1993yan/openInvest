@@ -6,6 +6,7 @@ import re
 import sys
 import time
 from datetime import datetime, timedelta
+from pathlib import Path
 from typing import Any, Dict, List
 
 from jobs.market_monitor_common import (
@@ -33,6 +34,57 @@ from jobs.market_monitor_notify import is_scheduled_monitor_popup_time, send_win
 from jobs.market_monitor_quotes import call_committee, fetch_sina_prices
 from jobs.market_monitor_snapshot import build_monitor_window_snapshot, write_monitor_window_snapshot, write_report
 from jobs.trading_mode import DEFAULT_TRADING_MODE, normalize_trading_mode
+
+SECTOR_CACHE_PATH = _PROJECT_ROOT / "data" / "sector_cache.json"
+
+
+def _clean_sector(value: Any) -> str:
+    text = str(value or "").strip()
+    return "" if text.lower() in {"", "unknown", "none", "null", "-"} or text in {"未分组", "全局"} else text
+
+
+def load_sector_cache_mapping(path: Path = SECTOR_CACHE_PATH) -> Dict[str, str]:
+    """Load ignored Eastmoney sector mapping used by weekly optimization."""
+    if not path.exists():
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except Exception as exc:  # noqa: BLE001
+        log.warning(f"东方财富板块缓存读取失败: {exc}")
+        return {}
+    mapping = data.get("mapping") if isinstance(data, dict) else {}
+    if not isinstance(mapping, dict):
+        return {}
+    return {
+        str(symbol).strip(): _clean_sector(sector)
+        for symbol, sector in mapping.items()
+        if str(symbol).strip() and _clean_sector(sector)
+    }
+
+
+def apply_sector_cache_to_stocks(
+    stocks: List[Dict[str, Any]],
+    sector_mapping: Dict[str, str],
+) -> List[Dict[str, Any]]:
+    """Return runtime stock rows whose sector matches weekly Eastmoney mapping.
+
+    This keeps config/ledger files untouched while making committee context,
+    position_exit_plan policy lookup, alert distribution, and monitor-window
+    display use the same sector key as weekly_exit_param_optimization.py.
+    """
+    out: List[Dict[str, Any]] = []
+    for stock in stocks:
+        row = dict(stock)
+        symbol = str(row.get("symbol") or "").strip()
+        cached_sector = _clean_sector(sector_mapping.get(symbol))
+        if cached_sector and str(row.get("market", "a")).lower() == "a":
+            original_sector = _clean_sector(row.get("sector"))
+            if original_sector and original_sector != cached_sector:
+                row.setdefault("config_sector", original_sector)
+            row["sector"] = cached_sector
+            row.setdefault("sector_source", "eastmoney_sector_cache")
+        out.append(row)
+    return out
 
 def is_trading_time() -> bool:
     """判断当前是否在交易时段内（交易日 9:30-15:00）"""
@@ -107,6 +159,15 @@ def _sync_config_account_fields(config: Dict, account_stocks: List[Dict]) -> Dic
     return updated
 
 
+def _with_sector_cache(config: Dict, sector_mapping: Dict[str, str]) -> Dict:
+    if not sector_mapping:
+        return config
+    updated = dict(config)
+    updated["holdings"] = apply_sector_cache_to_stocks(list(config.get("holdings", []) or []), sector_mapping)
+    updated["watchlist"] = apply_sector_cache_to_stocks(list(config.get("watchlist", []) or []), sector_mapping)
+    return updated
+
+
 def run_monitor_round():
     """执行一轮监控"""
     from jobs.market_monitor_common import load_crawler_settings
@@ -120,6 +181,7 @@ def run_monitor_round():
     log.info(f"=== 开始监控轮次 {round_time} ===")
 
     config = load_config()
+    sector_mapping = load_sector_cache_mapping()
     try:
         from db.account_ledger import AccountLedger, REAL_ACCOUNT
         ledger = AccountLedger()
@@ -130,6 +192,7 @@ def run_monitor_round():
         ledger = None
         log.warning(f"双账户账本初始化/读取失败，回退配置持仓: {e}")
 
+    config = _with_sector_cache(config, sector_mapping)
     holdings = config.get("holdings", [])
     watchlist = config.get("watchlist", [])
     total_assets = config["total_assets"]
@@ -150,6 +213,7 @@ def run_monitor_round():
             pass
         try:
             shadow_stocks = ledger.stocks_for_committee_input(config, account="committee")
+            shadow_stocks = apply_sector_cache_to_stocks(shadow_stocks, sector_mapping)
             committee_summary = ledger.account_summary("committee")
             shadow_cash = float(committee_summary.get("cash_cny", cash) or cash)
             shadow_available_cash = shadow_cash

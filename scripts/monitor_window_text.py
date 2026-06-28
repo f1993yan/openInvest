@@ -144,12 +144,26 @@ def _operation_summary(row: Dict[str, Any]) -> str:
     alloc = _safe_num(op.get("suggested_alloc_cny"))
     lots = _suggested_lots(row)
     verdict = str(op.get("verdict") or "").upper()
+    discipline = op.get("discipline_review") or {}
+    trigger_kind = str(discipline.get("trigger_kind") or "")
     side = "卖" if verdict in {"SELL", "TRIM"} or alloc < 0 or lots < 0 else "买"
     if status == "action_required":
+        if trigger_kind in {"position_stop", "cost_stop_loss", "stop_loss"}:
+            return f"止损卖{_fmt_lots(abs(lots))}" if lots else "止损卖"
+        if trigger_kind in {"take_profit_2", "take_profit", "take_profit_1", "trim"}:
+            return f"止盈卖{_fmt_lots(abs(lots))}" if lots else "止盈卖"
         return f"{side}{_fmt_lots(abs(lots))}" if lots else "操作"
     if status in {"trigger_confirmed", "watch_trigger"}:
+        if trigger_kind in {"position_stop", "cost_stop_loss", "stop_loss"}:
+            return "止损复核"
+        if trigger_kind in {"take_profit_2", "take_profit", "take_profit_1", "trim"}:
+            return "止盈复核"
         return "触发"
     if status == "candidate":
+        if discipline:
+            if trigger_kind in {"position_stop", "cost_stop_loss", "stop_loss"}:
+                return "止损复核"
+            return "止盈复核"
         if verdict in {"SELL", "TRIM"} or alloc < 0:
             return "待确认卖"
         if verdict in {"BUY", "ACCUMULATE"} or alloc > 0:
@@ -362,6 +376,7 @@ def _beginner_summary_lines(
     right_gate = (source or {}).get("right_side_trend_gate") or row.get("right_side_trend_gate") or {}
     review = str((source or {}).get("optimizer_review") or (source or {}).get("cio_memo") or _review_text_from_row(row))
     decision_synthesis = (source or {}).get("decision_synthesis") or row.get("decision_synthesis") or {}
+    discipline_review = op.get("discipline_review") or {}
     buy_signal_backtest = (
         (source or {}).get("buy_signal_backtest")
         or row.get("buy_signal_backtest")
@@ -406,6 +421,9 @@ def _beginner_summary_lines(
         decision = f"{action}，先看是否接近买点。"
     elif str(verdict or "").upper() in {"TRIM", "SELL"}:
         decision = f"{action}，重点看是否触发止损/减仓线。"
+    elif discipline_review:
+        edge = _safe_num(discipline_review.get("expected_utility_edge_pct"))
+        decision = f"纪律复核，卖出期望相对继续持有净优势 {edge:.2f}pct。"
     else:
         decision = f"{action}，暂时以观察为主。"
     lines = [
@@ -429,6 +447,27 @@ def _beginner_summary_lines(
             lines.append(f"- 决策证据: {item}")
         for item in (decision_synthesis.get("conflicts") or [])[:2]:
             lines.append(f"- 口径冲突: {item}；最终按确定性优化器执行。")
+    if discipline_review:
+        trigger_label = {
+            "position_stop": "持仓止损",
+            "cost_stop_loss": "成本止损",
+            "stop_loss": "技术止损",
+            "take_profit_1": "第一止盈",
+            "take_profit_2": "第二止盈",
+            "take_profit": "止盈",
+            "trim": "减仓",
+        }.get(str(discipline_review.get("trigger_kind") or ""), "持仓纪律")
+        lines.append(
+            f"- 纪律复核: {trigger_label}已触发；"
+            f"卖出期望 {_safe_num(discipline_review.get('sell_expected_edge_pct')):.2f}pct，"
+            f"继续持有证据 {_safe_num(discipline_review.get('continuation_edge_pct')):.2f}pct，"
+            f"净效用 {_safe_num(discipline_review.get('expected_utility_edge_pct')):.2f}pct。"
+        )
+        lines.append(
+            f"- 参数可信度: 周度策略可靠性 {_safe_num(discipline_review.get('policy_reliability')):.0%}，"
+            f"卖出胜率下界 {_safe_num(discipline_review.get('sell_win_rate_lower')):.0%}，"
+            f"卖出后路径优势下界 {_safe_num(discipline_review.get('post_sell_positive_edge_lower')):.0%}。"
+        )
     if buy_signal_backtest:
         lines.append(f"- {buy_signal_summary_text(buy_signal_backtest)}")
     if one_line and one_line != "-":
@@ -515,6 +554,13 @@ def _beginner_next_step(
         if wait_reasons:
             return f"方向偏卖，但暂未进入执行提醒：{wait_reasons[0]}。若跌破 {_fmt_price(stop_num)} 或下一轮评分增强，再优先降风险。"
         return f"方向偏卖，重点看是否跌破 {_fmt_price(stop_num)}，或卖出期望收益是否继续占优。"
+    discipline = op.get("discipline_review") or {}
+    if discipline:
+        edge = _safe_num(discipline.get("expected_utility_edge_pct"))
+        if status == "action_required":
+            lots = abs(_suggested_lots(row or {}))
+            return f"持仓纪律已确认且净效用为正，按最新价核对后优先卖出{'约 ' + _fmt_lots(lots) if lots else '对应仓位'}。"
+        return f"纪律线已经触发但净效用 {edge:.2f}pct 尚未压过继续持有证据，下一轮仍触发或净效用转正再执行。"
     return "先不动，等价格接近买点/止损点，或下一轮监控给出明确触发。"
 
 

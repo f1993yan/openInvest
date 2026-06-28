@@ -4,6 +4,7 @@ from datetime import datetime
 
 from jobs.market_monitor import (
     _action_score,
+    apply_sector_cache_to_stocks,
     _llm_hold_conflict_adjustment,
     _math_review_position_scale,
     _sell_committee_execution_edge,
@@ -1019,6 +1020,203 @@ def test_candidate_sell_is_not_rendered_as_plain_observation():
         "state": "candidate",
         "operation": {"status": "candidate", "verdict": "TRIM", "suggested_alloc_cny": -5000},
     }) == "待确认卖"
+
+
+def test_sector_cache_overrides_runtime_a_share_sector_without_mutating_source():
+    source = [
+        {
+            "symbol": "301377",
+            "name": "鼎泰高科",
+            "market": "a",
+            "sector": "高端制造",
+            "industry": "PCB钻针",
+        },
+        {
+            "symbol": "00700",
+            "name": "腾讯控股",
+            "market": "hk",
+            "sector": "互联网",
+        },
+    ]
+
+    updated = apply_sector_cache_to_stocks(source, {"301377": "机械设备", "00700": "互联网服务"})
+
+    assert source[0]["sector"] == "高端制造"
+    assert updated[0]["sector"] == "机械设备"
+    assert updated[0]["config_sector"] == "高端制造"
+    assert updated[0]["sector_source"] == "eastmoney_sector_cache"
+    assert updated[1]["sector"] == "互联网"
+
+
+def test_hold_with_confirmed_take_profit_2_can_become_discipline_sell_alert():
+    result = {
+        "success": True,
+        "symbol": "301377",
+        "name": "鼎泰高科",
+        "market": "a",
+        "verdict": "HOLD",
+        "confidence": 0.52,
+        "suggested_alloc_cny": 0,
+        "fundamental_score": 58,
+        "entry_exit_points": {"expected_return_pct": 0.5, "reward_risk_ratio": 1.2},
+        "position_exit_policy": {
+            "sell_count": 42,
+            "sell_reliability": 0.78,
+            "sell_win_rate_lower": 0.59,
+            "post_sell_positive_edge_lower": 0.56,
+            "sell_utility_adjustment_pct": 3.2,
+            "avg_post_sell_net_edge_pct": 4.0,
+            "max_loss_pct": 4.0,
+        },
+    }
+    stock = {"symbol": "301377", "position_pct": 20.0, "units": 100, "cost": 457.59, "min_lot_size": 100}
+    state = {
+        "symbols": {
+            "301377": {
+                "position_exit_plan": {
+                    "effective_stop_price": 430.0,
+                    "take_profit_1_price": 494.2,
+                    "take_profit_2_price": 535.38,
+                },
+                "last_triggers": [{"side": "sell", "kind": "take_profit_2", "level": 535.38, "price": 548.0}],
+            }
+        }
+    }
+
+    selected, suppressed = select_optimal_actionable_alerts(
+        results=[result],
+        prices={"301377": {"price": 548.0, "change_pct": 1.2}},
+        cash=10000,
+        stocks=[stock],
+        entry_exit_state=state,
+        portfolio_value=100000,
+    )
+
+    assert suppressed == []
+    assert selected[0]["symbol"] == "301377"
+    assert selected[0]["verdict"] == "SELL"
+    assert selected[0]["committee_verdict"] == "HOLD"
+    assert selected[0]["suggested_alloc_cny"] == -54800.0
+    assert selected[0]["alert_selected_lots"] == 1
+    assert selected[0]["alert_source"] == "position_exit_discipline_review"
+    review = selected[0]["discipline_review"]
+    assert review["model"] == "triggered_exit_expected_utility_v1"
+    assert review["decision"] == "execute"
+    assert review["expected_utility_edge_pct"] > 0
+    assert review["sell_win_rate_lower"] == 0.59
+
+
+def test_hold_take_profit_waits_when_only_one_round_or_continuation_edge_wins():
+    result = {
+        "success": True,
+        "symbol": "301377",
+        "name": "鼎泰高科",
+        "market": "a",
+        "verdict": "HOLD",
+        "confidence": 0.88,
+        "suggested_alloc_cny": 0,
+        "fundamental_score": 86,
+        "right_side_trend_gate": {"allow": True, "reason": "趋势仍强"},
+        "entry_exit_points": {"expected_return_pct": 7.0, "reward_risk_ratio": 3.0},
+        "position_exit_policy": {
+            "sell_count": 3,
+            "sell_reliability": 0.12,
+            "sell_win_rate_lower": 0.20,
+            "post_sell_positive_edge_lower": 0.18,
+            "sell_utility_adjustment_pct": -1.0,
+            "avg_post_sell_net_edge_pct": -2.0,
+        },
+    }
+    state = {
+        "symbols": {
+            "301377": {
+                "position_exit_plan": {
+                    "effective_stop_price": 430.0,
+                    "take_profit_1_price": 494.2,
+                    "take_profit_2_price": 535.38,
+                },
+                "last_triggers": [],
+            }
+        }
+    }
+
+    selected, suppressed = select_optimal_actionable_alerts(
+        results=[result],
+        prices={"301377": {"price": 548.0, "change_pct": 3.0}},
+        cash=10000,
+        stocks=[{"symbol": "301377", "position_pct": 20.0, "units": 100, "cost": 457.59, "min_lot_size": 100}],
+        entry_exit_state=state,
+        portfolio_value=100000,
+    )
+
+    assert selected == []
+    assert suppressed[0]["alert_source"] == "position_exit_discipline_review"
+    assert suppressed[0]["reason"].startswith("discipline_review_wait:")
+    assert suppressed[0]["discipline_review"]["decision"] == "review"
+    assert _operation_summary({
+        "state": "candidate",
+        "operation": {
+            "status": "candidate",
+            "verdict": "HOLD",
+            "discipline_review": suppressed[0]["discipline_review"],
+        },
+    }) == "止盈复核"
+
+
+def test_snapshot_preserves_committee_verdict_for_discipline_sell_alert():
+    result = {
+        "success": True,
+        "symbol": "301377",
+        "name": "鼎泰高科",
+        "market": "a",
+        "verdict": "HOLD",
+        "confidence": 0.52,
+        "suggested_alloc_cny": 0,
+        "position_exit_policy": {},
+    }
+    action = {
+        **result,
+        "verdict": "SELL",
+        "committee_verdict": "HOLD",
+        "suggested_alloc_cny": -54800,
+        "alert_source": "position_exit_discipline_review",
+        "alert_selected_lots": 1,
+        "optimizer_lots": 1,
+        "llm_review_lots": 1,
+        "discipline_review": {
+            "model": "triggered_exit_expected_utility_v1",
+            "trigger_kind": "take_profit_2",
+            "expected_utility_edge_pct": 1.25,
+            "committee_verdict": "HOLD",
+        },
+    }
+
+    snapshot = build_monitor_window_snapshot(
+        round_time="10:00",
+        results=[result],
+        actionable=[action],
+        prices={"301377": {"price": 548.0, "change_pct": 1.2}},
+        stocks=[{"symbol": "301377", "name": "鼎泰高科", "position_pct": 20.0, "units": 100, "cost": 457.59}],
+        entry_exit_watch=[{
+            "symbol": "301377",
+            "name": "鼎泰高科",
+            "confirmed": True,
+            "triggers": [{"side": "sell", "kind": "take_profit_2", "level": 535.38, "price": 548.0}],
+            "position_exit_plan": {"take_profit_2_price": 535.38, "take_profit_1_price": 494.2, "effective_stop_price": 430.0},
+        }],
+        entry_exit_alerts=[],
+        suppressed_alerts=[],
+        cash=10000,
+        total_assets=100000,
+    )
+
+    op = snapshot["rows"][0]["operation"]
+    assert op["status"] == "action_required"
+    assert op["verdict"] == "SELL"
+    assert op["committee_verdict"] == "HOLD"
+    assert op["alert_source"] == "position_exit_discipline_review"
+    assert op["discipline_review"]["expected_utility_edge_pct"] == 1.25
+    assert _operation_summary(snapshot["rows"][0]) == "止盈卖1手"
 
 
 def test_position_exit_policy_loads_weekly_post_sell_path_metrics(tmp_path):

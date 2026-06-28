@@ -37,7 +37,9 @@ APScheduler 自动发现的定时任务。每个 `.py` 配套一个 `.yml` 描�
 - `position_exit_plan` 是持仓后的成本锚定纪律计划，盘中只检查触发，收盘后才允许追踪止损上移。
 - `weekly_exit_param_optimization.py` 默认回看最近 62 天；写入的 `policy_quality_score` 使用 Wilson 下界胜率、保守卖出期望、profit factor 和回撤惩罚，校准已有持仓卖出/减仓提醒。
 - 同一任务还会写入 `sell_utility_adjustment_pct`、`sell_reliability`、`sell_evidence_score`，供 `core.decision_optimizer` 在已有持仓上评估“继续持有 vs 减仓”的期望效用；证据不足时会收缩到接近 0，不影响空仓买入。
+- `market_monitor_alerts.py` 会把已持仓 A 股的纪律触发当成概率证据，而不是机械卖点：止损即时复核，止盈/减仓要求连续确认；最终按“纪律卖出期望 - 委员会继续持有证据 - 交易摩擦”选择 `action_required` 或 `trigger_confirmed`/候选复核。
 - `weekly_exit_param_optimization.py` 的行业映射会合并东方财富浏览器请求头直连、AkShare、`data/sector_cache.json` 和本地配置；实时源只返回部分标的时会继续用缓存补缺。移植到新电脑时可把 `data/sector_cache.json` 一起带走。
+- `market_monitor_runtime.py` 运行时也会读取 `data/sector_cache.json`，把 A 股标的的 `sector` 统一成周更用的东方财富板块；原配置板块保留在 `config_sector`，不直接写回 config/ledger。
 - `sample_quality=thin/sparse` 时只收缩卖出效用字段，不丢弃止盈止损参数，避免单票板块过拟合。
 - 主窗口消费 `data/market_monitor/latest_window.json`，UI 改动优先看 `scripts/monitor_window_*.py`。
 

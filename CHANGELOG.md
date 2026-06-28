@@ -16,11 +16,14 @@
 * **monitor-window:** 委员会详情弹窗改为按信息优先级渲染：最高风险内容红色加粗，主要正向证据绿色加粗，背景与辅助信息灰色显示，并删除低价值泛化提醒。
 * **monitor-window:** 桌面窗口新增真实账户现金/T+2修正入口，写入路径统一为 `AccountLedger(real).correct_cash()`，再由 ledger 即时同步本地配置和窗口快照。
 * **market-monitor:** 新增交易模式 `主动盈利`、`现金回收`、`主动避险`；模式只影响提醒优化层的现金保留、买入阈值、买入手数和卖出执行门槛，不改委员会原始 verdict 和接口旧字段。
+* **sell-alerts:** 已持仓 A 股新增 `position_exit_discipline_review` 纪律复核路径；止损即时复核，止盈/减仓连续确认后按“历史胜率折减后的纪律卖出期望 - 委员会继续持有证据 - 交易摩擦”决定是否进入执行提醒，避免 `HOLD` 静默吞掉已确认纪律触发，也避免把止盈止损线当成 100% 可靠的机械卖点。
+* **market-monitor:** 盘中监控运行时读取 `data/sector_cache.json`，把 A 股标的板块统一成周更优化使用的东方财富板块，并把原配置板块保存在 `config_sector`；委员会、窗口、告警分布和 `position_exit_plan` 参数读取不再因为 config/ledger 旧板块名回退到全局参数。
 
 ### Bug Fixes
 
 * **committee:** 修复 `HOLD + 负 suggested_alloc_cny` 的语义冲突；被后处理强制 `HOLD` 时同步归零建议金额，避免接口语义和窗口显示互相矛盾。
 * **monitor-window:** 修复最新委员会正文已经显示卖出，但顶部摘要仍停留在“待确认卖”的弹窗刷新问题。
+* **monitor-window:** 修复 `HOLD + 已确认止盈/止损纪律触发` 被展示成普通观察的问题；现在会显示“止盈复核/止损复核”或具体“止盈卖N手/止损卖N手”，并在可选字段中保留原始委员会 verdict。
 
 ### Docs
 
@@ -28,6 +31,8 @@
 * **wiki/readme:** 补充交易模式、ledger-first 现金修正和模式字段向后兼容说明。
 * **wiki/readme:** 补充周度卖出效用参数的 62 天校准、Wilson 下界收缩和“只影响已有持仓、不影响入场点、不破坏 App 接口”的边界。
 * **wiki/readme:** 补充行业映射多源补缺和 `sample_quality` 对卖出效用的影响。
+* **wiki/readme:** 补充持仓纪律复核的期望效用公式、历史胜率可靠性折减和 App 可选字段兼容说明。
+* **wiki/readme:** 补充东方财富板块缓存如何同时服务周更优化、盘中委员会、窗口展示和止盈止损参数读取。
 
 ## Unreleased (2026-06-19)
 

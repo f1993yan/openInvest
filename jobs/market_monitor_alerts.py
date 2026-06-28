@@ -25,6 +25,8 @@ SELL_ALERT_TRIGGER_FLOOR = 38.0
 SELL_ALERT_POLICY_FLOOR = 41.0
 SELL_ALERT_COMMITTEE_FLOOR = 34.0
 BUY_ALERT_THRESHOLD = 55.0
+DISCIPLINE_REVIEW_ALERT_SOURCE = "position_exit_discipline_review"
+DISCIPLINE_EXECUTION_FRICTION_PCT = 0.15
 
 
 def _has_llm_hold_conflict(result: Dict[str, Any]) -> bool:
@@ -150,6 +152,9 @@ def _position_policy_quality_adjustment(result: Dict[str, Any], stock: Dict[str,
 
 
 def _sell_policy_reliability(policy: Dict[str, Any]) -> float:
+    explicit = _safe_num(policy.get("sell_reliability"))
+    if explicit > 0:
+        return _clamp(explicit, 0.0, 1.0)
     sell_count = max(0.0, _safe_num(policy.get("sell_count")))
     return sell_count / (sell_count + 8.0) if sell_count > 0 else 0.0
 
@@ -325,9 +330,283 @@ def _sell_candidate_wait_reason(
     return f"low_sell_score:{score:.1f}<{threshold:.1f}:{verdict}"
 
 
+def _sell_trigger_kind(triggers: List[Dict[str, Any]]) -> str:
+    priority = {
+        "position_stop": 0,
+        "cost_stop_loss": 1,
+        "stop_loss": 2,
+        "take_profit_2": 3,
+        "take_profit": 4,
+        "take_profit_1": 5,
+        "trim": 6,
+    }
+    sell_triggers = [t for t in triggers if t.get("side") == "sell"]
+    if not sell_triggers:
+        return ""
+    first = min(sell_triggers, key=lambda t: priority.get(str(t.get("kind") or ""), 99))
+    return str(first.get("kind") or "")
+
+
+def _discipline_trigger_strength(triggers: List[Dict[str, Any]]) -> float:
+    kind = _sell_trigger_kind(triggers)
+    return {
+        "position_stop": 1.0,
+        "cost_stop_loss": 1.0,
+        "stop_loss": 0.92,
+        "take_profit_2": 0.78,
+        "take_profit": 0.66,
+        "take_profit_1": 0.56,
+        "trim": 0.48,
+    }.get(kind, 0.0)
+
+
+def _is_existing_position(stock: Dict[str, Any]) -> bool:
+    return _safe_num(stock.get("position_pct")) > 0 or _stock_units(stock) > 0
+
+
+def _confirmed_position_sell_trigger(
+    *,
+    symbol: str,
+    entry_exit_state: Dict[str, Any],
+    current_triggers: List[Dict[str, Any]],
+) -> Tuple[bool, str]:
+    sell_triggers = [t for t in current_triggers if t.get("side") == "sell"]
+    if not sell_triggers:
+        return False, "no_sell_trigger"
+    kind = _sell_trigger_kind(sell_triggers)
+    if kind in {"position_stop", "cost_stop_loss", "stop_loss"}:
+        return True, "immediate_stop"
+    previous = ((entry_exit_state.get("symbols") or {}).get(symbol) or {})
+    previous_triggers = previous.get("last_triggers") or []
+    previous_sell = any(t.get("side") == "sell" for t in previous_triggers)
+    return (True, "two_round_price_confirmed") if previous_sell else (False, "one_round_only")
+
+
+def _discipline_continuation_edge_pct(
+    result: Dict[str, Any],
+    *,
+    stock: Dict[str, Any],
+    price_info: Dict[str, Any],
+) -> float:
+    """Expected benefit of continuing to hold, in percentage-point units.
+
+    The inputs are deliberately limited to existing stable committee fields.
+    Positive values make a sell discipline trigger require stronger evidence;
+    negative values make reducing risk easier.
+    """
+    verdict = str(result.get("verdict", "")).upper()
+    confidence = _clamp(_safe_num(result.get("confidence")), 0.0, 1.0)
+    ee = result.get("entry_exit_points") or {}
+    expected_return = _clamp(_safe_num(ee.get("expected_return_pct")), -8.0, 8.0)
+    rr = _safe_num(ee.get("reward_risk_ratio"))
+    fundamental = _safe_num(result.get("fundamental_score"), 50.0)
+    right_gate = result.get("right_side_trend_gate") or {}
+    change_pct = _safe_num(price_info.get("change_pct"))
+    position_pct = _safe_num(stock.get("position_pct"))
+
+    verdict_edge = {
+        "BUY": 2.4,
+        "ACCUMULATE": 1.6,
+        "HOLD": 0.7,
+        "WAIT": 0.3,
+        "TRIM": -0.8,
+        "SELL": -1.4,
+    }.get(verdict, 0.0) * confidence
+    expected_edge = 0.22 * expected_return
+    rr_edge = _clamp((rr - 1.5) * 0.35, -0.6, 0.8) if rr > 0 else 0.0
+    fundamental_edge = _clamp((fundamental - 60.0) / 40.0, -0.5, 0.8)
+    gate_edge = 0.45 if right_gate.get("allow") else -0.35 if right_gate else 0.0
+    intraday_edge = _clamp(change_pct / 10.0, -0.4, 0.5)
+    concentration_drag = _clamp((position_pct - 18.0) / 20.0, 0.0, 0.5)
+    return round(
+        _clamp(
+            verdict_edge + expected_edge + rr_edge + fundamental_edge + gate_edge + intraday_edge - concentration_drag,
+            -2.5,
+            4.0,
+        ),
+        4,
+    )
+
+
+def _discipline_sell_expected_edge_pct(
+    result: Dict[str, Any],
+    *,
+    triggers: List[Dict[str, Any]],
+) -> float:
+    """Conservative sell-side expected utility for triggered exit discipline.
+
+    Stop/take-profit lines are not treated as certainties.  Their base evidence
+    is multiplied by the weekly policy reliability and combined with the
+    Wilson-lower sell/path evidence already written by the optimizer.
+    """
+    policy = result.get("position_exit_policy") or {}
+    kind = _sell_trigger_kind(triggers)
+    strength = _discipline_trigger_strength(triggers)
+    reliability = _sell_policy_reliability(policy)
+    win_lower = _safe_num(policy.get("sell_win_rate_lower"))
+    path_lower = _safe_num(policy.get("post_sell_positive_edge_lower"))
+    utility_adjustment = _safe_num(policy.get("sell_utility_adjustment_pct"))
+    path_edge = _safe_num(policy.get("avg_post_sell_net_edge_pct"))
+    max_loss = max(0.0, _safe_num(policy.get("max_loss_pct")))
+
+    conservative_probability = _clamp(max(win_lower, path_lower, 0.5) - 0.5, 0.0, 0.5) * 2.0
+    probability_edge = reliability * conservative_probability
+    path_utility = reliability * _clamp(max(path_edge, utility_adjustment) / 8.0, -1.0, 1.0)
+
+    if kind in {"position_stop", "cost_stop_loss", "stop_loss"}:
+        base_edge = max(1.4, min(max_loss or 4.0, 8.0) * 0.45)
+    elif kind in {"take_profit_2", "take_profit"}:
+        base_edge = 0.55 + 1.05 * strength
+    else:
+        base_edge = 0.25 + 0.85 * strength
+    reliability_weight = 0.55 + 0.45 * reliability
+    return round(_clamp(base_edge * reliability_weight + 1.6 * path_utility + 0.8 * probability_edge, -2.0, 8.0), 4)
+
+
+def _discipline_sell_review(
+    result: Dict[str, Any],
+    *,
+    stock: Dict[str, Any],
+    price_info: Dict[str, Any],
+    triggers: List[Dict[str, Any]],
+    confirmed: bool,
+    confirmation_reason: str,
+) -> Dict[str, Any]:
+    policy = result.get("position_exit_policy") or {}
+    kind = _sell_trigger_kind(triggers)
+    sell_edge = _discipline_sell_expected_edge_pct(result, triggers=triggers)
+    continuation_edge = _discipline_continuation_edge_pct(result, stock=stock, price_info=price_info)
+    friction = 0.0 if kind in {"position_stop", "cost_stop_loss", "stop_loss"} else DISCIPLINE_EXECUTION_FRICTION_PCT
+    net_edge = sell_edge - continuation_edge - friction
+    execute = bool(confirmed and net_edge > 0)
+    if kind in {"position_stop", "cost_stop_loss", "stop_loss"} and confirmed:
+        execute = net_edge > -1.0
+    return {
+        "model": "triggered_exit_expected_utility_v1",
+        "committee_verdict": str(result.get("verdict") or "").upper(),
+        "committee_confidence": round(_safe_num(result.get("confidence")), 4),
+        "trigger_kind": kind,
+        "trigger_strength": round(_discipline_trigger_strength(triggers), 4),
+        "confirmed": bool(confirmed),
+        "confirmation_reason": confirmation_reason,
+        "sell_expected_edge_pct": sell_edge,
+        "continuation_edge_pct": continuation_edge,
+        "execution_friction_pct": friction,
+        "expected_utility_edge_pct": round(net_edge, 4),
+        "policy_reliability": round(_sell_policy_reliability(policy), 4),
+        "sell_win_rate_lower": round(_safe_num(policy.get("sell_win_rate_lower")), 4),
+        "post_sell_positive_edge_lower": round(_safe_num(policy.get("post_sell_positive_edge_lower")), 4),
+        "sell_utility_adjustment_pct": round(_safe_num(policy.get("sell_utility_adjustment_pct")), 4),
+        "avg_post_sell_net_edge_pct": round(_safe_num(policy.get("avg_post_sell_net_edge_pct")), 4),
+        "decision": "execute" if execute else "review",
+    }
+
+
+def _discipline_wait_reason(review: Dict[str, Any]) -> str:
+    return (
+        "discipline_review_wait:"
+        f"{review.get('expected_utility_edge_pct', 0):.2f}:"
+        f"{review.get('trigger_kind', '')}:"
+        f"{review.get('confirmation_reason', '')}"
+    )
+
+
+def _held_lots(stock: Dict[str, Any], lot_size: int) -> int:
+    units = _stock_units(stock)
+    if units <= 0 or lot_size <= 0:
+        return 0
+    return max(1, int(math.floor(units / lot_size)))
+
+
+def _discipline_sell_lots(kind: str, held_lots: int) -> int:
+    if held_lots <= 0:
+        return 0
+    if kind in {"position_stop", "cost_stop_loss", "stop_loss", "take_profit_2", "take_profit"}:
+        return held_lots
+    return max(1, int(math.floor(held_lots * 0.5)))
+
+
+def _build_discipline_sell_candidate(
+    result: Dict[str, Any],
+    *,
+    stock: Dict[str, Any],
+    price_info: Dict[str, Any],
+    triggers: List[Dict[str, Any]],
+    entry_exit_state: Dict[str, Any],
+    trading_mode: str,
+) -> Optional[Dict[str, Any]]:
+    symbol = str(result.get("symbol") or stock.get("symbol") or "").upper()
+    if not symbol or not _is_existing_position(stock) or not any(t.get("side") == "sell" for t in triggers):
+        return None
+    confirmed, confirmation_reason = _confirmed_position_sell_trigger(
+        symbol=symbol,
+        entry_exit_state=entry_exit_state,
+        current_triggers=triggers,
+    )
+    review = _discipline_sell_review(
+        result,
+        stock=stock,
+        price_info=price_info,
+        triggers=triggers,
+        confirmed=confirmed,
+        confirmation_reason=confirmation_reason,
+    )
+    kind = str(review.get("trigger_kind") or "")
+    lot_size = int(stock.get("min_lot_size") or result.get("min_lot_size") or 100)
+    lot_size = max(lot_size, 1)
+    held_lots = _held_lots(stock, lot_size)
+    sell_lots = _discipline_sell_lots(kind, held_lots)
+    price = _safe_num(price_info.get("price"))
+    if sell_lots <= 0 or price <= 0:
+        review["decision"] = "review"
+        return {
+            **dict(result),
+            "alert_source": DISCIPLINE_REVIEW_ALERT_SOURCE,
+            "discipline_review": review,
+            "alert_triggers": triggers,
+            "alert_wait_reason": "discipline_review_no_sellable_lots",
+        }
+    verdict = "SELL" if kind in {"position_stop", "cost_stop_loss", "stop_loss", "take_profit_2", "take_profit"} else "TRIM"
+    confidence = _clamp(
+        0.34
+        + 0.26 * _discipline_trigger_strength(triggers)
+        + 0.035 * max(0.0, _safe_num(review.get("expected_utility_edge_pct"))),
+        0.25,
+        0.86,
+    )
+    candidate = dict(result)
+    candidate.update({
+        "verdict": verdict,
+        "committee_verdict": str(result.get("verdict") or "").upper(),
+        "confidence": max(_safe_num(result.get("confidence")), confidence),
+        "suggested_alloc_cny": round(-(sell_lots * lot_size * price), 2),
+        "optimizer_lots": sell_lots,
+        "alert_selected_lots": sell_lots,
+        "llm_review_lots": sell_lots,
+        "alert_source": DISCIPLINE_REVIEW_ALERT_SOURCE,
+        "discipline_review": review,
+        "alert_triggers": triggers,
+        "trading_mode": normalize_trading_mode(trading_mode),
+    })
+    return candidate
+
+
 def _sell_candidate_wait_label(reason: str) -> str:
     text = str(reason or "")
     match = re.search(r"([0-9]+(?:\.[0-9]+)?)<([0-9]+(?:\.[0-9]+)?)", text)
+    if "discipline_review_wait" in text:
+        parts = text.split(":")
+        kind = parts[2] if len(parts) > 2 else ""
+        if "one_round_only" in text:
+            base = "纪律线单轮触发，等待下一轮确认"
+        elif kind in {"position_stop", "cost_stop_loss", "stop_loss"}:
+            base = "止损纪律触发，但继续持有证据仍占优"
+        else:
+            base = "止盈纪律复核，卖出期望未明显胜过继续持有"
+        edge_match = re.search(r"discipline_review_wait:([-0-9.]+)", text)
+        if edge_match:
+            return f"{base}（净效用{edge_match.group(1)}pct）"
+        return base
     if "waiting_for_trigger_or_edge" in text:
         base = "卖出证据不足，未触发纪律线"
     elif "low_sell_score" in text:
@@ -393,8 +672,11 @@ def _action_score(
         score += 24.0
     elif verdict in {"BUY", "ACCUMULATE"}:
         score -= 18.0
-    if any(t.get("side") == "sell" for t in triggers):
+    has_sell_trigger = any(t.get("side") == "sell" for t in triggers)
+    if has_sell_trigger and verdict in {"TRIM", "SELL"}:
         score += 20.0
+    elif has_sell_trigger and verdict in {"BUY", "ACCUMULATE"}:
+        score -= 8.0
 
     fundamental_score = result.get("fundamental_score")
     if fundamental_score is not None:
@@ -666,9 +948,6 @@ def select_optimal_actionable_alerts(
             continue
         verdict = str(result.get("verdict", "")).upper()
         alloc = _safe_num(result.get("suggested_alloc_cny"))
-        if verdict in {"HOLD", "REDUCE", "UNCLEAR"} or abs(alloc) <= 0:
-            continue
-
         symbol = str(result.get("symbol", "")).upper()
         stock = stock_by_symbol.get(symbol, {})
         price_info = prices.get(symbol) or prices.get(str(result.get("symbol", ""))) or {}
@@ -682,6 +961,62 @@ def select_optimal_actionable_alerts(
             stock=stock,
             entry_exit_state=entry_exit_state,
         )
+        discipline_candidate = _build_discipline_sell_candidate(
+            result,
+            stock=stock,
+            price_info=price_info,
+            triggers=triggers,
+            entry_exit_state=entry_exit_state,
+            trading_mode=mode,
+        )
+
+        if verdict in {"HOLD", "REDUCE", "UNCLEAR"} or abs(alloc) <= 0:
+            if discipline_candidate:
+                review = discipline_candidate.get("discipline_review") or {}
+                if review.get("decision") == "execute":
+                    score = _action_score(
+                        discipline_candidate,
+                        stock=stock,
+                        price_info=price_info,
+                        triggers=triggers,
+                    )
+                    score += 4.0 * max(0.0, _safe_num(review.get("expected_utility_edge_pct")))
+                    threshold = _sell_committee_alert_threshold(
+                        discipline_candidate,
+                        stock=stock,
+                        price_info=price_info,
+                        triggers=triggers,
+                        trading_mode=mode,
+                    )
+                    if score >= threshold:
+                        selected = dict(discipline_candidate)
+                        selected["alert_score"] = round(score, 2)
+                        selected["alert_threshold"] = threshold
+                        selected["trading_mode_label"] = mode_label
+                        sell_alerts.append(selected)
+                    else:
+                        suppressed.append({
+                            "symbol": symbol,
+                            "name": result.get("name"),
+                            "reason": _sell_candidate_wait_reason(
+                                result=discipline_candidate,
+                                score=score,
+                                threshold=threshold,
+                                triggers=triggers,
+                            ),
+                            "discipline_review": review,
+                            "alert_source": DISCIPLINE_REVIEW_ALERT_SOURCE,
+                        })
+                else:
+                    suppressed.append({
+                        "symbol": symbol,
+                        "name": result.get("name"),
+                        "reason": _discipline_wait_reason(review),
+                        "discipline_review": review,
+                        "alert_source": DISCIPLINE_REVIEW_ALERT_SOURCE,
+                    })
+            continue
+
         score = _action_score(result, stock=stock, price_info=price_info, triggers=triggers)
 
         if verdict in {"TRIM", "SELL"} and alloc < 0:
@@ -703,6 +1038,9 @@ def select_optimal_actionable_alerts(
                 selected["alert_score"] = round(score, 2)
                 selected["alert_threshold"] = threshold
                 selected["alert_triggers"] = triggers
+                if discipline_candidate:
+                    selected["discipline_review"] = discipline_candidate.get("discipline_review") or {}
+                    selected.setdefault("alert_source", "committee_sell")
                 selected["trading_mode"] = mode
                 selected["trading_mode_label"] = mode_label
                 sell_alerts.append(selected)
@@ -716,6 +1054,8 @@ def select_optimal_actionable_alerts(
                         threshold=threshold,
                         triggers=triggers,
                     ),
+                    "discipline_review": (discipline_candidate or {}).get("discipline_review") or {},
+                    "alert_source": (discipline_candidate or {}).get("alert_source") or "committee_sell",
                 })
             continue
 

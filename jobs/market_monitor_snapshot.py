@@ -10,6 +10,17 @@ from jobs.market_monitor_common import LATEST_WINDOW_PATH, REPORT_DIR, log, _fmt
 from jobs.market_monitor_alerts import _has_llm_hold_conflict, _suppressed_reasons_by_symbol
 from jobs.trading_mode import DEFAULT_TRADING_MODE, trading_mode_payload
 
+
+def _suppressed_details_by_symbol(suppressed_alerts: List[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
+    out: Dict[str, Dict[str, Any]] = {}
+    for item in suppressed_alerts:
+        symbol = str(item.get("symbol") or "").upper()
+        if not symbol:
+            continue
+        if item.get("discipline_review") and symbol not in out:
+            out[symbol] = item
+    return out
+
 def _first_prefixed_line(text: str, prefixes: Tuple[str, ...]) -> str:
     for line in (text or "").splitlines():
         stripped = line.strip()
@@ -24,17 +35,29 @@ def _operation_detail(
     result: Dict[str, Any],
     row: Dict[str, Any],
     actionable: Dict[str, Dict[str, Any]],
-    suppressed_reasons: Optional[List[str]] = None,
+    suppressed_reasons: Optional[Any] = None,
 ) -> Dict[str, Any]:
     symbol = str(result.get("symbol") or row.get("symbol") or "").upper()
     action_row = actionable.get(symbol)
-    verdict = str(result.get("verdict") or "UNKNOWN").upper()
+    suppressed_detail = None
+    if suppressed_reasons and isinstance(suppressed_reasons, dict):
+        suppressed_detail = suppressed_reasons
+        suppressed_reason_labels = suppressed_detail.get("labels") or []
+    else:
+        suppressed_reason_labels = suppressed_reasons or []
+    verdict = str((action_row or result).get("verdict") or "UNKNOWN").upper()
+    committee_verdict = str(
+        (action_row or {}).get("committee_verdict")
+        or (action_row or {}).get("discipline_review", {}).get("committee_verdict")
+        or result.get("verdict")
+        or "UNKNOWN"
+    ).upper()
     alloc_source = action_row if action_row else result
     alloc = _safe_num(alloc_source.get("suggested_alloc_cny"))
     triggers = row.get("triggers") or []
     if action_row:
         status = "action_required"
-        reason = "selected_by_cash_risk_optimizer"
+        reason = "selected_by_position_exit_discipline" if action_row.get("discipline_review") else "selected_by_cash_risk_optimizer"
     elif row.get("confirmed"):
         status = "trigger_confirmed"
         reason = "entry_exit_price_confirmed_two_rounds"
@@ -43,7 +66,7 @@ def _operation_detail(
         reason = "price_touched_one_round_trigger"
     elif verdict in {"TRIM", "SELL"} and abs(alloc) > 0 and not triggers:
         status = "candidate"
-        reason = (suppressed_reasons or ["committee_sell_waiting_for_exit_trigger"])[0]
+        reason = (suppressed_reason_labels or ["committee_sell_waiting_for_exit_trigger"])[0]
     elif verdict in {"BUY", "ACCUMULATE", "TRIM", "SELL"} and abs(alloc) > 0:
         status = "candidate"
         reason = "committee_has_direction_but_not_selected"
@@ -56,10 +79,16 @@ def _operation_detail(
     else:
         status = "error"
         reason = str(result.get("error") or "analysis_failed")
+    discipline_review = {}
+    if action_row:
+        discipline_review = action_row.get("discipline_review") or {}
+    elif suppressed_detail:
+        discipline_review = suppressed_detail.get("discipline_review") or {}
     return {
         "status": status,
         "reason": reason,
         "verdict": verdict,
+        "committee_verdict": committee_verdict,
         "confidence": round(_safe_num(result.get("confidence")), 4),
         "suggested_alloc_cny": round(alloc, 2),
         "optimizer_lots": None if not action_row else int(_safe_num(action_row.get("optimizer_lots") or action_row.get("alert_selected_lots"))),
@@ -70,10 +99,12 @@ def _operation_detail(
         "llm_risk_components": {} if not action_row else action_row.get("llm_risk_components") or {},
         "alert_score": None if not action_row else round(_safe_num(action_row.get("alert_score")), 2),
         "triggers": triggers,
+        "alert_source": "" if not action_row else str(action_row.get("alert_source") or ""),
+        "discipline_review": discipline_review,
         "confirmed": bool(row.get("confirmed")),
         "llm_conflict": _has_llm_hold_conflict(result),
         "execution_blocked": bool(result.get("execution_blocked")),
-        "wait_reasons": suppressed_reasons or [],
+        "wait_reasons": suppressed_reason_labels,
     }
 
 
@@ -111,6 +142,7 @@ def build_monitor_window_snapshot(
     watch_by_symbol = {str(row.get("symbol") or "").upper(): row for row in entry_exit_watch}
     actionable_by_symbol = {str(row.get("symbol") or "").upper(): row for row in actionable}
     suppressed_by_symbol = _suppressed_reasons_by_symbol(suppressed_alerts)
+    suppressed_details = _suppressed_details_by_symbol(suppressed_alerts)
 
     symbols = sorted(set(stock_by_symbol) | set(result_by_symbol) | set(price_by_symbol) | set(watch_by_symbol))
     rows: List[Dict[str, Any]] = []
@@ -157,7 +189,13 @@ def build_monitor_window_snapshot(
                 "plan_type": "pre_trade_estimate",
                 "locked_intraday": False,
             }
-        operation = _operation_detail(result, row, actionable_by_symbol, suppressed_by_symbol.get(symbol, []))
+        suppressed_context: Any = suppressed_by_symbol.get(symbol, [])
+        if symbol in suppressed_details:
+            suppressed_context = {
+                **suppressed_details[symbol],
+                "labels": suppressed_by_symbol.get(symbol, []),
+            }
+        operation = _operation_detail(result, row, actionable_by_symbol, suppressed_context)
         rows.append({
             "symbol": symbol,
             "name": result.get("name") or stock.get("name") or price_info.get("name") or symbol,
