@@ -70,7 +70,8 @@ fun showNotification(context: Context, title: String, content: String) {
     val notificationsEnabled = prefs.getBoolean("notifications_enabled", true)
     if (!notificationsEnabled) return
 
-    val isTradeSignal = title.contains("触发") || title.contains("信号") ||
+    val isTradeSignal = title.contains("触发") || title.contains("执行") || title.contains("信号") || title.contains("交易") ||
+                        content.contains("触发") || content.contains("执行") || content.contains("交易") ||
                         content.contains("买") || content.contains("卖") ||
                         content.contains("BUY") || content.contains("SELL")
 
@@ -83,17 +84,21 @@ fun showNotification(context: Context, title: String, content: String) {
         }
     }
 
-    val channelId = "open_invest_alerts"
+    val channelId = if (isTradeSignal) "open_invest_critical" else "open_invest_regular"
+    val channelName = if (isTradeSignal) "交易执行信号" else "日常行情更新"
+    val channelImportance = if (isTradeSignal) NotificationManager.IMPORTANCE_HIGH else NotificationManager.IMPORTANCE_LOW
+    val channelVisibility = if (isTradeSignal) android.app.Notification.VISIBILITY_PUBLIC else android.app.Notification.VISIBILITY_SECRET
+    
     val notificationManager = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
 
     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
         val channel = NotificationChannel(
             channelId,
-            "交易决策信号",
-            NotificationManager.IMPORTANCE_HIGH
+            channelName,
+            channelImportance
         ).apply {
-            description = "交易提醒和买卖建议信号通知"
-            lockscreenVisibility = android.app.Notification.VISIBILITY_PUBLIC
+            description = if (isTradeSignal) "触发的交易执行提醒信号" else "常规行情后台更新"
+            lockscreenVisibility = channelVisibility
         }
         notificationManager.createNotificationChannel(channel)
     }
@@ -120,11 +125,11 @@ fun showNotification(context: Context, title: String, content: String) {
         .setSmallIcon(R.drawable.deepseek_whale)
         .setContentTitle(title)
         .setContentText(content)
-        .setPriority(NotificationCompat.PRIORITY_HIGH)
-        .setVisibility(NotificationCompat.VISIBILITY_PUBLIC) // Make visible on lockscreen
+        .setPriority(if (isTradeSignal) NotificationCompat.PRIORITY_HIGH else NotificationCompat.PRIORITY_LOW)
+        .setVisibility(if (isTradeSignal) NotificationCompat.VISIBILITY_PUBLIC else NotificationCompat.VISIBILITY_SECRET)
         .setContentIntent(pendingIntent)
         .setAutoCancel(true)
-        .setCategory(NotificationCompat.CATEGORY_ALARM)
+        .setCategory(if (isTradeSignal) NotificationCompat.CATEGORY_ALARM else NotificationCompat.CATEGORY_STATUS)
 
     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
         if (ContextCompat.checkSelfPermission(
