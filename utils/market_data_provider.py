@@ -52,7 +52,99 @@ def fetch_prices(symbols: List[str]) -> Dict[str, Dict[str, Any]]:
         if all_cached:
             return cached_results
 
-    # 自动补充新浪前缀（sz/sh/hk）
+    # 腾讯 qt.gtimg.cn 批量报价（A股/港股通用）
+    def _to_tx(sym):
+        s = sym.strip().upper()
+        if s.isdigit() and len(s) == 6:
+            return f"sh{s}" if s[0] in ("5", "6") else f"sz{s}"
+        if s.isdigit() and len(s) == 5:
+            return f"hk{s}"
+        return sym
+
+    tx_list = ",".join(_to_tx(s) for s in symbols)
+    url = f"https://qt.gtimg.cn/q={tx_list}"
+
+    text = ""
+    for attempt in range(3):
+        try:
+            resp = requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=15)
+            resp.encoding = "gbk"
+            text = resp.text
+            if text and '="' in text:
+                break
+            log.warning(f"腾讯行情第{attempt+1}次返回空数据，重试...")
+            time.sleep(2)
+        except Exception as e:
+            log.warning(f"腾讯行情第{attempt+1}次失败: {e}")
+            time.sleep(2)
+
+    if not text or '="' not in text:
+        log.error(f"腾讯行情3次重试均失败，降级到 Sina")
+        return _fetch_prices_sina_fallback(symbols)
+        # 降级：如果获取失败，尽最大努力返回能拿到的缓存
+        fallback_results = {}
+        for s in symbols:
+            s_upper = s.upper()
+            if s_upper in _PRICE_CACHE:
+                fallback_results[s] = _PRICE_CACHE[s_upper]
+        return fallback_results
+
+    results = {}
+    for line in text.strip().split("\n"):
+        if not line.strip() or "=" not in line:
+            continue
+        try:
+            var_name, data = line.split("=", 1)
+            # 腾讯格式: v_sh600519="1~茅台~600519~...~1850.00~..."
+            # 提取 prefix+code
+            symbol_part = var_name.replace("v_", "").strip()
+            if symbol_part.startswith("sh"):
+                symbol = symbol_part[2:]
+            elif symbol_part.startswith("sz"):
+                symbol = symbol_part[2:]
+            elif symbol_part.startswith("hk"):
+                symbol = symbol_part[2:]
+            else:
+                symbol = symbol_part
+
+            data = data.strip('";\n ')
+            fields = data.split("~")
+
+            if len(fields) < 6:
+                continue
+
+            name = fields[1] if len(fields) > 1 else symbol
+            try:
+                price = float(fields[3]) if fields[3] else 0
+                prev_close = float(fields[4]) if fields[4] else 0
+            except (ValueError, IndexError):
+                continue
+
+            change_pct = (price / prev_close - 1) * 100 if prev_close > 0 else 0
+
+            item = {
+                "name": name,
+                "price": price,
+                "prev_close": prev_close,
+                "change_pct": round(change_pct, 2),
+            }
+            results[symbol] = item
+            _PRICE_CACHE[symbol.upper()] = item
+        except Exception as e:
+            log.warning(f"解析腾讯行情行失败: {line[:60]}... {e}")
+
+    # 没拿到的用旧缓存补齐
+    for s in symbols:
+        if s not in results:
+            s_upper = s.upper()
+            if s_upper in _PRICE_CACHE:
+                results[s] = _PRICE_CACHE[s_upper]
+
+    return results
+
+
+def _fetch_prices_sina_fallback(symbols: List[str]) -> Dict[str, Dict[str, Any]]:
+    """Sina hq.sinajs.cn 降级路径，保留原实现。"""
     def _to_sina(sym):
         if sym.isdigit() and len(sym) == 6:
             return f"sh{sym}" if sym[0] == "6" else f"sz{sym}"
@@ -71,15 +163,14 @@ def fetch_prices(symbols: List[str]) -> Dict[str, Dict[str, Any]]:
             text = resp.text
             if text and 'hq_str_' in text:
                 break
-            log.warning(f"新浪行情第{attempt+1}次返回空数据，重试...")
+            log.warning(f"Sina降级第{attempt+1}次返回空数据，重试...")
             time.sleep(2)
         except Exception as e:
-            log.warning(f"新浪行情第{attempt+1}次失败: {e}")
+            log.warning(f"Sina降级第{attempt+1}次失败: {e}")
             time.sleep(2)
-            
+
     if not text or 'hq_str_' not in text:
-        log.error(f"新浪行情3次重试均失败")
-        # 降级：如果获取失败，尽最大努力返回能拿到的缓存
+        log.error(f"Sina降级3次重试均失败")
         fallback_results = {}
         for s in symbols:
             s_upper = s.upper()
@@ -132,12 +223,10 @@ def fetch_prices(symbols: List[str]) -> Dict[str, Dict[str, Any]]:
                 "change_pct": round(change_pct, 2),
             }
             results[symbol] = item
-            # 更新缓存
             _PRICE_CACHE[symbol.upper()] = item
         except Exception as e:
-            log.warning(f"解析行情行失败: {line[:60]}... {e}")
+            log.warning(f"Sina降级解析失败: {line[:60]}... {e}")
 
-    # 对于没能成功获取的 symbol，用旧缓存补齐
     for s in symbols:
         if s not in results:
             s_upper = s.upper()

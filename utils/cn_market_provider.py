@@ -2,10 +2,10 @@
 
 Yahoo 对 A股/港股从国内访问经常 429 / 超时，本模块改走国内源（全部免 auth，
 实测可直连）：
-- Sina  hq.sinajs.cn        : A股/指数/汇率/VIX/美股/黄金 实时
-- Sina  quotes.sina.cn      : A股 + 指数 日线 OHLCV 历史
-- Tencent web.ifzq.gtimg.cn : 港股 日线 OHLCV 历史
-- Tencent qt.gtimg.cn       : 港股 实时
+- Tencent qt.gtimg.cn        : A股/港股/指数 实时（优先）
+- Tencent web.ifzq.gtimg.cn  : A股/港股 日线 OHLCV 历史（优先）
+- Sina  hq.sinajs.cn         : A股/指数/汇率/VIX/美股/黄金 实时（兜底）
+- Sina  quotes.sina.cn       : A股 + 指数 日线 OHLCV 历史（兜底）
 
 对外暴露（给 exchange_fee / gold_price 当 yfinance 的 drop-in）：
 - fetch_history(symbol, period) -> pd.DataFrame  (index=日期, cols=Close[/High/Low/Volume])
@@ -56,6 +56,7 @@ def _map_symbol(symbol: str) -> Optional[dict]:
         return {
             "kind": "index_cn" if is_index else "ashare",
             "sina": f"{pre}{code}",
+            "tx": f"{pre}{code}",
             "em_secid": f"{'1' if ex == 'SS' else '0'}.{code}",
         }
 
@@ -139,9 +140,18 @@ def fetch_spot(symbol: str) -> Optional[float]:
     if info is None:
         return None
     kind = info["kind"]
+    # Tencent qt.gtimg.cn 优先（A股/港股/指数通用，国内更稳定）
+    if "tx" in info and kind in ("ashare", "hk", "index_cn"):
+        try:
+            price = _spot_tx(info)
+            if price is not None and price > 0:
+                return price
+        except Exception:
+            pass
+    # Sina 兜底
     try:
         if kind == "hk":
-            return _spot_hk(info)
+            return _spot_tx(info)
         return _spot_sina(info, kind)
     except Exception as e:  # noqa: BLE001
         log.warning(f"[cn_market] spot {symbol} 失败: {e}")
@@ -176,7 +186,12 @@ def _spot_sina(info: dict, kind: str) -> Optional[float]:
     return None
 
 
-def _spot_hk(info: dict) -> Optional[float]:
+def _spot_tx(info: dict) -> Optional[float]:
+    """Tencent qt.gtimg.cn 实时价 — A股/港股/指数通用。
+
+    返回格式: v_<prefix><code>="...字段~分隔..."
+    字段 [3]=当前价, [4]=昨收, [32]=涨跌幅。
+    """
     txt = _http_get(f"https://qt.gtimg.cn/q={info['tx']}", gbk=True)
     if not txt:
         return None
@@ -204,7 +219,10 @@ def fetch_history(symbol: str, period: str = "2y") -> pd.DataFrame:
         if info["kind"] == "hk":
             rows = _hist_hk(info, bars)
         elif info["kind"] in ("ashare", "index_cn"):
-            rows = _hist_sina_cn(info, bars)
+            # 腾讯优先，Sina 兜底
+            rows = _hist_tx_cn(info, bars)
+            if not rows:
+                rows = _hist_sina_cn(info, bars)
         else:
             # fx / vix / gold / us：无免费日线源，用实时价合成单行 df，
             # 让 _safe_close / fx.get_fx_rate 至少拿到当前值（不再 0 兜底）。
@@ -229,6 +247,28 @@ def _rows_to_df(rows: list[Tuple]) -> pd.DataFrame:
     for col in ("Close", "High", "Low", "Volume"):
         df[col] = pd.to_numeric(df[col], errors="coerce")
     return df
+
+
+def _hist_tx_cn(info: dict, bars: int) -> list[Tuple]:
+    """Tencent A股日线：web.ifzq.gtimg.cn fqkline。qfqday=前复权日线。"""
+    import json
+    n = min(max(bars, 5), 800)
+    url = (
+        "https://web.ifzq.gtimg.cn/appstock/app/fqkline/get?"
+        f"param={info['tx']},day,,,{n},qfq"
+    )
+    txt = _http_get(url)
+    if not txt:
+        return []
+    data = json.loads(txt)
+    node = (data.get("data") or {}).get(info["tx"], {})
+    klines = node.get("qfqday") or node.get("day") or []
+    out = []
+    for k in klines:
+        if len(k) < 6:
+            continue
+        out.append((k[0], k[2], k[3], k[4], k[5]))
+    return out
 
 
 def _hist_sina_cn(info: dict, bars: int) -> list[Tuple]:
