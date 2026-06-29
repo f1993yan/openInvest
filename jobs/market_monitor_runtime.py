@@ -36,6 +36,10 @@ from jobs.market_monitor_snapshot import build_monitor_window_snapshot, write_mo
 from jobs.trading_mode import DEFAULT_TRADING_MODE, normalize_trading_mode
 
 SECTOR_CACHE_PATH = _PROJECT_ROOT / "data" / "sector_cache.json"
+if not SECTOR_CACHE_PATH.exists():
+    _android_sector_cache = Path("/data/data/com.f1993yan.openInvest/files/sector_cache.json")
+    if _android_sector_cache.exists():
+        SECTOR_CACHE_PATH = _android_sector_cache
 
 
 def _clean_sector(value: Any) -> str:

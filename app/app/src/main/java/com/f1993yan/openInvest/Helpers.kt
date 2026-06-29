@@ -206,3 +206,24 @@ fun triggerRefreshService(context: Context) {
         }
     }
 }
+
+fun saveLocalBinaryFile(context: Context, filename: String, bytes: ByteArray) {
+    try {
+        context.openFileOutput(filename, Context.MODE_PRIVATE).use {
+            it.write(bytes)
+        }
+    } catch (e: Exception) {
+        Log.e("MainActivity", "Failed to save local binary file $filename", e)
+    }
+}
+
+fun readLocalBinaryFile(context: Context, filename: String): ByteArray? {
+    return try {
+        context.openFileInput(filename).use {
+            it.readBytes()
+        }
+    } catch (e: Exception) {
+        Log.e("MainActivity", "Failed to read local binary file $filename", e)
+        null
+    }
+}

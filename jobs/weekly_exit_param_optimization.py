@@ -15,6 +15,10 @@ ROOT = Path(__file__).resolve().parent.parent
 CONFIG_PATH = ROOT / "jobs" / "market_monitor_config.json"
 REPORT_PATH = ROOT / "reports" / "weekly_exit_param_optimization.json"
 SECTOR_CACHE_PATH = ROOT / "data" / "sector_cache.json"
+if not SECTOR_CACHE_PATH.exists():
+    _android_sector_cache = Path("/data/data/com.f1993yan.openInvest/files/sector_cache.json")
+    if _android_sector_cache.exists():
+        SECTOR_CACHE_PATH = _android_sector_cache
 EASTMONEY_CLIST_URL = "https://push2.eastmoney.com/api/qt/clist/get"
 EASTMONEY_HEADERS = {
     "User-Agent": (

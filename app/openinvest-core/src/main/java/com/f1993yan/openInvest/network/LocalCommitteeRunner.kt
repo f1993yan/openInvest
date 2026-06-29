@@ -57,6 +57,12 @@ object LocalCommitteeRunner {
         Thread {
             try {
                 val py = Python.getInstance()
+                val exitPolicies = prefs.getString("invest_a_share_sector_exit_policies", "") ?: ""
+                try {
+                    py.getModule("os")?.get("environ")?.put("INVEST_A_SHARE_SECTOR_EXIT_POLICIES", exitPolicies)
+                } catch (e: Exception) {
+                    Log.w(TAG, "Failed to set INVEST_A_SHARE_SECTOR_EXIT_POLICIES in python environment", e)
+                }
                 val pyModule = py.getModule("utils.phone_committee")
 
                 Log.d(TAG, "Calling run_committee_local for $symbol ($name) with base_url: $llmBaseUrl and trading_mode: $tradingMode")
@@ -162,6 +168,13 @@ object LocalCommitteeRunner {
         Thread {
             try {
                 val py = Python.getInstance()
+                val prefs = context.getSharedPreferences("open_invest_prefs", Context.MODE_PRIVATE)
+                val exitPolicies = prefs.getString("invest_a_share_sector_exit_policies", "") ?: ""
+                try {
+                    py.getModule("os")?.get("environ")?.put("INVEST_A_SHARE_SECTOR_EXIT_POLICIES", exitPolicies)
+                } catch (e: Exception) {
+                    Log.w(TAG, "Failed to set INVEST_A_SHARE_SECTOR_EXIT_POLICIES in python environment", e)
+                }
                 val pyModule = py.getModule("utils.phone_committee")
 
                 val pyResult = pyModule.callAttr(

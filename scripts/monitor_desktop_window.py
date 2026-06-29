@@ -580,7 +580,40 @@ class MonitorWindow(MonitorNewsMixin, MonitorSelectionMixin, MonitorTradeMixin, 
                     messagebox.showerror("错误", f"上传每周止盈参数失败: HTTP {resp_exit.status_code}\n{resp_exit.text}")
                     return
 
-            messagebox.showinfo("成功", "数据上传成功！")
+            # 1. 上传 .env 的 INVEST_A_SHARE_SECTOR_EXIT_POLICIES
+            sector_policies = os.getenv("INVEST_A_SHARE_SECTOR_EXIT_POLICIES", "")
+            if sector_policies:
+                url_env = f"{self.remote_server_url.rstrip('/')}/api/config/env_policies"
+                resp_env = requests.post(url_env, json={"policies": sector_policies}, timeout=10)
+                if resp_env.status_code != 200:
+                    print(f"Failed to upload env policies to server: {resp_env.status_code}")
+
+            # 2. 上传 data/sector_cache.json
+            sector_cache_path = ROOT / "data" / "sector_cache.json"
+            if sector_cache_path.exists():
+                try:
+                    with open(sector_cache_path, "r", encoding="utf-8") as f:
+                        sector_data = json.load(f)
+                    url_sector = f"{self.remote_server_url.rstrip('/')}/api/config/sector_cache"
+                    resp_sector = requests.post(url_sector, json=sector_data, timeout=10)
+                    if resp_sector.status_code != 200:
+                        print(f"Failed to upload sector cache to server: {resp_sector.status_code}")
+                except Exception as se_err:
+                    print(f"Failed to read/upload sector cache: {se_err}")
+
+            # 3. 上传 db/account_ledger.sqlite
+            db_path = ROOT / "db" / "account_ledger.sqlite"
+            if db_path.exists():
+                try:
+                    url_ledger = f"{self.remote_server_url.rstrip('/')}/api/config/account_ledger"
+                    with open(db_path, "rb") as f:
+                        resp_ledger = requests.post(url_ledger, files={"file": f}, timeout=15)
+                    if resp_ledger.status_code != 200:
+                        print(f"Failed to upload account ledger to server: {resp_ledger.status_code}")
+                except Exception as db_err:
+                    print(f"Failed to read/upload account ledger: {db_err}")
+
+            messagebox.showinfo("成功", "所有配置文件及账本数据库上传成功！")
         except Exception as e:
             messagebox.showerror("错误", f"上传过程中发生异常: {str(e)}")
 
@@ -589,7 +622,7 @@ class MonitorWindow(MonitorNewsMixin, MonitorSelectionMixin, MonitorTradeMixin, 
             messagebox.showerror("错误", "未配置远程服务器地址 (INVEST_REMOTE_SERVER_URL)")
             return
 
-        if not messagebox.askyesno("确认同步", "确认从服务器同步持仓/关注/参数数据？这将覆盖本地的相同数据！"):
+        if not messagebox.askyesno("确认同步", "确认从服务器同步持仓/关注/参数数据及账本数据库？这将覆盖本地的相同数据！"):
             return
 
         import requests
@@ -628,7 +661,60 @@ class MonitorWindow(MonitorNewsMixin, MonitorSelectionMixin, MonitorTradeMixin, 
                 messagebox.showerror("错误", f"同步每周止盈参数失败: HTTP {resp_exit.status_code}\n{resp_exit.text}")
                 return
 
-            messagebox.showinfo("成功", "数据同步成功！")
+            # 1. 同步 .env 中的 INVEST_A_SHARE_SECTOR_EXIT_POLICIES
+            try:
+                url_env = f"{self.remote_server_url.rstrip('/')}/api/config/env_policies"
+                resp_env = requests.get(url_env, timeout=10)
+                if resp_env.status_code == 200:
+                    policies_val = resp_env.json().get("policies", "")
+                    if policies_val:
+                        env_path = ROOT / ".env"
+                        content = ""
+                        if env_path.exists():
+                            with open(env_path, "r", encoding="utf-8") as f:
+                                content = f.read()
+                        lines = content.splitlines()
+                        found = False
+                        key = "INVEST_A_SHARE_SECTOR_EXIT_POLICIES"
+                        new_line = f"{key}={policies_val}"
+                        for i, line in enumerate(lines):
+                            if line.strip().startswith(f"{key}="):
+                                lines[i] = new_line
+                                found = True
+                                break
+                        if not found:
+                            lines.append(new_line)
+                        with open(env_path, "w", encoding="utf-8") as f:
+                            f.write("\n".join(lines) + "\n")
+                        os.environ[key] = policies_val
+            except Exception as env_err:
+                print(f"Failed to sync env policies: {env_err}")
+
+            # 2. 同步 data/sector_cache.json
+            try:
+                url_sector = f"{self.remote_server_url.rstrip('/')}/api/config/sector_cache"
+                resp_sector = requests.get(url_sector, timeout=10)
+                if resp_sector.status_code == 200:
+                    sector_cache_path = ROOT / "data" / "sector_cache.json"
+                    sector_cache_path.parent.mkdir(parents=True, exist_ok=True)
+                    with open(sector_cache_path, "w", encoding="utf-8") as f:
+                        json.dump(resp_sector.json(), f, ensure_ascii=False, indent=2)
+            except Exception as sector_err:
+                print(f"Failed to sync sector cache: {sector_err}")
+
+            # 3. 同步 db/account_ledger.sqlite
+            try:
+                url_ledger = f"{self.remote_server_url.rstrip('/')}/api/config/account_ledger"
+                resp_ledger = requests.get(url_ledger, timeout=15)
+                if resp_ledger.status_code == 200:
+                    db_path = ROOT / "db" / "account_ledger.sqlite"
+                    db_path.parent.mkdir(parents=True, exist_ok=True)
+                    with open(db_path, "wb") as f:
+                        f.write(resp_ledger.content)
+            except Exception as db_err:
+                print(f"Failed to sync account ledger: {db_err}")
+
+            messagebox.showinfo("成功", "所有配置文件及账本数据库同步成功！")
             self.refresh()
         except Exception as e:
             messagebox.showerror("错误", f"同步过程中发生异常: {str(e)}")

@@ -619,18 +619,28 @@ fun SettingsDialog(
                             onClick = {
                                 val configContent = readLocalFile(context, "market_monitor_config.json")
                                 val exitContent = readLocalFile(context, "weekly_exit_param_optimization.json")
-                                if (configContent == null && exitContent == null) {
+                                val sectorContent = readLocalFile(context, "sector_cache.json")
+                                val prefs = context.getSharedPreferences("open_invest_prefs", Context.MODE_PRIVATE)
+                                val envPolicies = prefs.getString("invest_a_share_sector_exit_policies", "") ?: ""
+                                val ledgerBytes = readLocalBinaryFile(context, "account_ledger.sqlite")
+
+                                if (configContent == null && exitContent == null && sectorContent == null && envPolicies.isEmpty() && ledgerBytes == null) {
                                     Toast.makeText(context, "没有本地数据可上传，请先导入配置", Toast.LENGTH_LONG).show()
                                     return@Button
                                 }
 
                                 var completedCount = 0
-                                val totalToUpload = (if (configContent != null) 1 else 0) + (if (exitContent != null) 1 else 0)
+                                var totalToUpload = 0
+                                if (configContent != null) totalToUpload++
+                                if (exitContent != null) totalToUpload++
+                                if (sectorContent != null) totalToUpload++
+                                if (envPolicies.isNotEmpty()) totalToUpload++
+                                if (ledgerBytes != null) totalToUpload++
 
                                 fun checkComplete() {
                                     completedCount++
                                     if (completedCount == totalToUpload) {
-                                        Toast.makeText(context, "本地持仓/自选/参数数据上传成功！", Toast.LENGTH_LONG).show()
+                                        Toast.makeText(context, "所有配置文件及账本数据库上传成功！", Toast.LENGTH_LONG).show()
                                     }
                                 }
 
@@ -655,6 +665,39 @@ fun SettingsDialog(
                                         )
                                     }
                                 }
+
+                                sectorContent?.let {
+                                    NetworkClient.uploadSectorCache(it) { res ->
+                                        res.fold(
+                                            onSuccess = { checkComplete() },
+                                            onFailure = { err ->
+                                                Toast.makeText(context, "上传板块缓存失败: ${err.message}", Toast.LENGTH_LONG).show()
+                                            }
+                                        )
+                                    }
+                                }
+
+                                if (envPolicies.isNotEmpty()) {
+                                    NetworkClient.uploadEnvPolicies(envPolicies) { res ->
+                                        res.fold(
+                                            onSuccess = { checkComplete() },
+                                            onFailure = { err ->
+                                                Toast.makeText(context, "上传环境变量失败: ${err.message}", Toast.LENGTH_LONG).show()
+                                            }
+                                        )
+                                    }
+                                }
+
+                                ledgerBytes?.let {
+                                    NetworkClient.uploadAccountLedger(it) { res ->
+                                        res.fold(
+                                            onSuccess = { checkComplete() },
+                                            onFailure = { err ->
+                                                Toast.makeText(context, "上传账本数据库失败: ${err.message}", Toast.LENGTH_LONG).show()
+                                            }
+                                        )
+                                    }
+                                }
                             },
                             colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF10B981)),
                             shape = RoundedCornerShape(10.dp),
@@ -670,16 +713,17 @@ fun SettingsDialog(
                             AlertDialog(
                                 onDismissRequest = { showSyncConfirmDialog = false },
                                 title = { Text("确认同步", fontWeight = FontWeight.Bold) },
-                                text = { Text("您确定要从云端服务器同步配置吗？这将会覆盖本地现有的持仓与自选列表！") },
+                                text = { Text("您确定要从云端服务器同步所有配置文件与账本数据库吗？这将会覆盖本地现有的配置与数据！") },
                                 confirmButton = {
                                     TextButton(
                                         onClick = {
                                             showSyncConfirmDialog = false
                                             var syncCount = 0
+                                            val totalToSync = 5
                                             fun onSyncComplete() {
                                                 syncCount++
-                                                if (syncCount == 2) {
-                                                    Toast.makeText(context, "配置同步成功，已覆盖本地数据！", Toast.LENGTH_LONG).show()
+                                                if (syncCount == totalToSync) {
+                                                    Toast.makeText(context, "所有配置文件及账本数据库同步成功！", Toast.LENGTH_LONG).show()
                                                     onRefresh()
                                                 }
                                             }
@@ -704,6 +748,47 @@ fun SettingsDialog(
                                                     },
                                                     onFailure = { err ->
                                                         Toast.makeText(context, "同步参数配置失败: ${err.message}", Toast.LENGTH_LONG).show()
+                                                        onSyncComplete()
+                                                    }
+                                                )
+                                            }
+                                            NetworkClient.downloadSectorCache { res ->
+                                                res.fold(
+                                                    onSuccess = { content ->
+                                                        saveLocalFile(context, "sector_cache.json", content)
+                                                        onSyncComplete()
+                                                    },
+                                                    onFailure = { err ->
+                                                        onSyncComplete()
+                                                    }
+                                                )
+                                            }
+                                            NetworkClient.downloadEnvPolicies { res ->
+                                                res.fold(
+                                                    onSuccess = { content ->
+                                                        try {
+                                                            val gson = com.google.gson.Gson()
+                                                            val map = gson.fromJson(content, Map::class.java)
+                                                            val policies = map["policies"] as? String ?: ""
+                                                            val prefs = context.getSharedPreferences("open_invest_prefs", Context.MODE_PRIVATE)
+                                                            prefs.edit().putString("invest_a_share_sector_exit_policies", policies).apply()
+                                                        } catch (e: Exception) {
+                                                            Log.e("Settings", "Failed to parse env policies", e)
+                                                        }
+                                                        onSyncComplete()
+                                                    },
+                                                    onFailure = { err ->
+                                                        onSyncComplete()
+                                                    }
+                                                )
+                                            }
+                                            NetworkClient.downloadAccountLedger { res ->
+                                                res.fold(
+                                                    onSuccess = { bytes ->
+                                                        saveLocalBinaryFile(context, "account_ledger.sqlite", bytes)
+                                                        onSyncComplete()
+                                                    },
+                                                    onFailure = { err ->
                                                         onSyncComplete()
                                                     }
                                                 )

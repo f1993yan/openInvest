@@ -672,6 +672,161 @@ object NetworkClient {
         })
     }
 
+    fun uploadSectorCache(jsonContent: String, onResult: (Result<Boolean>) -> Unit) {
+        val body = jsonContent.toRequestBody(JSON_MEDIA_TYPE)
+        val request = Request.Builder()
+            .url("$baseUrl/api/config/sector_cache")
+            .post(body)
+            .build()
+        client.newCall(request).enqueue(object : Callback {
+            override fun onFailure(call: Call, e: IOException) {
+                runOnMain(onResult, Result.failure(e))
+            }
+            override fun onResponse(call: Call, response: Response) {
+                if (response.isSuccessful) {
+                    runOnMain(onResult, Result.success(true))
+                } else {
+                    runOnMain(onResult, Result.failure(IOException("Server error: ${response.code}")))
+                }
+                response.close()
+            }
+        })
+    }
+
+    fun downloadSectorCache(onResult: (Result<String>) -> Unit) {
+        val request = Request.Builder()
+            .url("$baseUrl/api/config/sector_cache")
+            .get()
+            .build()
+        client.newCall(request).enqueue(object : Callback {
+            override fun onFailure(call: Call, e: IOException) {
+                runOnMain(onResult, Result.failure(e))
+            }
+            override fun onResponse(call: Call, response: Response) {
+                try {
+                    if (response.isSuccessful) {
+                        val bodyString = response.body?.string() ?: ""
+                        runOnMain(onResult, Result.success(bodyString))
+                    } else {
+                        runOnMain(onResult, Result.failure(IOException("Server error: ${response.code}")))
+                    }
+                } catch (e: Exception) {
+                    runOnMain(onResult, Result.failure(e))
+                } finally {
+                    response.close()
+                }
+            }
+        })
+    }
+
+    fun uploadEnvPolicies(policies: String, onResult: (Result<Boolean>) -> Unit) {
+        val requestBody = gson.toJson(mapOf("policies" to policies)).toRequestBody(JSON_MEDIA_TYPE)
+        val request = Request.Builder()
+            .url("$baseUrl/api/config/env_policies")
+            .post(requestBody)
+            .build()
+        client.newCall(request).enqueue(object : Callback {
+            override fun onFailure(call: Call, e: IOException) {
+                runOnMain(onResult, Result.failure(e))
+            }
+            override fun onResponse(call: Call, response: Response) {
+                if (response.isSuccessful) {
+                    runOnMain(onResult, Result.success(true))
+                } else {
+                    runOnMain(onResult, Result.failure(IOException("Server error: ${response.code}")))
+                }
+                response.close()
+            }
+        })
+    }
+
+    fun downloadEnvPolicies(onResult: (Result<String>) -> Unit) {
+        val request = Request.Builder()
+            .url("$baseUrl/api/config/env_policies")
+            .get()
+            .build()
+        client.newCall(request).enqueue(object : Callback {
+            override fun onFailure(call: Call, e: IOException) {
+                runOnMain(onResult, Result.failure(e))
+            }
+            override fun onResponse(call: Call, response: Response) {
+                try {
+                    if (response.isSuccessful) {
+                        val bodyString = response.body?.string() ?: ""
+                        runOnMain(onResult, Result.success(bodyString))
+                    } else {
+                        runOnMain(onResult, Result.failure(IOException("Server error: ${response.code}")))
+                    }
+                } catch (e: Exception) {
+                    runOnMain(onResult, Result.failure(e))
+                } finally {
+                    response.close()
+                }
+            }
+        })
+    }
+
+    fun uploadAccountLedger(fileBytes: ByteArray, onResult: (Result<Boolean>) -> Unit) {
+        val requestBody = MultipartBody.Builder()
+            .setType(MultipartBody.FORM)
+            .addFormDataPart(
+                "file",
+                "account_ledger.sqlite",
+                fileBytes.toRequestBody("application/octet-stream".toMediaType())
+            )
+            .build()
+
+        val request = Request.Builder()
+            .url("$baseUrl/api/config/account_ledger")
+            .post(requestBody)
+            .build()
+
+        client.newCall(request).enqueue(object : Callback {
+            override fun onFailure(call: Call, e: IOException) {
+                runOnMain(onResult, Result.failure(e))
+            }
+            override fun onResponse(call: Call, response: Response) {
+                if (response.isSuccessful) {
+                    runOnMain(onResult, Result.success(true))
+                } else {
+                    runOnMain(onResult, Result.failure(IOException("Server error: ${response.code}")))
+                }
+                response.close()
+            }
+        })
+    }
+
+    fun downloadAccountLedger(onResult: (Result<ByteArray>) -> Unit) {
+        val request = Request.Builder()
+            .url("$baseUrl/api/config/account_ledger")
+            .get()
+            .build()
+
+        client.newCall(request).enqueue(object : Callback {
+            override fun onFailure(call: Call, e: IOException) {
+                runOnMain(onResult, Result.failure(e))
+            }
+            override fun onResponse(call: Call, response: Response) {
+                try {
+                    if (response.isSuccessful) {
+                        val bytes = response.body?.bytes()
+                        if (bytes != null) {
+                            runOnMain(onResult, Result.success(bytes))
+                        } else {
+                            runOnMain(onResult, Result.failure(IOException("Empty response body")))
+                        }
+                    } else {
+                        runOnMain(onResult, Result.failure(IOException("Server error: ${response.code}")))
+                    }
+                } catch (e: Exception) {
+                    runOnMain(onResult, Result.failure(e))
+                } finally {
+                    response.close()
+                }
+            }
+        })
+    }
+
     fun correctCash(cash: Double, t2PendingCash: Double?, onResult: (Result<String>) -> Unit) {
         val bodyMap = mutableMapOf<String, Any>(
             "cash" to cash

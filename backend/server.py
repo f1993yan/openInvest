@@ -45,7 +45,8 @@ try:
 except Exception:
     pass
 
-from fastapi import Body, FastAPI, HTTPException, Query
+from fastapi import Body, FastAPI, HTTPException, Query, UploadFile, File
+from fastapi.responses import FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
@@ -1150,6 +1151,129 @@ async def get_exit_params():
         if isinstance(e, HTTPException):
             raise e
         raise HTTPException(status_code=500, detail=f"Failed to read exit parameters: {str(e)}")
+
+
+@app.post("/api/config/sector_cache")
+async def import_sector_cache(cache: Dict[str, Any] = Body(...)):
+    """导入/覆盖板块缓存文件 (sector_cache.json)"""
+    try:
+        cache_path = _PROJECT_ROOT / "data" / "sector_cache.json"
+        cache_path.parent.mkdir(parents=True, exist_ok=True)
+        cache_path.write_text(json.dumps(cache, ensure_ascii=False, indent=2), encoding="utf-8")
+        return {"ok": True, "message": "Sector cache file imported successfully"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to save sector cache: {str(e)}")
+
+
+@app.get("/api/config/sector_cache")
+async def get_sector_cache():
+    """获取板块缓存文件内容"""
+    try:
+        cache_path = _PROJECT_ROOT / "data" / "sector_cache.json"
+        if cache_path.exists():
+            return json.loads(cache_path.read_text(encoding="utf-8"))
+        raise HTTPException(status_code=404, detail="Sector cache file not found")
+    except Exception as e:
+        if isinstance(e, HTTPException):
+            raise e
+        raise HTTPException(status_code=500, detail=f"Failed to read sector cache: {str(e)}")
+
+
+@app.post("/api/config/env_policies")
+async def import_env_policies(body: Dict[str, Any] = Body(...)):
+    """更新 .env 中的 INVEST_A_SHARE_SECTOR_EXIT_POLICIES 参数"""
+    try:
+        policies = body.get("policies", "")
+        # If it's a dict/list, dump it to string first
+        if isinstance(policies, (dict, list)):
+            policies_str = json.dumps(policies, ensure_ascii=False)
+        else:
+            policies_str = str(policies)
+            
+        # Helper to update env file
+        env_path = _PROJECT_ROOT / ".env"
+        content = ""
+        if env_path.exists():
+            content = env_path.read_text(encoding="utf-8")
+        lines = content.splitlines()
+        found = False
+        key = "INVEST_A_SHARE_SECTOR_EXIT_POLICIES"
+        new_line = f"{key}={policies_str}"
+        for i, line in enumerate(lines):
+            if line.strip().startswith(f"{key}="):
+                lines[i] = new_line
+                found = True
+                break
+        if not found:
+            lines.append(new_line)
+        env_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        
+        # Also update os.environ immediately
+        _os.environ[key] = policies_str
+        return {"ok": True, "message": "INVEST_A_SHARE_SECTOR_EXIT_POLICIES updated successfully"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to save env policies: {str(e)}")
+
+
+@app.get("/api/config/env_policies")
+async def get_env_policies():
+    """获取 .env 中的 INVEST_A_SHARE_SECTOR_EXIT_POLICIES 参数"""
+    try:
+        key = "INVEST_A_SHARE_SECTOR_EXIT_POLICIES"
+        env_path = _PROJECT_ROOT / ".env"
+        val = ""
+        if env_path.exists():
+            content = env_path.read_text(encoding="utf-8")
+            for line in content.splitlines():
+                if line.strip().startswith(f"{key}="):
+                    parts = line.strip().split("=", 1)
+                    if len(parts) == 2:
+                        val = parts[1]
+                        break
+        return {"policies": val}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to read env policies: {str(e)}")
+
+
+@app.post("/api/config/account_ledger")
+async def import_account_ledger(file: UploadFile = File(...)):
+    """上传并覆盖双账户账本文件 (account_ledger.sqlite)"""
+    try:
+        db_path = _PROJECT_ROOT / "db" / "account_ledger.sqlite"
+        db_path.parent.mkdir(parents=True, exist_ok=True)
+        
+        # Reset the global ledger variable to close current connections
+        global _account_ledger
+        _account_ledger = None
+        
+        # Write file content
+        with open(db_path, "wb") as buffer:
+            content = await file.read()
+            buffer.write(content)
+            
+        # Re-initialize ledger
+        _get_account_ledger()
+        return {"ok": True, "message": "Account ledger database imported successfully"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to save account ledger: {str(e)}")
+
+
+@app.get("/api/config/account_ledger")
+async def download_account_ledger():
+    """下载双账户账本文件"""
+    try:
+        db_path = _PROJECT_ROOT / "db" / "account_ledger.sqlite"
+        if db_path.exists():
+            return FileResponse(
+                path=str(db_path),
+                filename="account_ledger.sqlite",
+                media_type="application/octet-stream"
+            )
+        raise HTTPException(status_code=404, detail="Account ledger database file not found")
+    except Exception as e:
+        if isinstance(e, HTTPException):
+            raise e
+        raise HTTPException(status_code=500, detail=f"Failed to download account ledger: {str(e)}")
 
 
 @app.get("/api/stock/history")
