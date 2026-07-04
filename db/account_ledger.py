@@ -930,8 +930,19 @@ class AccountLedger:
                     item["position_pct"] = 0.0
                     new_watchlist.append(item)
 
-            config["holdings"] = new_holdings
-            config["watchlist"] = new_watchlist
+            # 守护：当账本持仓为空但配置文件已有 holdings/watchlist 时，
+            # 说明账本尚未同步完成（例如 import_monitor_config 后台任务还在排队），
+            # 保留配置中的持仓/自选数据，仅同步现金字段，防止竞态覆盖。
+            if not new_holdings and not new_watchlist:
+                if config.get("holdings") or config.get("watchlist"):
+                    # 账本空、配置非空 → 保留配置数据
+                    pass
+                else:
+                    config["holdings"] = []
+                    config["watchlist"] = []
+            else:
+                config["holdings"] = new_holdings
+                config["watchlist"] = new_watchlist
 
             # Write config to disk
             config_path.write_text(json.dumps(config, ensure_ascii=False, indent=2), encoding="utf-8")
