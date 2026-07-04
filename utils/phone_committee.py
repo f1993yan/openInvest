@@ -63,13 +63,28 @@ def _regime_label(text: Any) -> str:
     reason = reason_match.group(1).strip() if reason_match else ""
     return f"{label}: {reason}" if reason else label
 
+def _clean_cio_memo_for_brief(text: str) -> str:
+    lines = str(text or "").splitlines()
+    clean_lines = []
+    for line in lines:
+        t = line.strip()
+        if not t:
+            continue
+        if re.match(r"^[A-Z0-9_]+:\s*", t):
+            continue
+        if t.startswith("==") or t.startswith("##") or t.startswith("-"):
+            continue
+        clean_lines.append(t)
+    return " ".join(clean_lines)
+
 def _extract_one_line(text: Any) -> str:
     value = str(text or "").strip()
     for key in ("ONE_LINE:", "HUMAN_CHECK:", "RATIONALE:"):
         match = re.search(rf"{key}\s*(.+?)(?=\s+[A-Z_]+:|$)", value, re.S)
         if match:
             return _short(match.group(1).strip(), 140)
-    return _short(value, 140) if value else "-"
+    cleaned = _clean_cio_memo_for_brief(value)
+    return _short(cleaned, 140) if cleaned else "-"
 
 def _short(text: Any, limit: int = 100) -> str:
     value = str(text or "").strip().replace("\n", " ")
@@ -377,7 +392,6 @@ def run_committee_local(
                 from pathlib import Path
                 snapshot_path = Path("/data/data/com.f1993yan.openInvest/files/resolved_snapshot.json")
                 if snapshot_path.exists():
-                    import json
                     snap_data = json.loads(snapshot_path.read_text(encoding="utf-8"))
                     for r in (snap_data.get("rows") or []):
                         if str(r.get("symbol") or "").strip() == symbol.strip():
