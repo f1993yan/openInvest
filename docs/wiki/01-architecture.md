@@ -106,6 +106,7 @@ market_monitor_runtime.run_monitor_round()
 - A 股持仓纪律止损在 `evaluate_position_exit_plan_triggers()` 中判断，价格**跌破**锁定止损线才触发；止盈目标价达到即可触发。
 - 每周 `jobs/weekly_exit_param_optimization.py` 会按板块回看最近数据，写入 `policy_quality_score`、`sell_win_rate_lower`、`profit_factor` 等质量字段；这些字段只用于校准已有持仓的减仓/卖出纪律，不参与买入点计算。
 - `jobs.market_monitor_alerts.select_optimal_actionable_alerts()` 对已持仓纪律触发使用期望效用复核：止损是即时风险事件，止盈/减仓需连续确认；纪律卖出期望会被周度参数的 `sell_reliability`、Wilson 胜率下界和卖出后路径优势折减，再和委员会继续持有证据比较。委员会 `HOLD` 不能静默吞掉已确认纪律触发，但纪律参数也不会被当作 100% 可靠的硬卖点。
+- 同一函数会从本轮 `stocks + prices` 构造板块恐慌杀跌保护：同板块至少 3 个有效样本，板块中位跌幅、下跌占比、硬跌幅占比和相对全样本中位数的超额跌幅同时满足时，再用个股相对板块 MAD Z 值判断是否只是跟随板块下跌。命中时只增加 `discipline_review.sector_panic_guard` 和继续持有证据，不修改 `verdict` 或买卖点字段。
 - 未触发当前 `position_exit_plan` 时，强 `SELL/TRIM` 不能直接成为可执行卖出；当天或冷却窗口内已有同标的反向成交时，再次买入必须重新触发回踩、再入场或突破线，并且当前价相对上次成交价穿越对应边界。
 - 板块映射顺序是：东方财富浏览器请求头直连 → AkShare → `data/sector_cache.json` 本地缓存 → `market_monitor_config.json` 的 `sector`/`industry`；`data/` 被 git 忽略，移植时可手动带走缓存。盘中监控会读取同一份 `sector_cache` 覆盖运行时 A 股标的 `sector`，让委员会、窗口和止盈止损参数读取都对齐周更优化的东方财富板块。
 

@@ -441,14 +441,16 @@ class MonitorWindow(MonitorNewsMixin, MonitorSelectionMixin, MonitorTradeMixin, 
         mode_key = str((mode_payload or {}).get("mode") or "active_profit")
         mode_label = str((mode_payload or {}).get("label") or "主动盈利")
         rows = _sort_stock_rows(
-            list(payload.get("rows") or [])
+            _fill_missing_row_sectors(list(payload.get("rows") or []))
             if self.demo
-            else _filter_rows_by_current_config(list(payload.get("rows") or []))
+            else _fill_missing_row_sectors(_filter_rows_by_current_config(list(payload.get("rows") or [])))
         )
         stock_signature = tuple(
             (
                 row.get("symbol"),
                 row.get("name"),
+                row.get("sector"),
+                row.get("industry"),
                 row.get("state"),
                 (row.get("operation") or {}).get("verdict"),
                 _safe_num((row.get("operation") or {}).get("suggested_alloc_cny")),
@@ -602,7 +604,7 @@ class MonitorWindow(MonitorNewsMixin, MonitorSelectionMixin, MonitorTradeMixin, 
 
             url = f"{self.remote_server_url.rstrip('/')}/api/config/monitor_config"
             try:
-                resp = requests.post(url, json=config_data, timeout=10)
+                resp = requests.post(url, json=config_data, timeout=60)
             except requests.exceptions.ConnectionError:
                 messagebox.showwarning("连接失败", f"无法连接到服务器 {url}。\n本地数据已自动保存，无需上传。")
                 return
@@ -1144,14 +1146,18 @@ class MonitorWindow(MonitorNewsMixin, MonitorSelectionMixin, MonitorTradeMixin, 
         tk.Label(mid, text=_fmt_pct(price.get("change_pct")), bg=bg, fg=change_color, font=("Microsoft YaHei UI", 10, "bold")).pack(side=tk.LEFT, padx=(8, 0))
         tk.Label(mid, text=f"{_verdict_signal(op.get('verdict'))} {_compact_verdict_label(op.get('verdict'))}", bg=bg, fg=MUTED, font=("Microsoft YaHei UI", 9)).pack(side=tk.RIGHT)
 
-        bottom = tk.Frame(card, bg=bg)
-        bottom.pack(fill=tk.X, pady=(4, 0))
-        tk.Label(bottom, text=f"买 {_buy_summary(row)}", bg=bg, fg=MUTED, font=("Microsoft YaHei UI", 8)).pack(side=tk.LEFT)
-        tk.Label(bottom, text=f"卖 {_exit_summary(row)}", bg=bg, fg=MUTED, font=("Microsoft YaHei UI", 8)).pack(side=tk.LEFT, padx=(10, 0))
-        tk.Label(bottom, text=f"基 {float(_safe_num(fundamental.get('score'), 50)):.0f}", bg=bg, fg=MUTED, font=("Microsoft YaHei UI", 8)).pack(side=tk.RIGHT)
-        tk.Label(bottom, text=f"持 {_fmt_holding_lots(row)}", bg=bg, fg=MUTED, font=("Microsoft YaHei UI", 8)).pack(side=tk.RIGHT, padx=(0, 10))
+        bottom_meta = tk.Frame(card, bg=bg)
+        bottom_meta.pack(fill=tk.X, pady=(4, 0))
+        tk.Label(bottom_meta, text=_sector_summary(row), bg=bg, fg=MUTED, font=("Microsoft YaHei UI", 8)).pack(side=tk.LEFT)
+        tk.Label(bottom_meta, text=f"基 {float(_safe_num(fundamental.get('score'), 50)):.0f}", bg=bg, fg=MUTED, font=("Microsoft YaHei UI", 8)).pack(side=tk.RIGHT)
+        tk.Label(bottom_meta, text=f"持 {_fmt_holding_lots(row)}", bg=bg, fg=MUTED, font=("Microsoft YaHei UI", 8)).pack(side=tk.RIGHT, padx=(0, 10))
 
-        for widget in (card, top, mid, bottom):
+        bottom_levels = tk.Frame(card, bg=bg)
+        bottom_levels.pack(fill=tk.X, pady=(2, 0))
+        tk.Label(bottom_levels, text=f"买 {_buy_summary(row)}", bg=bg, fg=MUTED, font=("Microsoft YaHei UI", 8)).pack(side=tk.LEFT)
+        tk.Label(bottom_levels, text=f"卖 {_exit_summary(row)}", bg=bg, fg=MUTED, font=("Microsoft YaHei UI", 8)).pack(side=tk.LEFT, padx=(10, 0))
+
+        for widget in (card, top, mid, bottom_meta, bottom_levels):
             widget.bind("<Double-Button-1>", lambda _event, s=symbol: self._open_analysis_dialog(s))
         for widget in card.winfo_children():
             if widget is trade_bar:

@@ -329,9 +329,12 @@ class MonitorAnalysisMixin:
 
         summary_bottom = tk.Frame(summary, bg=_card_bg(row))
         summary_bottom.pack(fill=tk.X, pady=(8, 0))
-        tk.Label(summary_bottom, text=f"买 {_buy_summary(row)}", bg=_card_bg(row), fg=MUTED, font=("Microsoft YaHei UI", 8)).pack(side=tk.LEFT)
-        tk.Label(summary_bottom, text=f"卖 {_exit_summary(row)}", bg=_card_bg(row), fg=MUTED, font=("Microsoft YaHei UI", 8)).pack(side=tk.LEFT, padx=(12, 0))
+        tk.Label(summary_bottom, text=_sector_summary(row), bg=_card_bg(row), fg=MUTED, font=("Microsoft YaHei UI", 8)).pack(side=tk.LEFT)
         tk.Label(summary_bottom, text=f"基 {float(_safe_num(fundamental.get('score'), 50)):.0f}", bg=_card_bg(row), fg=MUTED, font=("Microsoft YaHei UI", 8)).pack(side=tk.RIGHT)
+        summary_levels = tk.Frame(summary, bg=_card_bg(row))
+        summary_levels.pack(fill=tk.X, pady=(4, 0))
+        tk.Label(summary_levels, text=f"买 {_buy_summary(row)}", bg=_card_bg(row), fg=MUTED, font=("Microsoft YaHei UI", 8)).pack(side=tk.LEFT)
+        tk.Label(summary_levels, text=f"卖 {_exit_summary(row)}", bg=_card_bg(row), fg=MUTED, font=("Microsoft YaHei UI", 8)).pack(side=tk.LEFT, padx=(12, 0))
 
     def _resolve_and_analyze_worker(
         self,

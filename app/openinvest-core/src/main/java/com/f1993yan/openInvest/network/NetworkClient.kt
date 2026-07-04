@@ -16,7 +16,8 @@ object NetworkClient {
 
     private val client = OkHttpClient.Builder()
         .connectTimeout(15, TimeUnit.SECONDS)
-        .readTimeout(10, TimeUnit.MINUTES) // Long timeout for SSE stream
+        .writeTimeout(30, TimeUnit.SECONDS)   // Upload timeout for large config payloads
+        .readTimeout(10, TimeUnit.MINUTES)     // Long timeout for SSE stream
         .build()
 
     private val gson = Gson()

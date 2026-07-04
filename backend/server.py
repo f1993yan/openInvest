@@ -45,7 +45,7 @@ try:
 except Exception:
     pass
 
-from fastapi import Body, FastAPI, HTTPException, Query, UploadFile, File
+from fastapi import BackgroundTasks, Body, FastAPI, HTTPException, Query, UploadFile, File
 from fastapi.responses import FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
@@ -975,28 +975,32 @@ async def get_crawler_config():
 
 
 @app.post("/api/config/monitor_config")
-async def import_monitor_config(config: Dict[str, Any] = Body(...)):
-    """导入/覆盖仓位及自选标的配置文件 (market_monitor_config.json)"""
+async def import_monitor_config(background_tasks: BackgroundTasks, config: Dict[str, Any] = Body(...)):
+    """导入/覆盖仓位及自选标的配置文件 (market_monitor_config.json)
+
+    写文件立即返回（~ms），账本重建和快照清理在后台执行，避免客户端超时。
+    """
     try:
         MONITOR_CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
         MONITOR_CONFIG_PATH.write_text(json.dumps(config, ensure_ascii=False, indent=2), encoding="utf-8")
-        try:
-            _ledger = _get_account_ledger()
-            _ledger.initialize_from_monitor_config(config, reset=True)
-            log.info("Ledger re-initialized with new imported monitor config (reset=True)")
-        except Exception as le:
-            log.warning(f"Failed to re-initialize ledger after import: {le}")
-            
-        try:
-            # Delete stale snapshot so that it is rebuilt from the new config
-            from scripts.monitor_window_constants import DEFAULT_SNAPSHOT
-            if DEFAULT_SNAPSHOT.exists():
-                DEFAULT_SNAPSHOT.unlink()
-                log.info("Stale snapshot file deleted after config import")
-        except Exception as se:
-            log.warning(f"Failed to delete stale snapshot file: {se}")
-            
-        return {"ok": True, "message": "Monitor configuration imported successfully"}
+
+        def _rebuild_ledger_and_cleanup():
+            try:
+                _ledger = _get_account_ledger()
+                _ledger.initialize_from_monitor_config(config, reset=True)
+                log.info("Ledger re-initialized with new imported monitor config (reset=True)")
+            except Exception as le:
+                log.warning(f"Failed to re-initialize ledger after import: {le}")
+            try:
+                from scripts.monitor_window_constants import DEFAULT_SNAPSHOT
+                if DEFAULT_SNAPSHOT.exists():
+                    DEFAULT_SNAPSHOT.unlink()
+                    log.info("Stale snapshot file deleted after config import")
+            except Exception as se:
+                log.warning(f"Failed to delete stale snapshot file: {se}")
+
+        background_tasks.add_task(_rebuild_ledger_and_cleanup)
+        return {"ok": True, "message": "Monitor configuration saved, rebuilding ledger in background"}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to save monitor config: {str(e)}")
 

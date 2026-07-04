@@ -29,6 +29,7 @@ dependencies = [
     "portalocker>=3.0",    # fcntl 替代（Windows 兼容文件锁）
     "playwright>=1.40",    # 国内新闻源 headless 浏览器抓取
     "sqlite-vec>=0.1.6",   # 事件层向量精排（SQLite 扩展，不需要独立向量库）
+    "python-multipart>=0.0.32",
 ]
 
 [dependency-groups]

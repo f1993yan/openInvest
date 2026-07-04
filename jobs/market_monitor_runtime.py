@@ -68,6 +68,29 @@ def _clean_sector(value: Any) -> str:
     return "" if text.lower() in {"", "unknown", "none", "null", "-"} or text in {"未分组", "全局"} else text
 
 
+def _symbol_variants(symbol: Any) -> List[str]:
+    text = str(symbol or "").strip().upper()
+    if not text:
+        return []
+    variants = [text]
+    digits = "".join(ch for ch in text if ch.isdigit())
+    if len(digits) == 6:
+        variants.extend([digits, f"SH{digits}", f"SZ{digits}", f"{digits}.SH", f"{digits}.SZ", f"{digits}.SS"])
+    out: List[str] = []
+    for item in variants:
+        if item and item not in out:
+            out.append(item)
+    return out
+
+
+def _sector_lookup(sector_mapping: Dict[str, str], symbol: Any) -> str:
+    for key in _symbol_variants(symbol):
+        sector = _clean_sector(sector_mapping.get(key))
+        if sector:
+            return sector
+    return ""
+
+
 def load_sector_cache_mapping(path: Path = SECTOR_CACHE_PATH) -> Dict[str, str]:
     """Load ignored Eastmoney sector mapping used by weekly optimization."""
     if not path.exists():
@@ -101,7 +124,7 @@ def apply_sector_cache_to_stocks(
     for stock in stocks:
         row = dict(stock)
         symbol = str(row.get("symbol") or "").strip()
-        cached_sector = _clean_sector(sector_mapping.get(symbol))
+        cached_sector = _sector_lookup(sector_mapping, symbol)
         if cached_sector and str(row.get("market", "a")).lower() == "a":
             original_sector = _clean_sector(row.get("sector"))
             if original_sector and original_sector != cached_sector:
@@ -392,6 +415,8 @@ def run_monitor_round():
             # 用 config 里该标的的 market 补上，避免 _is_limit_up_buy_blocked 退化成 "a"
             # 把港股/美股误判 A 股涨停。
             result.setdefault("market", stock.get("market", "a"))
+            result.setdefault("sector", stock.get("sector", ""))
+            result.setdefault("industry", stock.get("industry", ""))
             result = apply_repeated_trade_guard(
                 result,
                 stock=stock,

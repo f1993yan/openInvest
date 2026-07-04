@@ -140,6 +140,17 @@ def _exit_summary(row: Dict[str, Any]) -> str:
     return " ".join(parts[:2]) or "-"
 
 
+def _sector_summary(row: Dict[str, Any]) -> str:
+    op = row.get("operation") or {}
+    discipline = op.get("discipline_review") or {}
+    panic_guard = discipline.get("sector_panic_guard") or {}
+    sector = str(panic_guard.get("sector") or row.get("sector") or row.get("industry") or "").strip()
+    if not sector:
+        return "板块 -"
+    source = "恐慌判定" if panic_guard.get("sector") else "分类"
+    return f"板块 {_short(sector, 12)}（{source}）"
+
+
 def _operation_summary(row: Dict[str, Any]) -> str:
     op = row.get("operation") or {}
     status = str(op.get("status") or row.get("state") or "")
@@ -436,6 +447,7 @@ def _beginner_summary_lines(
         "",
         "你最该先看这几项:",
         f"1. 当前价: {_fmt_price(current)}，今日涨跌 {_fmt_pct(price.get('change_pct'))}。",
+        f"   所属板块: {str(row.get('sector') or row.get('industry') or '-')}。",
         f"2. 理想买点: 回调 {_fmt_price(pullback)}（在当前价 {_fmt_distance(pullback_dist)}）；突破 {_fmt_price(breakout)}（在当前价 {_fmt_distance(breakout_dist)}）。",
         f"3. 风险线: {'持仓纪律' if plan_type == 'a_share_position_exit' else '入场估算'}，止损 {_fmt_price(stop)}（在当前价 {_fmt_distance(stop_dist)}）；止盈 {_fmt_price(take)}（在当前价 {_fmt_distance(take_dist)}）。",
         f"4. 仓位建议: {_fmt_money(alloc)} 元；置信度 {confidence:.0%}；当前{'已有持仓' if row.get('is_holding') else '没有持仓'}。",
@@ -472,6 +484,16 @@ def _beginner_summary_lines(
             f"卖出胜率下界 {_safe_num(discipline_review.get('sell_win_rate_lower')):.0%}，"
             f"卖出后路径优势下界 {_safe_num(discipline_review.get('post_sell_positive_edge_lower')):.0%}。"
         )
+        panic_guard = discipline_review.get("sector_panic_guard") or {}
+        if panic_guard.get("active"):
+            lines.append(
+                f"- 板块恐慌保护: {panic_guard.get('sector') or '同板块'}中位跌幅"
+                f" {_safe_num(panic_guard.get('sector_median_change_pct')):.2f}%，"
+                f"下跌占比 {_safe_num(panic_guard.get('sector_down_ratio')):.0%}；"
+                f"该股相对板块Z值 {_safe_num(panic_guard.get('target_relative_z')):.2f}，"
+                f"不是独立走弱，已增加继续持有证据"
+                f" {_safe_num(panic_guard.get('hold_utility_bonus_pct')):.2f}pct。"
+            )
     if buy_signal_backtest:
         lines.append(f"- {buy_signal_summary_text(buy_signal_backtest)}")
     if one_line and one_line != "-":
@@ -674,6 +696,7 @@ __all__ = [
     "_change_color",
     "_buy_summary",
     "_exit_summary",
+    "_sector_summary",
     "_operation_summary",
     "_llm_review_lots_hint",
     "_verdict_label",

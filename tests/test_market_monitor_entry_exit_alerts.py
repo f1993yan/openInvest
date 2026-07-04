@@ -1,3 +1,4 @@
+import json
 import sys
 import types
 from datetime import datetime
@@ -436,6 +437,43 @@ def test_monitor_window_snapshot_contains_stable_status_fields():
     assert _llm_review_lots_hint(row) == "LLM审核推荐1手"
     assert row["units"] == 200
     assert row["is_holding"] is True
+
+
+def test_monitor_window_snapshot_fills_sector_from_cache_when_config_is_empty(tmp_path, monkeypatch):
+    import jobs.market_monitor_snapshot as snapshot_mod
+
+    cache_path = tmp_path / "sector_cache.json"
+    cache_path.write_text(
+        json.dumps({"mapping": {"600900": "电力行业"}}, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(snapshot_mod, "SECTOR_CACHE_PATH", cache_path)
+
+    snapshot = build_monitor_window_snapshot(
+        round_time="10:30",
+        results=[{"success": True, "symbol": "600900", "name": "长江电力", "market": "a", "verdict": "HOLD"}],
+        actionable=[],
+        prices={"600900": {"price": 10.6, "prev_close": 10.0, "change_pct": 0.2}},
+        stocks=[{"symbol": "600900", "name": "长江电力", "market": "a"}],
+        entry_exit_watch=[],
+        entry_exit_alerts=[],
+        suppressed_alerts=[],
+        cash=10000,
+        total_assets=100000,
+    )
+
+    assert snapshot["rows"][0]["sector"] == "电力行业"
+    assert snapshot["rows"][0]["industry"] == "电力行业"
+
+
+def test_apply_sector_cache_matches_symbol_variants():
+    rows = apply_sector_cache_to_stocks(
+        [{"symbol": "SH600900", "market": "a", "sector": ""}],
+        {"600900": "电力行业"},
+    )
+
+    assert rows[0]["sector"] == "电力行业"
+    assert rows[0]["sector_source"] == "eastmoney_sector_cache"
 
 
 def test_monitor_window_snapshot_can_disable_action_email_flag():
@@ -1225,6 +1263,139 @@ def test_sell_trigger_uses_policy_aware_threshold_below_plain_45():
     assert selected[0]["symbol"] == "600900"
     assert selected[0]["alert_threshold"] < 45.0
     assert selected[0]["alert_score"] >= selected[0]["alert_threshold"]
+
+
+def test_sector_panic_guard_delays_mechanical_stop_when_stock_follows_sector():
+    result = {
+        "success": True,
+        "symbol": "002185",
+        "name": "华天科技",
+        "market": "a",
+        "verdict": "HOLD",
+        "confidence": 0.52,
+        "suggested_alloc_cny": 0,
+        "position_exit_policy": {
+            "max_loss_pct": 4.0,
+            "sell_reliability": 0.8,
+            "sell_win_rate_lower": 0.54,
+            "post_sell_positive_edge_lower": 0.52,
+            "avg_post_sell_missed_rebound_pct": 6.0,
+            "avg_post_sell_avoided_drawdown_pct": 1.5,
+            "avg_post_sell_net_edge_pct": 0.4,
+        },
+    }
+    stocks = [
+        {"symbol": "002185", "sector": "半导体", "position_pct": 8.0, "units": 1600, "cost": 10.0},
+        {"symbol": "688099", "sector": "半导体"},
+        {"symbol": "603986", "sector": "半导体"},
+        {"symbol": "688012", "sector": "半导体"},
+        {"symbol": "600900", "sector": "电力行业"},
+        {"symbol": "601398", "sector": "银行"},
+        {"symbol": "600519", "sector": "白酒"},
+    ]
+    prices = {
+        "002185": {"price": 9.40, "change_pct": -5.4},
+        "688099": {"price": 58.0, "change_pct": -5.8},
+        "603986": {"price": 69.0, "change_pct": -5.2},
+        "688012": {"price": 42.0, "change_pct": -5.6},
+        "600900": {"price": 29.0, "change_pct": -0.2},
+        "601398": {"price": 6.0, "change_pct": 0.1},
+        "600519": {"price": 1400.0, "change_pct": -0.4},
+    }
+    state = {
+        "symbols": {
+            "002185": {
+                "position_exit_plan": {
+                    "effective_stop_price": 9.80,
+                    "hard_stop_price": 9.80,
+                    "entry_price": 10.0,
+                    "units": 1600,
+                    "version": 1,
+                },
+                "last_triggers": [{"side": "sell", "kind": "position_stop", "level": 9.8, "price": 9.5}],
+            }
+        }
+    }
+
+    selected, suppressed = select_optimal_actionable_alerts(
+        results=[result],
+        prices=prices,
+        cash=10000,
+        stocks=stocks,
+        entry_exit_state=state,
+        max_alerts=4,
+    )
+
+    assert selected == []
+    assert suppressed[0]["reason"].startswith("sector_panic_guard:")
+    guard = suppressed[0]["discipline_review"]["sector_panic_guard"]
+    assert guard["active"] is True
+    assert guard["sector"] == "半导体"
+    assert guard["target_relative_z"] >= -1.0
+
+
+def test_sector_panic_guard_does_not_block_idiosyncratic_sector_laggard():
+    result = {
+        "success": True,
+        "symbol": "002185",
+        "name": "华天科技",
+        "market": "a",
+        "verdict": "HOLD",
+        "confidence": 0.52,
+        "suggested_alloc_cny": 0,
+        "position_exit_policy": {
+            "max_loss_pct": 4.0,
+            "sell_reliability": 0.8,
+            "sell_win_rate_lower": 0.58,
+            "post_sell_positive_edge_lower": 0.58,
+            "avg_post_sell_missed_rebound_pct": 1.0,
+            "avg_post_sell_avoided_drawdown_pct": 4.0,
+            "avg_post_sell_net_edge_pct": 3.0,
+        },
+    }
+    stocks = [
+        {"symbol": "002185", "sector": "半导体", "position_pct": 8.0, "units": 1600, "cost": 10.0},
+        {"symbol": "688099", "sector": "半导体"},
+        {"symbol": "603986", "sector": "半导体"},
+        {"symbol": "688012", "sector": "半导体"},
+        {"symbol": "600900", "sector": "电力行业"},
+    ]
+    prices = {
+        "002185": {"price": 9.10, "change_pct": -8.0},
+        "688099": {"price": 58.0, "change_pct": -3.2},
+        "603986": {"price": 69.0, "change_pct": -3.1},
+        "688012": {"price": 42.0, "change_pct": -3.4},
+        "600900": {"price": 29.0, "change_pct": -0.2},
+    }
+    state = {
+        "symbols": {
+            "002185": {
+                "position_exit_plan": {
+                    "effective_stop_price": 9.80,
+                    "hard_stop_price": 9.80,
+                    "entry_price": 10.0,
+                    "units": 1600,
+                    "version": 1,
+                },
+                "last_triggers": [{"side": "sell", "kind": "position_stop", "level": 9.8, "price": 9.4}],
+            }
+        }
+    }
+
+    selected, suppressed = select_optimal_actionable_alerts(
+        results=[result],
+        prices=prices,
+        cash=10000,
+        stocks=stocks,
+        entry_exit_state=state,
+        max_alerts=4,
+    )
+
+    assert suppressed == []
+    assert selected[0]["symbol"] == "002185"
+    guard = selected[0]["discipline_review"]["sector_panic_guard"]
+    assert guard["active"] is False
+    assert guard["reason"] == "target_weaker_than_sector"
 
 
 def test_high_confidence_held_sell_waits_without_current_exit_trigger():

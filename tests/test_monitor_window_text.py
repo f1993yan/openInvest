@@ -1,6 +1,7 @@
 import pandas as pd
 import numpy as np
-from scripts.monitor_window_text import _beginner_summary_lines, _detail_line_style, _operation_summary
+from scripts.monitor_window_text import _beginner_summary_lines, _detail_line_style, _operation_summary, _sector_summary
+from scripts.monitor_window_services import _fill_missing_row_sectors
 
 def test_beginner_summary_lines_includes_chan_analysis(monkeypatch):
     # Prepare mock DataFrame with sufficient rows
@@ -115,6 +116,47 @@ def test_executed_operation_summary_is_stable():
     }
 
     assert _operation_summary(row) == "已执行"
+
+
+def test_sector_summary_prefers_panic_guard_sector():
+    row = {
+        "symbol": "002185",
+        "sector": "电子元件",
+        "operation": {
+            "discipline_review": {
+                "sector_panic_guard": {"sector": "半导体", "active": True}
+            }
+        },
+    }
+
+    assert _sector_summary(row) == "板块 半导体（恐慌判定）"
+
+
+def test_beginner_summary_lines_show_sector(monkeypatch):
+    import utils.market_data_provider
+    monkeypatch.setattr(utils.market_data_provider, "get_history_data", lambda symbol, period="2y": pd.DataFrame())
+
+    row = {
+        "symbol": "002185",
+        "name": "华天科技",
+        "sector": "半导体",
+        "price": {"current": 18.0, "change_pct": -2.1},
+        "operation": {"verdict": "HOLD", "confidence": 0.5, "suggested_alloc_cny": 0},
+    }
+
+    text = "\n".join(_beginner_summary_lines(row))
+
+    assert "所属板块: 半导体" in text
+
+
+def test_fill_missing_row_sectors_uses_cache_for_existing_snapshot():
+    rows = [{"symbol": "SH600900", "name": "长江电力", "sector": "", "industry": ""}]
+
+    filled = _fill_missing_row_sectors(rows, {"600900": "电力行业"})
+
+    assert filled[0]["sector"] == "电力行业"
+    assert filled[0]["industry"] == "电力行业"
+    assert filled[0]["sector_source"] == "eastmoney_sector_cache"
 
 
 def test_low_confidence_boilerplate_is_removed(monkeypatch):

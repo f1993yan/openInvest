@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import math
 import re
+import statistics
 from typing import Any, Dict, List, Optional, Tuple
 
 from jobs.market_monitor_common import _clamp, _safe_num
@@ -33,6 +34,12 @@ SELL_ALERT_COMMITTEE_FLOOR = 34.0
 BUY_ALERT_THRESHOLD = 55.0
 DISCIPLINE_REVIEW_ALERT_SOURCE = "position_exit_discipline_review"
 DISCIPLINE_EXECUTION_FRICTION_PCT = 0.15
+SECTOR_PANIC_MIN_SAMPLE = 3
+SECTOR_PANIC_DOWN_RATIO = 2 / 3
+SECTOR_PANIC_HARD_DOWN_RATIO = 0.20
+SECTOR_PANIC_MIN_MEDIAN_DROP_PCT = 3.0
+SECTOR_PANIC_MIN_EXCESS_DROP_PCT = 1.0
+SECTOR_PANIC_TARGET_WEAK_Z = -1.0
 
 
 def _has_llm_hold_conflict(result: Dict[str, Any]) -> bool:
@@ -582,16 +589,25 @@ def _discipline_sell_review(
     triggers: List[Dict[str, Any]],
     confirmed: bool,
     confirmation_reason: str,
+    sector_panic_guard: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     policy = result.get("position_exit_policy") or {}
     kind = _sell_trigger_kind(triggers)
+    panic_guard = dict(sector_panic_guard or {})
     sell_edge = _discipline_sell_expected_edge_pct(result, triggers=triggers)
     continuation_edge = _discipline_continuation_edge_pct(result, stock=stock, price_info=price_info)
+    if panic_guard.get("active"):
+        continuation_edge = round(
+            continuation_edge + _safe_num(panic_guard.get("hold_utility_bonus_pct")),
+            4,
+        )
     friction = 0.0 if kind in {"position_stop", "cost_stop_loss", "stop_loss"} else DISCIPLINE_EXECUTION_FRICTION_PCT
     net_edge = sell_edge - continuation_edge - friction
     execute = bool(confirmed and net_edge > 0)
     if kind in {"position_stop", "cost_stop_loss", "stop_loss"} and confirmed:
         execute = net_edge > -1.0
+    if panic_guard.get("active") and confirmed:
+        execute = net_edge > _safe_num(panic_guard.get("required_edge_pct"), 0.35)
     return {
         "model": "triggered_exit_expected_utility_v1",
         "committee_verdict": str(result.get("verdict") or "").upper(),
@@ -609,11 +625,20 @@ def _discipline_sell_review(
         "post_sell_positive_edge_lower": round(_safe_num(policy.get("post_sell_positive_edge_lower")), 4),
         "sell_utility_adjustment_pct": round(_safe_num(policy.get("sell_utility_adjustment_pct")), 4),
         "avg_post_sell_net_edge_pct": round(_safe_num(policy.get("avg_post_sell_net_edge_pct")), 4),
+        "sector_panic_guard": panic_guard,
         "decision": "execute" if execute else "review",
     }
 
 
 def _discipline_wait_reason(review: Dict[str, Any]) -> str:
+    guard = review.get("sector_panic_guard") or {}
+    if guard.get("active") and review.get("decision") != "execute":
+        return (
+            "sector_panic_guard:"
+            f"{review.get('expected_utility_edge_pct', 0):.2f}:"
+            f"{guard.get('sector', '')}:"
+            f"{guard.get('panic_score', 0)}"
+        )
     return (
         "discipline_review_wait:"
         f"{review.get('expected_utility_edge_pct', 0):.2f}:"
@@ -646,6 +671,7 @@ def _build_discipline_sell_candidate(
     entry_exit_state: Dict[str, Any],
     trading_mode: str,
     same_day_bought_units_by_symbol: Optional[Dict[str, float]] = None,
+    sector_panic_context: Optional[Dict[str, Dict[str, Any]]] = None,
 ) -> Optional[Dict[str, Any]]:
     symbol = str(result.get("symbol") or stock.get("symbol") or "").upper()
     if not symbol or not _is_existing_position(stock) or not any(t.get("side") == "sell" for t in triggers):
@@ -662,6 +688,12 @@ def _build_discipline_sell_candidate(
         triggers=triggers,
         confirmed=confirmed,
         confirmation_reason=confirmation_reason,
+        sector_panic_guard=_sector_panic_guard_for_result(
+            result,
+            stock,
+            price_info,
+            sector_panic_context,
+        ),
     )
     kind = str(review.get("trigger_kind") or "")
     lot_size = _alert_lot_size(stock, result)
@@ -727,6 +759,14 @@ def _sell_candidate_wait_label(reason: str) -> str:
         if edge_match:
             return f"{base}（净效用{edge_match.group(1)}pct）"
         return base
+    if "sector_panic_guard" in text:
+        parts = text.split(":")
+        edge = parts[1] if len(parts) > 1 else ""
+        sector = parts[2] if len(parts) > 2 else ""
+        base = "板块共振杀跌，暂缓机械止损"
+        if sector:
+            base = f"{sector}板块共振杀跌，暂缓机械止损"
+        return f"{base}（净效用{edge}pct）" if edge else base
     if "same_day_a_share_t1_sell_blocked" in text:
         base = "A股当天买入部分不可当天卖出"
     elif "waiting_for_current_exit_trigger" in text:
@@ -846,6 +886,162 @@ def _existing_sector_exposure(stocks: List[Dict[str, Any]]) -> Dict[str, float]:
         sector = _stock_sector(stock)
         exposure[sector] = exposure.get(sector, 0.0) + _safe_num(stock.get("position_pct"))
     return exposure
+
+
+def _robust_scale(values: List[float]) -> float:
+    if len(values) < 2:
+        return 1.0
+    center = statistics.median(values)
+    deviations = [abs(v - center) for v in values]
+    mad = statistics.median(deviations)
+    if mad > 0:
+        return max(1.0, 1.4826 * mad)
+    try:
+        return max(1.0, statistics.pstdev(values))
+    except statistics.StatisticsError:
+        return 1.0
+
+
+def _price_change_pct_for_symbol(symbol: str, prices: Dict[str, Dict[str, Any]]) -> Optional[float]:
+    row = prices.get(symbol.upper()) or prices.get(symbol)
+    if not row:
+        return None
+    value = row.get("change_pct")
+    if value is None or value == "":
+        return None
+    change = _safe_num(value)
+    if not math.isfinite(change):
+        return None
+    return change
+
+
+def _build_sector_panic_context(
+    *,
+    stocks: List[Dict[str, Any]],
+    prices: Dict[str, Dict[str, Any]],
+) -> Dict[str, Dict[str, Any]]:
+    """Detect broad sector capitulation from the current monitored universe.
+
+    The guard intentionally uses robust cross-sectional statistics instead of a
+    single hard price line: a sector must fall together, fall more than the
+    monitored market median, and the held stock must not be materially weaker
+    than its own sector.  With fewer than three valid sector samples the guard
+    is disabled because the math would be too noisy.
+    """
+    changes_by_symbol: Dict[str, float] = {}
+    sector_members: Dict[str, List[Tuple[str, float]]] = {}
+    market_changes: List[float] = []
+    for stock in stocks:
+        symbol = str(stock.get("symbol") or "").upper()
+        if not symbol:
+            continue
+        change = _price_change_pct_for_symbol(symbol, prices)
+        if change is None:
+            continue
+        sector = _stock_sector(stock)
+        changes_by_symbol[symbol] = change
+        sector_members.setdefault(sector, []).append((symbol, change))
+        market_changes.append(change)
+
+    if not market_changes:
+        return {}
+    market_median = statistics.median(market_changes)
+    context: Dict[str, Dict[str, Any]] = {}
+    for sector, members in sector_members.items():
+        if sector == "UNKNOWN" or len(members) < SECTOR_PANIC_MIN_SAMPLE:
+            continue
+        changes = [change for _, change in members]
+        sector_median = statistics.median(changes)
+        sector_scale = _robust_scale(changes)
+        down_ratio = sum(1 for change in changes if change <= -2.5) / len(changes)
+        hard_down_ratio = sum(1 for change in changes if change <= -5.0) / len(changes)
+        excess_drop_pct = max(0.0, market_median - sector_median)
+        is_sector_panic = (
+            sector_median <= -SECTOR_PANIC_MIN_MEDIAN_DROP_PCT
+            and down_ratio >= SECTOR_PANIC_DOWN_RATIO
+            and (
+                hard_down_ratio >= SECTOR_PANIC_HARD_DOWN_RATIO
+                or excess_drop_pct >= SECTOR_PANIC_MIN_EXCESS_DROP_PCT
+            )
+        )
+        if not is_sector_panic:
+            continue
+        panic_score = _clamp(
+            0.35 * min(abs(sector_median) / 6.0, 1.0)
+            + 0.30 * down_ratio
+            + 0.20 * min(hard_down_ratio / 0.50, 1.0)
+            + 0.15 * min(excess_drop_pct / 4.0, 1.0),
+            0.0,
+            1.0,
+        )
+        for symbol, change in members:
+            relative_z = (change - sector_median) / sector_scale
+            context[symbol] = {
+                "active": relative_z >= SECTOR_PANIC_TARGET_WEAK_Z,
+                "sector": sector,
+                "sample_count": len(members),
+                "market_median_change_pct": round(market_median, 4),
+                "sector_median_change_pct": round(sector_median, 4),
+                "sector_down_ratio": round(down_ratio, 4),
+                "sector_hard_down_ratio": round(hard_down_ratio, 4),
+                "sector_excess_drop_pct": round(excess_drop_pct, 4),
+                "target_change_pct": round(change, 4),
+                "target_relative_z": round(relative_z, 4),
+                "panic_score": round(panic_score, 4),
+                "reason": "sector_capitulation_not_idiosyncratic"
+                if relative_z >= SECTOR_PANIC_TARGET_WEAK_Z
+                else "target_weaker_than_sector",
+            }
+    return context
+
+
+def _sector_panic_guard_for_result(
+    result: Dict[str, Any],
+    stock: Dict[str, Any],
+    price_info: Dict[str, Any],
+    sector_panic_context: Optional[Dict[str, Dict[str, Any]]],
+) -> Dict[str, Any]:
+    symbol = str(result.get("symbol") or stock.get("symbol") or "").upper()
+    base = dict((sector_panic_context or {}).get(symbol) or {})
+    if not base:
+        return {}
+    if not base.get("active"):
+        return {**base, "hold_utility_bonus_pct": 0.0, "required_edge_pct": 0.0}
+
+    verdict = str(result.get("verdict") or "").upper()
+    confidence = _safe_num(result.get("confidence"))
+    price = _safe_num(price_info.get("price"))
+    pressure = _sell_position_pressure(result, stock, price)
+    if verdict == "SELL" and confidence >= 0.72 and pressure >= 0.45:
+        return {
+            **base,
+            "active": False,
+            "reason": "committee_hard_sell_overrides_sector_panic_guard",
+            "hold_utility_bonus_pct": 0.0,
+            "required_edge_pct": 0.0,
+            "sell_pressure": round(pressure, 4),
+        }
+
+    policy = result.get("position_exit_policy") or {}
+    reliability = _sell_policy_reliability(policy)
+    missed_rebound = max(0.0, _safe_num(policy.get("avg_post_sell_missed_rebound_pct")))
+    panic_score = _safe_num(base.get("panic_score"))
+    sector_excess = _safe_num(base.get("sector_excess_drop_pct"))
+    sector_median = abs(_safe_num(base.get("sector_median_change_pct")))
+    hard_down_ratio = _safe_num(base.get("sector_hard_down_ratio"))
+
+    shock_cost = 0.35 * sector_excess + 0.12 * sector_median * hard_down_ratio
+    rebound_cost = reliability * min(missed_rebound, 6.0)
+    hold_bonus = _clamp(panic_score * (shock_cost + 0.45 * rebound_cost), 0.0, 3.5)
+    required_edge = _clamp(0.15 + 0.35 * panic_score + 0.10 * hard_down_ratio, 0.15, 0.65)
+    return {
+        **base,
+        "hold_utility_bonus_pct": round(hold_bonus, 4),
+        "required_edge_pct": round(required_edge, 4),
+        "sell_pressure": round(pressure, 4),
+        "policy_missed_rebound_pct": round(missed_rebound, 4),
+        "policy_reliability": round(reliability, 4),
+    }
 
 
 def _option_risk_penalty(
@@ -1057,6 +1253,7 @@ def select_optimal_actionable_alerts(
     mode = normalize_trading_mode(trading_mode)
     mode_label = trading_mode_label(mode)
     existing_sector_pct = _existing_sector_exposure(stocks)
+    sector_panic_context = _build_sector_panic_context(stocks=stocks, prices=prices)
     # If the caller does not provide total assets, treat available cash as
     # roughly a 20% cash sleeve. This keeps legacy tests/callers from being
     # over-penalized as if every buy consumed nearly the whole portfolio.
@@ -1103,6 +1300,7 @@ def select_optimal_actionable_alerts(
             entry_exit_state=entry_exit_state,
             trading_mode=mode,
             same_day_bought_units_by_symbol=same_day_bought_units_by_symbol,
+            sector_panic_context=sector_panic_context,
         )
 
         if verdict in {"HOLD", "REDUCE", "UNCLEAR"} or abs(alloc) <= 0:

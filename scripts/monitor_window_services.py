@@ -19,6 +19,9 @@ from scripts.monitor_window_constants import (
 )
 from jobs.trading_mode import DEFAULT_TRADING_MODE, normalize_trading_mode, trading_mode_label, trading_mode_payload
 
+SECTOR_CACHE_PATH = ROOT / "data" / "sector_cache.json"
+
+
 def _safe_num(value: Any, default: float = 0.0) -> float:
     try:
         if value is None:
@@ -26,6 +29,69 @@ def _safe_num(value: Any, default: float = 0.0) -> float:
         return float(value)
     except (TypeError, ValueError):
         return default
+
+
+def _clean_sector(value: Any) -> str:
+    text = str(value or "").strip()
+    return "" if text.lower() in {"", "unknown", "none", "null", "-"} or text in {"未分组", "全局"} else text
+
+
+def _symbol_variants(symbol: Any) -> List[str]:
+    text = str(symbol or "").strip().upper()
+    if not text:
+        return []
+    variants = [text]
+    digits = "".join(ch for ch in text if ch.isdigit())
+    if len(digits) == 6:
+        variants.extend([digits, f"SH{digits}", f"SZ{digits}", f"{digits}.SH", f"{digits}.SZ", f"{digits}.SS"])
+    out: List[str] = []
+    for item in variants:
+        if item and item not in out:
+            out.append(item)
+    return out
+
+
+def _load_sector_cache(path: Path = SECTOR_CACHE_PATH) -> Dict[str, str]:
+    if not path.exists():
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    mapping = data.get("mapping") if isinstance(data, dict) else {}
+    if not isinstance(mapping, dict):
+        return {}
+    return {
+        str(symbol).strip().upper(): _clean_sector(sector)
+        for symbol, sector in mapping.items()
+        if str(symbol).strip() and _clean_sector(sector)
+    }
+
+
+def _sector_from_cache(symbol: Any, cache: Dict[str, str]) -> str:
+    for key in _symbol_variants(symbol):
+        sector = _clean_sector(cache.get(key))
+        if sector:
+            return sector
+    return ""
+
+
+def _fill_missing_row_sectors(rows: List[Dict[str, Any]], cache: Optional[Dict[str, str]] = None) -> List[Dict[str, Any]]:
+    cache = cache if cache is not None else _load_sector_cache()
+    if not cache:
+        return rows
+    out: List[Dict[str, Any]] = []
+    for row in rows:
+        item = dict(row)
+        sector = _clean_sector(item.get("sector")) or _clean_sector(item.get("industry"))
+        if not sector:
+            sector = _sector_from_cache(item.get("symbol"), cache)
+            if sector:
+                item["sector"] = sector
+                item["industry"] = _clean_sector(item.get("industry")) or sector
+                item.setdefault("sector_source", "eastmoney_sector_cache")
+        out.append(item)
+    return out
 
 
 def _stop_background_services() -> None:
@@ -1025,6 +1091,7 @@ __all__ = [
     "_fmt_price",
     "_fmt_money",
     "_fmt_cash_line",
+    "_fill_missing_row_sectors",
     "_correct_real_cash",
     "_current_trading_mode",
     "_coerce_bool",

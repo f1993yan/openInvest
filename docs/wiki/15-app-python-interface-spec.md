@@ -104,7 +104,9 @@ def run_committee_local(
 - Python 侧可能额外返回 `trim_reason`、`reentry_price`、`reentry_condition`、`expected_path` 等解释字段；客户端应按可选字段处理。风控型减仓（如 `stop_loss/bearish/risk/drawdown/exit_policy`）不要求买回点，战术型减仓才要求低于现价的 `reentry_price`。
 - `trading_mode` 是新增尾部可选参数，旧版 App 不传时仍按 `active_profit` 执行。该参数只进入手机本地 Python 的委员会上下文与提醒优化口径，不改变 `verdict`、`suggested_alloc_cny` 等既有字段语义。
 - 桌面/告警快照可能额外包含 `alert_source="position_exit_discipline_review"`、`committee_verdict` 和 `discipline_review`。这些字段只解释“持仓纪律线触发后，历史胜率折减的卖出期望是否压过继续持有证据”，不改变 `run_committee_local` 的参数签名，也不新增 verdict 枚举；旧版 App 可以安全忽略。
+- `discipline_review` 可能额外包含 `sector_panic_guard`。该字段只说明“同板块共振杀跌且个股未显著弱于板块时，是否暂缓机械止损”，包含板块中位跌幅、下跌占比、个股相对板块 Z 值和追加的继续持有证据；客户端应按可选解释字段处理。
 - 监控快照的候选/抑制原因可能出现 `sell_waiting_for_current_exit_trigger`、`recent_opposite_real_trade_without_new_entry_exit_trigger` 或 `recent_opposite_real_trade_without_price_progress`。它们表示“没有当前卖出纪律触发”或“刚发生反向成交，重新买回/卖出还没有穿越对应价格线”，只用于解释提醒层为什么暂不升级为可执行操作。
+- 远端配置上传 `POST /api/config/monitor_config` 会先落盘配置并立即返回；账本重建和旧快照清理在服务端后台执行，避免大配置上传时客户端等待超时。Android 网络层应保留较长读超时用于 SSE，同时配置独立写超时用于上传配置 payload。
 
 #### 2.1.3 失败返回 JSON 结构 (`success: false`)
 ```json

@@ -6,9 +6,83 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-from jobs.market_monitor_common import LATEST_WINDOW_PATH, REPORT_DIR, log, _fmt_price, _safe_num
+from jobs.market_monitor_common import LATEST_WINDOW_PATH, REPORT_DIR, _PROJECT_ROOT, log, _fmt_price, _safe_num
 from jobs.market_monitor_alerts import _has_llm_hold_conflict, _suppressed_reasons_by_symbol
 from jobs.trading_mode import DEFAULT_TRADING_MODE, trading_mode_payload
+
+SECTOR_CACHE_PATH = _PROJECT_ROOT / "data" / "sector_cache.json"
+
+
+def _clean_sector(value: Any) -> str:
+    text = str(value or "").strip()
+    return "" if text.lower() in {"", "unknown", "none", "null", "-"} or text in {"未分组", "全局"} else text
+
+
+def _symbol_variants(symbol: Any) -> List[str]:
+    text = str(symbol or "").strip().upper()
+    if not text:
+        return []
+    variants = [text]
+    digits = "".join(ch for ch in text if ch.isdigit())
+    if len(digits) == 6:
+        variants.extend([digits, f"SH{digits}", f"SZ{digits}", f"{digits}.SH", f"{digits}.SZ", f"{digits}.SS"])
+    out: List[str] = []
+    for item in variants:
+        if item and item not in out:
+            out.append(item)
+    return out
+
+
+def _read_sector_cache(path: Optional[Path] = None) -> Dict[str, str]:
+    path = path or SECTOR_CACHE_PATH
+    if not path.exists():
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    mapping = data.get("mapping") if isinstance(data, dict) else {}
+    if not isinstance(mapping, dict):
+        return {}
+    return {
+        str(symbol).strip().upper(): _clean_sector(sector)
+        for symbol, sector in mapping.items()
+        if str(symbol).strip() and _clean_sector(sector)
+    }
+
+
+def _sector_from_cache(symbol: Any, sector_cache: Dict[str, str]) -> str:
+    for key in _symbol_variants(symbol):
+        sector = _clean_sector(sector_cache.get(key))
+        if sector:
+            return sector
+    return ""
+
+
+def _resolve_row_sector(
+    symbol: str,
+    *,
+    stock: Dict[str, Any],
+    result: Dict[str, Any],
+    watch_row: Dict[str, Any],
+    sector_cache: Dict[str, str],
+) -> Tuple[str, str]:
+    sector = (
+        _clean_sector(stock.get("sector"))
+        or _clean_sector(result.get("sector"))
+        or _clean_sector(watch_row.get("sector"))
+        or _sector_from_cache(symbol, sector_cache)
+        or _clean_sector(stock.get("industry"))
+        or _clean_sector(result.get("industry"))
+        or _clean_sector(watch_row.get("industry"))
+    )
+    industry = (
+        _clean_sector(stock.get("industry"))
+        or _clean_sector(result.get("industry"))
+        or _clean_sector(watch_row.get("industry"))
+        or sector
+    )
+    return sector, industry
 
 
 def _suppressed_details_by_symbol(suppressed_alerts: List[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
@@ -144,6 +218,7 @@ def build_monitor_window_snapshot(
     actionable_by_symbol = {str(row.get("symbol") or "").upper(): row for row in actionable}
     suppressed_by_symbol = _suppressed_reasons_by_symbol(suppressed_alerts)
     suppressed_details = _suppressed_details_by_symbol(suppressed_alerts)
+    sector_cache = _read_sector_cache()
 
     symbols = sorted(set(stock_by_symbol) | set(result_by_symbol) | set(price_by_symbol) | set(watch_by_symbol))
     rows: List[Dict[str, Any]] = []
@@ -197,12 +272,19 @@ def build_monitor_window_snapshot(
                 "labels": suppressed_by_symbol.get(symbol, []),
             }
         operation = _operation_detail(result, row, actionable_by_symbol, suppressed_context)
+        sector, industry = _resolve_row_sector(
+            symbol,
+            stock=stock,
+            result=result,
+            watch_row=row,
+            sector_cache=sector_cache,
+        )
         rows.append({
             "symbol": symbol,
             "name": result.get("name") or stock.get("name") or price_info.get("name") or symbol,
             "market": result.get("market") or stock.get("market", "a"),
-            "sector": stock.get("sector", ""),
-            "industry": stock.get("industry", ""),
+            "sector": sector,
+            "industry": industry,
             "min_lot_size": int(_safe_num(stock.get("min_lot_size"), 100) or 100),
             "units": round(units, 4),
             "is_holding": is_holding,
