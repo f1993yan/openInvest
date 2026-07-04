@@ -1,5 +1,28 @@
 # Changelog
 
+## Unreleased (2026-07-04)
+
+### Features
+
+* **app:** Android/Kotlin 网络模型、Chaquopy 本地调用封装和股票卡片支持展示 `technical.ma20`、`technical.ma120` 与 `technical.atr_pct`；Python wrapper 增加 `resolved_snapshot` 兜底，确保 App、桌面窗口和快照字段缺失时仍能解析最近一次可用技术指标。
+* **monitor:** 新增板块恐慌性杀跌保护和上传链路加固；已持仓纪律复核会识别同板块共振下跌、个股相对板块 MAD Z 值和继续持有证据，避免把板块级急跌机械解读成个股必须止损。
+
+### Improvements
+
+* **monitor-window:** 配置兜底快照里的 `technical.ma20/ma120/atr_pct` 改为先读委员会/监控缓存，缺失时只读本地 `db/market_data.db` 计算；桌面窗口刷新不再调用历史行情 provider，不触发联网、行情同步或 DB 写入。
+* **market-data:** A 股实时与历史行情优先使用腾讯 `qt` 接口，保留新浪作为实时行情兜底，降低单一行情源失败导致窗口和委员会缺价的概率。
+* **sync:** 支持完整配置集与 SQLite 数据库的无缝同步，为迁移到另一台电脑时同步持仓配置、周度参数和本地账本数据提供统一路径。
+* **alerts:** 强化买卖提醒和交易护栏：现金/风险约束、反向交易重新触发价格线、涨停买入拦截、通知分级和执行状态展示保持同一套口径。
+
+### Bug Fixes
+
+* **db:** 修复空 ledger 同步时误清空或覆盖 config 的风险；当账本没有可同步持仓时保留现有配置，避免迁移或启动阶段把真实持仓快照冲掉。
+
+### Docs
+
+* **wiki/readme:** 按最近 git log 重新补充 7 月 4 日的 App 技术指标展示、主窗口只读技术指标兜底、板块恐慌保护、上传加固、ledger 空同步保护和行情源切换说明。
+* **app-interface:** 明确 `technical.ma20/ma120/atr_pct`、`resolved_snapshot` 和 `sector_panic_guard` 都是向后兼容的可选字段；旧 App 可忽略，新 App 可用于卡片展示和风险解释。
+
 ## Unreleased (2026-06-27)
 
 ### Improvements
@@ -14,7 +37,6 @@
 * **exit-policy:** 周度板块映射改为多源合并，东方财富直连/AkShare 只返回部分标的时继续用 `data/sector_cache.json` 和本地配置补缺；新增 `sample_quality` 并对薄样本板块收缩卖出效用，减少“未分组”和单票过拟合。
 * **monitor-window:** 双击标的单独运行委员会分析后，会同步更新主窗口行、操作优先级排序、最后更新时间和 `data/market_monitor/latest_window.json`；明确 `SELL + 负金额 + 已持仓` 直接进入执行提醒，普通 `TRIM` 仍保持待确认。
 * **monitor-window:** 委员会详情弹窗改为按信息优先级渲染：最高风险内容红色加粗，主要正向证据绿色加粗，背景与辅助信息灰色显示，并删除低价值泛化提醒。
-* **monitor-window:** 配置兜底快照里的 `technical.ma20/ma120/atr_pct` 改为先读委员会/监控缓存，缺失时只读本地 `db/market_data.db` 计算；桌面窗口刷新不再调用历史行情 provider，不触发联网、行情同步或 DB 写入。
 * **monitor-window:** 桌面窗口新增真实账户现金/T+2修正入口，写入路径统一为 `AccountLedger(real).correct_cash()`，再由 ledger 即时同步本地配置和窗口快照。
 * **market-monitor:** 新增交易模式 `主动盈利`、`现金回收`、`主动避险`；模式只影响提醒优化层的现金保留、买入阈值、买入手数和卖出执行门槛，不改委员会原始 verdict 和接口旧字段。
 * **sell-alerts:** 已持仓 A 股新增 `position_exit_discipline_review` 纪律复核路径；止损即时复核，止盈/减仓连续确认后按“历史胜率折减后的纪律卖出期望 - 委员会继续持有证据 - 交易摩擦”决定是否进入执行提醒，避免 `HOLD` 静默吞掉已确认纪律触发，也避免把止盈止损线当成 100% 可靠的机械卖点。
@@ -30,7 +52,6 @@
 
 * **wiki/readme:** 补充 TRIM 类型边界、卖出提醒模型、单标的手动委员会分析回写主窗口快照、详情弹窗颜色语义和 App 接口兼容说明。
 * **wiki/readme:** 补充交易模式、ledger-first 现金修正和模式字段向后兼容说明。
-* **wiki/readme:** 补充主窗口技术指标来源顺序：快照/委员会缓存优先，本地 `market_data.db` 只读兜底，避免 UI 刷新路径拉历史行情。
 * **wiki/readme:** 补充周度卖出效用参数的 62 天校准、Wilson 下界收缩和“只影响已有持仓、不影响入场点、不破坏 App 接口”的边界。
 * **wiki/readme:** 补充行业映射多源补缺和 `sample_quality` 对卖出效用的影响。
 * **wiki/readme:** 补充持仓纪律复核的期望效用公式、历史胜率可靠性折减和 App 可选字段兼容说明。

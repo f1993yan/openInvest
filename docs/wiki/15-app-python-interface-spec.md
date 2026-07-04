@@ -102,6 +102,8 @@ def run_committee_local(
 - `verdict` 枚举保持不变，只能是 `BUY, ACCUMULATE, HOLD, WAIT, TRIM, SELL`。
 - `suggested_alloc_cny` 语义保持不变：正数表示买入/加仓，负数表示卖出/减仓。
 - Python 侧可能额外返回 `trim_reason`、`reentry_price`、`reentry_condition`、`expected_path` 等解释字段；客户端应按可选字段处理。风控型减仓（如 `stop_loss/bearish/risk/drawdown/exit_policy`）不要求买回点，战术型减仓才要求低于现价的 `reentry_price`。
+- Python 侧和监控快照可能额外返回 `technical.ma20`、`technical.ma120`、`technical.atr_pct`，或在 `entry_exit_points` 中返回 `atr_pct`。这些字段用于 App/桌面卡片展示均线、波动率和风险线，不改变 `verdict`、`suggested_alloc_cny`、`entry_exit_points` 的既有语义；旧版客户端可以忽略。
+- App 本地 wrapper 可使用 `resolved_snapshot` 作为展示兜底：当最新委员会结果缺少技术指标时，优先复用监控快照或最近缓存中的 `technical/entry_exit_points`。该兜底只补展示字段，不代表重新运行委员会，也不应触发行情同步。
 - `trading_mode` 是新增尾部可选参数，旧版 App 不传时仍按 `active_profit` 执行。该参数只进入手机本地 Python 的委员会上下文与提醒优化口径，不改变 `verdict`、`suggested_alloc_cny` 等既有字段语义。
 - 桌面/告警快照可能额外包含 `alert_source="position_exit_discipline_review"`、`committee_verdict` 和 `discipline_review`。这些字段只解释“持仓纪律线触发后，历史胜率折减的卖出期望是否压过继续持有证据”，不改变 `run_committee_local` 的参数签名，也不新增 verdict 枚举；旧版 App 可以安全忽略。
 - `discipline_review` 可能额外包含 `sector_panic_guard`。该字段只说明“同板块共振杀跌且个股未显著弱于板块时，是否暂缓机械止损”，包含板块中位跌幅、下跌占比、个股相对板块 Z 值和追加的继续持有证据；客户端应按可选解释字段处理。
