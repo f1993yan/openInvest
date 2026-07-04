@@ -134,6 +134,7 @@ def build_monitor_window_snapshot(
     total_assets: float,
     t2_pending_cash: float = 0.0,
     trading_mode: str = DEFAULT_TRADING_MODE,
+    monitor_action_email_enabled: bool = True,
 ) -> Dict[str, Any]:
     """Build the stable monitor-window payload consumed by the desktop UI."""
     result_by_symbol = {str(r.get("symbol") or "").upper(): r for r in results if r}
@@ -259,6 +260,7 @@ def build_monitor_window_snapshot(
         "generated_at": datetime.now().isoformat(timespec="seconds"),
         "round_time": round_time,
         "trading_mode": trading_mode_payload(trading_mode),
+        "monitor_action_email_enabled": bool(monitor_action_email_enabled),
         "cash_cny": round(available_cash, 2),
         "available_cash_cny": round(available_cash, 2),
         "t2_pending_cash_cny": round(pending_cash, 2),

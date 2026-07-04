@@ -108,6 +108,50 @@ def _current_trading_mode() -> Dict[str, str]:
         return trading_mode_payload(DEFAULT_TRADING_MODE)
 
 
+def _coerce_bool(value: Any, default: bool = False) -> bool:
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return default
+    if isinstance(value, (int, float)):
+        return value != 0
+    text = str(value).strip().lower()
+    if text in {"1", "true", "yes", "y", "on", "enable", "enabled", "开", "开启"}:
+        return True
+    if text in {"0", "false", "no", "n", "off", "disable", "disabled", "关", "关闭"}:
+        return False
+    return default
+
+
+def _current_action_email_enabled() -> bool:
+    try:
+        from jobs.market_monitor import load_config
+
+        config = load_config()
+        return _coerce_bool(config.get("monitor_action_email_enabled"), True)
+    except Exception:
+        return True
+
+
+def _set_action_email_enabled(enabled: bool) -> bool:
+    value = bool(enabled)
+    from jobs.market_monitor import CONFIG_PATH, load_config
+
+    config = load_config()
+    config["monitor_action_email_enabled"] = value
+    CONFIG_PATH.write_text(json.dumps(config, ensure_ascii=False, indent=2), encoding="utf-8")
+    snapshot_path = ROOT / "data" / "market_monitor" / "latest_window.json"
+    try:
+        payload = json.loads(snapshot_path.read_text(encoding="utf-8")) if snapshot_path.exists() else {}
+    except Exception:
+        payload = {}
+    if isinstance(payload, dict) and payload:
+        payload["monitor_action_email_enabled"] = value
+        payload["message"] = f"执行邮件已{'开启' if value else '关闭'}"
+        _write_snapshot(snapshot_path, payload)
+    return value
+
+
 def _set_trading_mode(mode: str) -> Dict[str, str]:
     normalized = normalize_trading_mode(mode)
     from jobs.market_monitor import CONFIG_PATH, load_config
@@ -115,11 +159,15 @@ def _set_trading_mode(mode: str) -> Dict[str, str]:
     config = load_config()
     config["trading_mode"] = normalized
     CONFIG_PATH.write_text(json.dumps(config, ensure_ascii=False, indent=2), encoding="utf-8")
-    payload = _load_snapshot(ROOT / "data" / "market_monitor" / "latest_window.json")
-    if payload:
+    snapshot_path = ROOT / "data" / "market_monitor" / "latest_window.json"
+    try:
+        payload = json.loads(snapshot_path.read_text(encoding="utf-8")) if snapshot_path.exists() else {}
+    except Exception:
+        payload = {}
+    if isinstance(payload, dict) and payload:
         payload["trading_mode"] = trading_mode_payload(normalized)
         payload["message"] = f"交易模式已切换为{trading_mode_label(normalized)}"
-        _write_snapshot(ROOT / "data" / "market_monitor" / "latest_window.json", payload)
+        _write_snapshot(snapshot_path, payload)
     return trading_mode_payload(normalized)
 
 
@@ -187,7 +235,7 @@ def _operation_direction(row: Dict[str, Any]) -> str:
     return "BUY"
 
 
-def _execute_user_trade_from_row(row: Dict[str, Any], lots: float) -> str:
+def _execute_user_trade_from_row(row: Dict[str, Any], lots: float) -> Dict[str, Any]:
     symbol = str(row.get("symbol") or "").strip()
     if not symbol:
         raise ValueError("缺少标的代码")
@@ -218,7 +266,10 @@ def _execute_user_trade_from_row(row: Dict[str, Any], lots: float) -> str:
         note="monitor_window_user_confirmed",
     )
     name = price_info.get("name") or row.get("name") or symbol
-    return f"已按最新价记账: {name} {trade.direction} {trade.units:.0f}股 @ {trade.price:.2f}"
+    return {
+        "message": f"已按最新价记账: {name} {trade.direction} {trade.units:.0f}股 @ {trade.price:.2f}",
+        "trade": trade.__dict__,
+    }
 
 
 def _execute_user_trade_manual(symbol: str, direction: str, lots: int, lot_size: int = 100) -> str:
@@ -475,6 +526,7 @@ def _load_config_snapshot(message: str = "", *, source_path: Optional[Path] = No
         "generated_at": _file_timestamp(timestamp_path),
         "round_time": "config",
         "trading_mode": trading_mode_payload(config.get("trading_mode", DEFAULT_TRADING_MODE)),
+        "monitor_action_email_enabled": _coerce_bool(config.get("monitor_action_email_enabled"), True),
         "cash_cny": round(cash, 2),
         "available_cash_cny": round(cash, 2),
         "t2_pending_cash_cny": round(t2_pending_cash, 2),
@@ -975,6 +1027,9 @@ __all__ = [
     "_fmt_cash_line",
     "_correct_real_cash",
     "_current_trading_mode",
+    "_coerce_bool",
+    "_current_action_email_enabled",
+    "_set_action_email_enabled",
     "_set_trading_mode",
     "_cash_ratio",
     "_fmt_update_time",

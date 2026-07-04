@@ -59,6 +59,8 @@ def _row_tag(row: Dict[str, Any]) -> str:
         return "error"
     if state == "blocked":
         return "blocked"
+    if state == "executed":
+        return "blocked"
     if change > 0:
         return "up"
     if change < 0:
@@ -171,6 +173,8 @@ def _operation_summary(row: Dict[str, Any]) -> str:
         return "候选"
     if status == "blocked":
         return "拦截"
+    if status == "executed":
+        return "已执行"
     return "观察"
 
 

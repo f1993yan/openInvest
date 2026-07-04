@@ -1,11 +1,16 @@
 """Execution guards for monitor-generated shadow trades."""
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import Any, Dict, Optional
 
 from jobs.market_monitor_common import AUTO_TRADE_REPEAT_COOLDOWN_MINUTES, log, _fmt_price, _safe_num
-from jobs.market_monitor_entry_exit import evaluate_entry_exit_triggers, evaluate_position_exit_plan_triggers, _stock_units
+from jobs.market_monitor_entry_exit import (
+    evaluate_entry_exit_triggers,
+    evaluate_position_exit_plan_triggers,
+    _stock_units,
+    _update_position_exit_plan,
+)
 
 def _result_direction(result: Dict[str, Any]) -> Optional[str]:
     verdict = str(result.get("verdict", "")).upper()
@@ -29,16 +34,33 @@ def _parse_trade_ts(value: Any) -> Optional[datetime]:
         return None
 
 
-def _recent_same_direction_committee_trade(
+def _trade_in_recent_window(
+    trade: Dict[str, Any],
+    *,
+    cooldown_minutes: int,
+    trade_date: Optional[str],
+) -> bool:
+    if trade_date and str(trade.get("trade_date") or "")[:10] == trade_date[:10]:
+        return True
+    if cooldown_minutes <= 0:
+        return False
+    ts = _parse_trade_ts(trade.get("ts"))
+    if ts is None:
+        return False
+    cutoff = datetime.now(timezone.utc) - timedelta(minutes=cooldown_minutes)
+    return ts >= cutoff
+
+
+def _recent_committee_trade(
     ledger: Any,
     *,
     symbol: str,
-    direction: str,
+    direction: Optional[str] = None,
     cooldown_minutes: int = AUTO_TRADE_REPEAT_COOLDOWN_MINUTES,
+    trade_date: Optional[str] = None,
 ) -> Optional[Dict[str, Any]]:
-    if ledger is None or cooldown_minutes <= 0:
+    if ledger is None:
         return None
-    cutoff = datetime.now(timezone.utc) - timedelta(minutes=cooldown_minutes)
     try:
         trades = ledger.list_trades("committee", limit=200)
     except Exception as e:  # noqa: BLE001
@@ -47,14 +69,147 @@ def _recent_same_direction_committee_trade(
     for trade in trades:
         if str(trade.get("symbol", "")).upper() != symbol.upper():
             continue
-        if str(trade.get("direction", "")).upper() != direction:
+        trade_direction = str(trade.get("direction", "")).upper()
+        if direction and trade_direction != direction:
             continue
         if str(trade.get("source", "")) != "committee_auto":
             continue
-        ts = _parse_trade_ts(trade.get("ts"))
-        if ts is not None and ts >= cutoff:
+        if _trade_in_recent_window(
+            trade,
+            cooldown_minutes=cooldown_minutes,
+            trade_date=trade_date,
+        ):
             return trade
     return None
+
+
+def _recent_same_direction_committee_trade(
+    ledger: Any,
+    *,
+    symbol: str,
+    direction: str,
+    cooldown_minutes: int = AUTO_TRADE_REPEAT_COOLDOWN_MINUTES,
+) -> Optional[Dict[str, Any]]:
+    if cooldown_minutes <= 0:
+        return None
+    return _recent_committee_trade(
+        ledger,
+        symbol=symbol,
+        direction=direction,
+        cooldown_minutes=cooldown_minutes,
+        trade_date=None,
+    )
+
+
+def _has_direction_trigger(direction: str, triggers: list[Dict[str, Any]]) -> bool:
+    side = direction.lower()
+    return any(str(t.get("side", "")).lower() == side for t in triggers)
+
+
+def _trigger_has_price_progress_from_trade(
+    *,
+    direction: str,
+    triggers: list[Dict[str, Any]],
+    current_price: float,
+    previous_trade: Dict[str, Any],
+) -> bool:
+    """Whether a fresh trigger moved beyond the last execution price.
+
+    The rule is price-line based instead of time-ban based:
+    - pullback/reentry buybacks must be at or below both the trigger line and
+      the last sell price;
+    - breakout buybacks must be at or above both the breakout line and the last
+      sell price;
+    - sells are already tied to current stop/take-profit lines.
+
+    That avoids a fixed same-day buyback ban while blocking a same-price flip.
+    """
+    if not _has_direction_trigger(direction, triggers):
+        return False
+    last_price = _safe_num(previous_trade.get("price"))
+    if last_price <= 0 or current_price <= 0:
+        return True
+    if direction == "SELL":
+        return True
+    buy_triggers = [
+        t for t in triggers
+        if str(t.get("side", "")).lower() == "buy"
+    ]
+    for trigger in buy_triggers:
+        kind = str(trigger.get("kind") or "")
+        level = _safe_num(trigger.get("level"))
+        if kind in {"buy_pullback", "reentry"}:
+            boundary = min(x for x in (level, last_price) if x > 0)
+            if current_price <= boundary:
+                return True
+        elif kind == "buy_breakout":
+            boundary = max(level, last_price)
+            if current_price >= boundary:
+                return True
+    return False
+
+
+def _current_direction_triggers(
+    result: Dict[str, Any],
+    *,
+    stock: Dict[str, Any],
+    symbol: str,
+    direction: str,
+    current_price: float,
+    entry_exit_state: Dict[str, Any],
+) -> list[Dict[str, Any]]:
+    previous = ((entry_exit_state.get("symbols") or {}).get(symbol) or {})
+    is_holding = _safe_num(stock.get("position_pct")) > 0 or _stock_units(stock) > 0
+    if is_holding and direction == "SELL":
+        position_exit_plan = _update_position_exit_plan(
+            previous.get("position_exit_plan"),
+            symbol=symbol,
+            stock=stock,
+            result=result,
+            current_price=current_price,
+            is_holding=True,
+        )
+        return evaluate_position_exit_plan_triggers(current_price, position_exit_plan)
+    return evaluate_entry_exit_triggers(
+        current_price,
+        previous.get("entry_exit_points"),
+        is_holding=False,
+    )
+
+
+def _block_execution(
+    result: Dict[str, Any],
+    *,
+    reason: str,
+    direction: str,
+    current_price: float,
+    triggers: list[Dict[str, Any]],
+    recent_trade: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    original_verdict = str(result.get("verdict", ""))
+    original_alloc = _safe_num(result.get("suggested_alloc_cny"))
+    blocked = dict(result)
+    blocked["execution_blocked"] = True
+    blocked["execution_block_reason"] = reason
+    blocked["optimizer_verdict_before_guard"] = original_verdict
+    blocked["optimizer_alloc_cny_before_guard"] = original_alloc
+    blocked["verdict"] = "HOLD"
+    blocked["suggested_alloc_cny"] = 0
+    blocked["confidence"] = min(_safe_num(result.get("confidence"), 0.35), 0.55)
+    recent_line = ""
+    if recent_trade:
+        recent_line = (
+            f"last_trade_id={recent_trade.get('id')} last_trade_side={recent_trade.get('direction')} "
+            f"last_trade_ts={recent_trade.get('ts')} last_price={_fmt_price(recent_trade.get('price'))}\n"
+        )
+    blocked["cio_memo"] = (
+        f"{result.get('cio_memo', '')}\n\n[EXECUTION_GUARD]\n"
+        f"side={direction.lower()} blocked=true cooldown_minutes={AUTO_TRADE_REPEAT_COOLDOWN_MINUTES}\n"
+        f"{recent_line}"
+        f"current_price={_fmt_price(current_price)} previous_plan_triggers={triggers or []}\n"
+        f"reason={reason}"
+    )
+    return blocked
 
 
 def apply_repeated_trade_guard(
@@ -70,6 +225,26 @@ def apply_repeated_trade_guard(
         return result
 
     symbol = str(result.get("symbol") or stock.get("symbol") or "").upper()
+    trade_date = date.today().isoformat()
+    triggers = _current_direction_triggers(
+        result,
+        stock=stock,
+        symbol=symbol,
+        direction=direction,
+        current_price=current_price,
+        entry_exit_state=entry_exit_state,
+    )
+    has_direction_trigger = _has_direction_trigger(direction, triggers)
+    is_holding = _safe_num(stock.get("position_pct")) > 0 or _stock_units(stock) > 0
+    if is_holding and direction == "SELL" and not has_direction_trigger:
+        return _block_execution(
+            result,
+            reason="sell_waiting_for_current_exit_trigger",
+            direction=direction,
+            current_price=current_price,
+            triggers=triggers,
+        )
+
     # 显式传 cooldown：避免依赖函数默认参数（默认参数在 def 时绑定，曾被模块后段
     # 的重复赋值坑过——实际生效值与 memo 显示值不一致）。现在唯一来源是模块顶部
     # 的 AUTO_TRADE_REPEAT_COOLDOWN_MINUTES（env 可配，默认 240），实际过滤与
@@ -80,47 +255,58 @@ def apply_repeated_trade_guard(
         direction=direction,
         cooldown_minutes=AUTO_TRADE_REPEAT_COOLDOWN_MINUTES,
     )
-    if not recent_trade:
-        return result
-
-    previous = ((entry_exit_state.get("symbols") or {}).get(symbol) or {})
-    is_holding = _safe_num(stock.get("position_pct")) > 0 or _stock_units(stock) > 0
-    if is_holding and direction == "SELL":
-        triggers = evaluate_position_exit_plan_triggers(
-            current_price,
-            previous.get("position_exit_plan"),
+    if recent_trade:
+        if has_direction_trigger and _trigger_has_price_progress_from_trade(
+            direction=direction,
+            triggers=triggers,
+            current_price=current_price,
+            previous_trade=recent_trade,
+        ):
+            return result
+        return _block_execution(
+            result,
+            reason="recent_same_direction_committee_trade_without_new_entry_exit_trigger",
+            direction=direction,
+            current_price=current_price,
+            triggers=triggers,
+            recent_trade=recent_trade,
         )
-    else:
-        triggers = evaluate_entry_exit_triggers(
-            current_price,
-            previous.get("entry_exit_points"),
-            is_holding=False,
-        )
-    has_direction_trigger = any(t.get("side") == direction.lower() for t in triggers)
-    if has_direction_trigger:
-        return result
 
-    original_verdict = str(result.get("verdict", ""))
-    original_alloc = _safe_num(result.get("suggested_alloc_cny"))
-    blocked = dict(result)
-    blocked["execution_blocked"] = True
-    blocked["execution_block_reason"] = (
-        "recent_same_direction_committee_trade_without_new_entry_exit_trigger"
+    recent_symbol_trade = _recent_committee_trade(
+        ledger,
+        symbol=symbol,
+        direction=None,
+        cooldown_minutes=AUTO_TRADE_REPEAT_COOLDOWN_MINUTES,
+        trade_date=trade_date,
     )
-    blocked["optimizer_verdict_before_guard"] = original_verdict
-    blocked["optimizer_alloc_cny_before_guard"] = original_alloc
-    blocked["verdict"] = "HOLD"
-    blocked["suggested_alloc_cny"] = 0
-    blocked["confidence"] = min(_safe_num(result.get("confidence"), 0.35), 0.55)
-    blocked["cio_memo"] = (
-        f"{result.get('cio_memo', '')}\n\n[EXECUTION_GUARD]\n"
-        f"side={direction.lower()} blocked=true cooldown_minutes={AUTO_TRADE_REPEAT_COOLDOWN_MINUTES}\n"
-        f"last_trade_id={recent_trade.get('id')} last_trade_ts={recent_trade.get('ts')} "
-        f"last_price={_fmt_price(recent_trade.get('price'))}\n"
-        f"current_price={_fmt_price(current_price)} previous_plan_triggers={triggers or []}\n"
-        "reason=同方向影子交易刚执行过，且当前价未触发上一轮买卖点，防止机械重复买/卖。"
-    )
-    return blocked
+    if (
+        recent_symbol_trade
+        and str(recent_symbol_trade.get("direction", "")).upper() != direction
+    ):
+        if not has_direction_trigger:
+            return _block_execution(
+                result,
+                reason="recent_opposite_committee_trade_without_new_entry_exit_trigger",
+                direction=direction,
+                current_price=current_price,
+                triggers=triggers,
+                recent_trade=recent_symbol_trade,
+            )
+        if not _trigger_has_price_progress_from_trade(
+            direction=direction,
+            triggers=triggers,
+            current_price=current_price,
+            previous_trade=recent_symbol_trade,
+        ):
+            return _block_execution(
+                result,
+                reason="recent_opposite_committee_trade_without_price_progress",
+                direction=direction,
+                current_price=current_price,
+                triggers=triggers,
+                recent_trade=recent_symbol_trade,
+            )
+    return result
 
 
 def _a_share_limit_up_pct(symbol: str, name: str = "") -> float:

@@ -1,4 +1,7 @@
 from unittest.mock import MagicMock, patch
+import json
+import sys
+import types
 import pytest
 import tkinter as tk
 from scripts.monitor_desktop_window import MonitorWindow
@@ -349,3 +352,103 @@ def test_apply_committee_row_update_writes_snapshot_and_refreshes(monkeypatch):
     win.refresh.assert_called_once()
     assert win.watched_mtime_signature == ("sig",)
     assert win.last_payload_signature == ()
+
+
+def test_set_trading_mode_preserves_existing_snapshot_rows(tmp_path, monkeypatch):
+    import scripts.monitor_window_services as svc
+
+    config_path = tmp_path / "market_monitor_config.json"
+    snapshot_path = tmp_path / "latest_window.json"
+    config = {"total_assets": 100000, "cash": 10000, "trading_mode": "active_profit", "holdings": [], "watchlist": []}
+    config_path.write_text(json.dumps(config, ensure_ascii=False), encoding="utf-8")
+    snapshot_path.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "trading_mode": {"mode": "active_profit", "label": "主动盈利"},
+                "rows": [{"symbol": "000063", "state": "action_required"}],
+                "counts": {"symbols": 1, "action_required": 1},
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    fake_market_monitor = types.SimpleNamespace(
+        CONFIG_PATH=config_path,
+        load_config=lambda: json.loads(config_path.read_text(encoding="utf-8")),
+    )
+    monkeypatch.setitem(sys.modules, "jobs.market_monitor", fake_market_monitor)
+    monkeypatch.setattr(svc, "ROOT", tmp_path)
+    (tmp_path / "data" / "market_monitor").mkdir(parents=True)
+    target_snapshot = tmp_path / "data" / "market_monitor" / "latest_window.json"
+    target_snapshot.write_text(snapshot_path.read_text(encoding="utf-8"), encoding="utf-8")
+
+    payload = svc._set_trading_mode("risk_off")
+
+    assert payload == {"mode": "risk_off", "label": "主动避险"}
+    updated_config = json.loads(config_path.read_text(encoding="utf-8"))
+    updated_snapshot = json.loads(target_snapshot.read_text(encoding="utf-8"))
+    assert updated_config["trading_mode"] == "risk_off"
+    assert updated_snapshot["trading_mode"] == {"mode": "risk_off", "label": "主动避险"}
+    assert updated_snapshot["rows"] == [{"symbol": "000063", "state": "action_required"}]
+
+
+def test_set_action_email_enabled_preserves_existing_snapshot_rows(tmp_path, monkeypatch):
+    import scripts.monitor_window_services as svc
+
+    config_path = tmp_path / "market_monitor_config.json"
+    config = {"total_assets": 100000, "cash": 10000, "holdings": [], "watchlist": []}
+    config_path.write_text(json.dumps(config, ensure_ascii=False), encoding="utf-8")
+
+    fake_market_monitor = types.SimpleNamespace(
+        CONFIG_PATH=config_path,
+        load_config=lambda: json.loads(config_path.read_text(encoding="utf-8")),
+    )
+    monkeypatch.setitem(sys.modules, "jobs.market_monitor", fake_market_monitor)
+    monkeypatch.setattr(svc, "ROOT", tmp_path)
+    target_snapshot = tmp_path / "data" / "market_monitor" / "latest_window.json"
+    target_snapshot.parent.mkdir(parents=True)
+    target_snapshot.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "rows": [{"symbol": "000063", "state": "action_required"}],
+                "counts": {"symbols": 1, "action_required": 1},
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    enabled = svc._set_action_email_enabled(False)
+
+    assert enabled is False
+    updated_config = json.loads(config_path.read_text(encoding="utf-8"))
+    updated_snapshot = json.loads(target_snapshot.read_text(encoding="utf-8"))
+    assert updated_config["monitor_action_email_enabled"] is False
+    assert updated_snapshot["monitor_action_email_enabled"] is False
+    assert updated_snapshot["rows"] == [{"symbol": "000063", "state": "action_required"}]
+
+
+def test_toggle_action_email_enabled_updates_status_and_refresh(monkeypatch):
+    import scripts.monitor_desktop_window as mod
+
+    win = MagicMock()
+    win.demo = False
+    win.action_email_enabled = True
+    win.action_email_btn = MagicMock()
+    win.status_text = MagicMock()
+    win.last_payload_signature = ("old",)
+    win.refresh = MagicMock()
+
+    monkeypatch.setattr(mod, "_set_action_email_enabled", MagicMock(return_value=False))
+    win._render_action_email_button = MonitorWindow._render_action_email_button.__get__(win, MagicMock)
+
+    MonitorWindow._toggle_action_email_enabled(win)
+
+    mod._set_action_email_enabled.assert_called_once_with(False)
+    win.action_email_btn.configure.assert_called_once()
+    win.status_text.set.assert_called_once_with("执行邮件: 关")
+    assert win.last_payload_signature == ()
+    win.refresh.assert_called_once()

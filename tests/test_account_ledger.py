@@ -158,6 +158,71 @@ def test_committee_sell_is_limited_by_actual_shadow_holding(tmp_path):
     assert shadow["600900"]["units"] == 0
 
 
+def test_a_share_same_day_buy_units_are_not_sellable_for_real_account(tmp_path):
+    db = AccountLedger(str(tmp_path / "accounts.db"))
+    db.initialize_from_monitor_config(_config())
+    trade_date = "2026-07-01"
+
+    db.apply_user_trade(symbol="000063", direction="BUY", units=200, price=30, trade_date=trade_date)
+
+    with pytest.raises(ValueError, match="A股T\\+1限制"):
+        db.apply_user_trade(symbol="000063", direction="SELL", units=100, price=29, trade_date=trade_date)
+
+    real = {h["symbol"]: h for h in db.list_holdings("real")}
+    assert real["000063"]["units"] == pytest.approx(200)
+
+
+def test_a_share_t1_allows_selling_only_older_units(tmp_path):
+    db = AccountLedger(str(tmp_path / "accounts.db"))
+    db.initialize_from_monitor_config(_config())
+    trade_date = "2026-07-01"
+
+    db.apply_user_trade(symbol="600900", direction="BUY", units=100, price=20, trade_date=trade_date)
+
+    with pytest.raises(ValueError, match="今日可卖 1000 股"):
+        db.apply_user_trade(symbol="600900", direction="SELL", units=1100, price=21, trade_date=trade_date)
+
+    trade = db.apply_user_trade(symbol="600900", direction="SELL", units=1000, price=21, trade_date=trade_date)
+    assert trade.units == pytest.approx(1000)
+    real = {h["symbol"]: h for h in db.list_holdings("real")}
+    assert real["600900"]["units"] == pytest.approx(100)
+
+
+def test_committee_sell_caps_to_a_share_t1_sellable_units(tmp_path):
+    db = AccountLedger(str(tmp_path / "accounts.db"))
+    db.initialize_from_monitor_config(_config())
+    trade_date = "2026-07-01"
+
+    db.apply_committee_result(
+        {
+            "success": True,
+            "symbol": "600900",
+            "verdict": "ACCUMULATE",
+            "confidence": 0.8,
+            "suggested_alloc_cny": 2000,
+        },
+        price=20,
+        trade_date=trade_date,
+    )
+
+    trade = db.apply_committee_result(
+        {
+            "success": True,
+            "symbol": "600900",
+            "verdict": "SELL",
+            "confidence": 0.8,
+            "suggested_alloc_cny": -999999,
+        },
+        price=21,
+        trade_date=trade_date,
+    )
+
+    assert trade is not None
+    assert trade.units == pytest.approx(1000)
+    shadow = {h["symbol"]: h for h in db.list_holdings("committee")}
+    assert shadow["600900"]["units"] == pytest.approx(100)
+
+
 def test_daily_pnl_records_both_accounts(tmp_path):
     db = AccountLedger(str(tmp_path / "accounts.db"))
     db.initialize_from_monitor_config(_config())
@@ -244,3 +309,58 @@ def test_temp_ledger_does_not_sync_project_config(tmp_path, monkeypatch):
 
     persisted = json.loads(config_path.read_text(encoding="utf-8"))
     assert persisted == original
+
+
+def test_sync_to_config_preserves_existing_actionable_snapshot_rows(tmp_path, monkeypatch):
+    project_root = tmp_path / "project"
+    config_dir = project_root / "jobs"
+    snapshot_dir = project_root / "data" / "market_monitor"
+    config_dir.mkdir(parents=True)
+    snapshot_dir.mkdir(parents=True)
+    config_path = config_dir / "market_monitor_config.json"
+    snapshot_path = snapshot_dir / "latest_window.json"
+    config_path.write_text(json.dumps(_config(), ensure_ascii=False), encoding="utf-8")
+    snapshot_path.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "generated_at": "2026-07-01T10:00:00",
+                "round_time": "10:00",
+                "counts": {"symbols": 2, "action_required": 2},
+                "rows": [
+                    {
+                        "symbol": "600900",
+                        "name": "长江电力",
+                        "state": "action_required",
+                        "units": 1000,
+                        "operation": {"status": "action_required", "verdict": "SELL", "suggested_alloc_cny": -25000},
+                    },
+                    {
+                        "symbol": "000063",
+                        "name": "中兴通讯",
+                        "state": "action_required",
+                        "units": 0,
+                        "operation": {"status": "action_required", "verdict": "BUY", "suggested_alloc_cny": 6000},
+                    },
+                ],
+                "actionable": [{"symbol": "600900"}, {"symbol": "000063"}],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    import db.account_ledger as account_ledger
+
+    monkeypatch.setattr(account_ledger, "__file__", str(project_root / "db" / "account_ledger.py"))
+    db = AccountLedger(str(project_root / "db" / "accounts.db"))
+    db.initialize_from_monitor_config(_config())
+    db.apply_user_trade(symbol="600900", direction="SELL", units=100, price=21, trade_date="2026-07-02")
+
+    synced = json.loads(snapshot_path.read_text(encoding="utf-8"))
+    by_symbol = {row["symbol"]: row for row in synced["rows"]}
+    assert set(by_symbol) == {"600900", "000063"}
+    assert by_symbol["000063"]["state"] == "action_required"
+    assert by_symbol["000063"]["operation"]["verdict"] == "BUY"
+    assert synced["counts"]["action_required"] == 2
+    assert synced["actionable"] == [{"symbol": "600900"}, {"symbol": "000063"}]

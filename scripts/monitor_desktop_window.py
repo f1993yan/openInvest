@@ -87,6 +87,8 @@ class MonitorWindow(MonitorNewsMixin, MonitorSelectionMixin, MonitorTradeMixin, 
         self.last_update_text = tk.StringVar(value="更新 -")
         self.trading_mode_text = tk.StringVar(value="主动盈利")
         self.trading_mode_switch: Optional[ModeSlider] = None
+        self.action_email_enabled = True
+        self.action_email_btn: Optional[tk.Label] = None
         self.card_widgets: Dict[str, tk.Frame] = {}
         self.dialogs: Dict[str, tk.Toplevel] = {}
         self.analysis_queue: queue.Queue[tuple[str, str, Optional[Dict[str, Any]]]] = queue.Queue()
@@ -183,15 +185,28 @@ class MonitorWindow(MonitorNewsMixin, MonitorSelectionMixin, MonitorTradeMixin, 
             cursor="hand2",
         )
         self.pin_btn.pack(side=tk.RIGHT, fill=tk.Y)
+        self.action_email_btn = tk.Label(
+            titlebar,
+            text="邮件开",
+            bg="#eef6ff",
+            fg=BLUE,
+            font=("Microsoft YaHei UI", 8, "bold"),
+            padx=8,
+            cursor="hand2",
+        )
+        self.action_email_btn.pack(side=tk.RIGHT, fill=tk.Y, padx=(0, 2), pady=5)
         close_btn.bind("<Button-1>", lambda _event: self._on_close())
         min_btn.bind("<Button-1>", lambda _event: self._minimize())
         self.pin_btn.bind("<Button-1>", lambda _event: self._toggle_pin())
+        self.action_email_btn.bind("<Button-1>", lambda _event: self._toggle_action_email_enabled())
         close_btn.bind("<Enter>", lambda _event: close_btn.configure(bg="#e5484d", fg="#ffffff"))
         close_btn.bind("<Leave>", lambda _event: close_btn.configure(bg=PANEL_BG, fg=MUTED))
         min_btn.bind("<Enter>", lambda _event: min_btn.configure(bg="#eef2f7", fg=TEXT))
         min_btn.bind("<Leave>", lambda _event: min_btn.configure(bg=PANEL_BG, fg=MUTED))
         self.pin_btn.bind("<Enter>", lambda _event: self.pin_btn.configure(bg="#eef2f7"))
         self.pin_btn.bind("<Leave>", lambda _event: self.pin_btn.configure(bg=PANEL_BG))
+        self.action_email_btn.bind("<Enter>", lambda _event: self._render_action_email_button(self.action_email_enabled, hover=True))
+        self.action_email_btn.bind("<Leave>", lambda _event: self._render_action_email_button(self.action_email_enabled))
         for widget in (titlebar, brand, title_hint):
             widget.bind("<ButtonPress-1>", self._start_drag)
             widget.bind("<B1-Motion>", self._drag_window)
@@ -412,11 +427,17 @@ class MonitorWindow(MonitorNewsMixin, MonitorSelectionMixin, MonitorTradeMixin, 
                 "total_cash_cny": 33800,
                 "total_assets_cny": 100000,
                 "trading_mode": {"mode": "active_profit", "label": "主动盈利"},
+                "monitor_action_email_enabled": True,
             }
             if self.demo
             else _load_snapshot(self.snapshot_path)
         )
-        mode_payload = payload.get("trading_mode") or _current_trading_mode()
+        mode_payload = payload.get("trading_mode") if self.demo else _current_trading_mode()
+        mode_payload = mode_payload or _current_trading_mode()
+        if not self.demo:
+            payload["trading_mode"] = mode_payload
+        email_enabled = bool(payload.get("monitor_action_email_enabled", True)) if self.demo else _current_action_email_enabled()
+        payload["monitor_action_email_enabled"] = email_enabled
         mode_key = str((mode_payload or {}).get("mode") or "active_profit")
         mode_label = str((mode_payload or {}).get("label") or "主动盈利")
         rows = _sort_stock_rows(
@@ -451,6 +472,7 @@ class MonitorWindow(MonitorNewsMixin, MonitorSelectionMixin, MonitorTradeMixin, 
             _safe_num(payload.get("total_cash_cny")),
             _safe_num(payload.get("total_assets_cny")),
             mode_key,
+            email_enabled,
             counts.get("symbols", len(rows)),
             counts.get("action_required", 0),
             stock_signature,
@@ -474,6 +496,7 @@ class MonitorWindow(MonitorNewsMixin, MonitorSelectionMixin, MonitorTradeMixin, 
         self.last_update_text.set(_fmt_update_time(payload.get("generated_at")))
         self.trading_mode_text.set(mode_label)
         self._render_trading_mode_buttons(mode_key)
+        self._render_action_email_button(email_enabled)
         self.cash_bar.set_values(
             payload.get("available_cash_cny", payload.get("cash_cny")),
             payload.get("total_assets_cny"),
@@ -489,6 +512,32 @@ class MonitorWindow(MonitorNewsMixin, MonitorSelectionMixin, MonitorTradeMixin, 
     def _render_trading_mode_buttons(self, active_mode: str) -> None:
         if self.trading_mode_switch is not None:
             self.trading_mode_switch.set_active(active_mode)
+
+    def _render_action_email_button(self, enabled: bool, *, hover: bool = False) -> None:
+        self.action_email_enabled = bool(enabled)
+        if self.action_email_btn is None:
+            return
+        if enabled:
+            bg = "#dbeafe" if hover else "#eef6ff"
+            fg = BLUE
+            text = "邮件开"
+        else:
+            bg = "#f2f4f7" if hover else "#f8fafc"
+            fg = MUTED
+            text = "邮件关"
+        self.action_email_btn.configure(text=text, bg=bg, fg=fg)
+
+    def _toggle_action_email_enabled(self) -> None:
+        next_enabled = not self.action_email_enabled
+        try:
+            if not self.demo:
+                next_enabled = _set_action_email_enabled(next_enabled)
+            self._render_action_email_button(next_enabled)
+            self.status_text.set(f"执行邮件: {'开' if next_enabled else '关'}")
+            self.last_payload_signature = ()
+            self.refresh()
+        except Exception as exc:  # noqa: BLE001
+            messagebox.showerror("错误", f"切换执行邮件失败: {exc}")
 
     def _change_trading_mode(self, mode: str) -> None:
         try:
@@ -536,7 +585,7 @@ class MonitorWindow(MonitorNewsMixin, MonitorSelectionMixin, MonitorTradeMixin, 
 
     def upload_data(self) -> None:
         if not self.remote_server_url:
-            messagebox.showerror("错误", "未配置远程服务器地址 (INVEST_REMOTE_SERVER_URL)")
+            messagebox.showinfo("跳过上传", "未配置远程服务器 (INVEST_REMOTE_SERVER_URL)。\n本地配置文件已由监控服务自动保存。")
             return
 
         config_path = ROOT / "jobs" / "market_monitor_config.json"
@@ -552,7 +601,11 @@ class MonitorWindow(MonitorNewsMixin, MonitorSelectionMixin, MonitorTradeMixin, 
                 config_data = json.load(f)
 
             url = f"{self.remote_server_url.rstrip('/')}/api/config/monitor_config"
-            resp = requests.post(url, json=config_data, timeout=10)
+            try:
+                resp = requests.post(url, json=config_data, timeout=10)
+            except requests.exceptions.ConnectionError:
+                messagebox.showwarning("连接失败", f"无法连接到服务器 {url}。\n本地数据已自动保存，无需上传。")
+                return
             if resp.status_code != 200:
                 messagebox.showerror("错误", f"上传监控配置失败: HTTP {resp.status_code}\n{resp.text}")
                 return
@@ -619,7 +672,7 @@ class MonitorWindow(MonitorNewsMixin, MonitorSelectionMixin, MonitorTradeMixin, 
 
     def sync_data(self) -> None:
         if not self.remote_server_url:
-            messagebox.showerror("错误", "未配置远程服务器地址 (INVEST_REMOTE_SERVER_URL)")
+            messagebox.showinfo("跳过同步", "未配置远程服务器 (INVEST_REMOTE_SERVER_URL)。\n本地数据无需同步。")
             return
 
         if not messagebox.askyesno("确认同步", "确认从服务器同步持仓/关注/参数数据及账本数据库？这将覆盖本地的相同数据！"):
@@ -1049,7 +1102,30 @@ class MonitorWindow(MonitorNewsMixin, MonitorSelectionMixin, MonitorTradeMixin, 
                 if not raw_lots.isdigit():
                     raise ValueError("手数必须是整数")
                 lots = int(raw_lots)
-                message = _execute_user_trade_from_row(r, lots)
+                result = _execute_user_trade_from_row(r, lots)
+                message = str(result.get("message") or "")
+                trade = result.get("trade") or {}
+                updated_row = json.loads(json.dumps(r, ensure_ascii=False))
+                updated_row["state"] = "executed"
+                op = dict(updated_row.get("operation") or {})
+                op["status"] = "executed"
+                op["execution_blocked"] = False
+                op["executed_at"] = datetime.now().isoformat(timespec="seconds")
+                op["executed_direction"] = trade.get("direction") or _operation_direction(r)
+                op["executed_units"] = _safe_num(trade.get("units"), lots * _lot_size(r))
+                op["executed_price"] = _safe_num(trade.get("price"))
+                op["executed_lots"] = int(_safe_num(op.get("executed_units")) // max(1, _lot_size(r)))
+                updated_row["operation"] = op
+                if op["executed_direction"] == "BUY":
+                    updated_row["units"] = _safe_num(updated_row.get("units")) + _safe_num(op.get("executed_units"))
+                else:
+                    updated_row["units"] = max(0.0, _safe_num(updated_row.get("units")) - _safe_num(op.get("executed_units")))
+                if self.demo:
+                    pass
+                else:
+                    _update_snapshot_row(self.snapshot_path, updated_row)
+                    self.watched_mtime_signature = self._watched_file_signature()
+                    self.last_payload_signature = ()
                 status_var.set("已更新")
                 self.status_text.set(message)
                 self.refresh()

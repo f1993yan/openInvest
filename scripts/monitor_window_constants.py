@@ -40,6 +40,7 @@ STATE_LABELS = {
     "watch_trigger": "单轮触发",
     "candidate": "候选",
     "monitoring": "监控中",
+    "executed": "已执行",
     "blocked": "已拦截",
     "error": "错误",
 }
@@ -50,6 +51,7 @@ STATE_SIGNALS = {
     "watch_trigger": "预警",
     "candidate": "候选",
     "monitoring": "观察",
+    "executed": "已执行",
     "blocked": "拦截",
     "error": "错误",
 }
@@ -69,8 +71,9 @@ STATE_PRIORITY = {
     "watch_trigger": 2,
     "candidate": 3,
     "monitoring": 4,
-    "blocked": 5,
-    "error": 6,
+    "executed": 5,
+    "blocked": 6,
+    "error": 7,
 }
 
 VERDICT_PRIORITY = {

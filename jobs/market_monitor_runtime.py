@@ -5,11 +5,12 @@ import json
 import re
 import sys
 import time
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, List
 
 from jobs.market_monitor_common import (
+    AUTO_TRADE_REPEAT_COOLDOWN_MINUTES,
     CONFIG_PATH,
     INTERVAL_MINUTES,
     LATEST_WINDOW_PATH,
@@ -30,10 +31,30 @@ from jobs.market_monitor_entry_exit import (
     update_entry_exit_alert_state,
 )
 from jobs.market_monitor_guards import apply_limit_up_guard, apply_repeated_trade_guard
-from jobs.market_monitor_notify import is_scheduled_monitor_popup_time, send_windows_toast, should_send_monitor_summary_popup
+from jobs.market_monitor_notify import (
+    is_scheduled_monitor_popup_time,
+    send_action_required_email,
+    send_windows_toast,
+    should_send_monitor_summary_popup,
+)
 from jobs.market_monitor_quotes import call_committee, fetch_sina_prices
 from jobs.market_monitor_snapshot import build_monitor_window_snapshot, write_monitor_window_snapshot, write_report
 from jobs.trading_mode import DEFAULT_TRADING_MODE, normalize_trading_mode
+
+
+def _config_bool(value: Any, default: bool = False) -> bool:
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return default
+    if isinstance(value, (int, float)):
+        return value != 0
+    text = str(value).strip().lower()
+    if text in {"1", "true", "yes", "y", "on", "enable", "enabled", "开", "开启"}:
+        return True
+    if text in {"0", "false", "no", "n", "off", "disable", "disabled", "关", "关闭"}:
+        return False
+    return default
 
 SECTOR_CACHE_PATH = _PROJECT_ROOT / "data" / "sector_cache.json"
 if not SECTOR_CACHE_PATH.exists():
@@ -170,6 +191,67 @@ def _with_sector_cache(config: Dict, sector_mapping: Dict[str, str]) -> Dict:
     updated["holdings"] = apply_sector_cache_to_stocks(list(config.get("holdings", []) or []), sector_mapping)
     updated["watchlist"] = apply_sector_cache_to_stocks(list(config.get("watchlist", []) or []), sector_mapping)
     return updated
+
+
+def _same_day_bought_units_by_symbol(ledger: Any, *, account: str, trade_date: str) -> Dict[str, float]:
+    if ledger is None:
+        return {}
+    try:
+        trades = ledger.list_trades(account, limit=1000)
+    except Exception as e:  # noqa: BLE001
+        log.warning(f"读取当日成交失败，跳过A股T+1提醒约束: {e}")
+        return {}
+    bought: Dict[str, float] = {}
+    for trade in trades:
+        if str(trade.get("trade_date") or "")[:10] != trade_date:
+            continue
+        if str(trade.get("direction") or "").upper() != "BUY":
+            continue
+        symbol = str(trade.get("symbol") or "").strip().upper()
+        if not symbol:
+            continue
+        bought[symbol] = bought.get(symbol, 0.0) + _safe_num(trade.get("units"))
+    return bought
+
+
+def _parse_trade_ts(value: Any) -> datetime | None:
+    if not value:
+        return None
+    try:
+        ts = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        if ts.tzinfo is None:
+            ts = ts.replace(tzinfo=timezone.utc)
+        return ts.astimezone(timezone.utc)
+    except ValueError:
+        return None
+
+
+def _recent_real_trades_by_symbol(
+    ledger: Any,
+    *,
+    account: str,
+    trade_date: str,
+    cooldown_minutes: int = AUTO_TRADE_REPEAT_COOLDOWN_MINUTES,
+) -> Dict[str, Dict[str, Any]]:
+    if ledger is None:
+        return {}
+    try:
+        trades = ledger.list_trades(account, limit=1000)
+    except Exception as e:  # noqa: BLE001
+        log.warning(f"读取真实成交失败，跳过反向交易冷却提醒约束: {e}")
+        return {}
+    cutoff = datetime.now(timezone.utc) - timedelta(minutes=max(0, cooldown_minutes))
+    recent: Dict[str, Dict[str, Any]] = {}
+    for trade in trades:
+        symbol = str(trade.get("symbol") or "").strip().upper()
+        if not symbol or symbol in recent:
+            continue
+        same_day = str(trade.get("trade_date") or "")[:10] == trade_date[:10]
+        ts = _parse_trade_ts(trade.get("ts"))
+        in_window = bool(ts and cooldown_minutes > 0 and ts >= cutoff)
+        if same_day or in_window:
+            recent[symbol] = trade
+    return recent
 
 
 def run_monitor_round():
@@ -372,6 +454,17 @@ def run_monitor_round():
 
     # 3. 组合级提醒优化：现金预算 + 交易约束 + LLM/点位质量
     trading_mode = normalize_trading_mode(config.get("trading_mode", DEFAULT_TRADING_MODE))
+    action_email_enabled = _config_bool(config.get("monitor_action_email_enabled"), True)
+    same_day_buys = _same_day_bought_units_by_symbol(
+        ledger,
+        account="real",
+        trade_date=round_dt.date().isoformat(),
+    )
+    recent_real_trades = _recent_real_trades_by_symbol(
+        ledger,
+        account="real",
+        trade_date=round_dt.date().isoformat(),
+    )
     actionable, suppressed_alerts = select_optimal_actionable_alerts(
         results=results,
         prices=prices,
@@ -383,6 +476,8 @@ def run_monitor_round():
         max_single_position_pct=float(config.get("max_single_position_pct", 25.0) or 25.0),
         max_sector_position_pct=float(config.get("max_sector_position_pct", 35.0) or 35.0),
         trading_mode=trading_mode,
+        same_day_bought_units_by_symbol=same_day_buys,
+        recent_real_trades_by_symbol=recent_real_trades,
     )
 
     real_holding_symbols = {
@@ -411,6 +506,7 @@ def run_monitor_round():
         total_assets=total_assets,
         t2_pending_cash=t2_pending_cash,
         trading_mode=trading_mode,
+        monitor_action_email_enabled=action_email_enabled,
     )
     write_monitor_window_snapshot(window_snapshot)
 
@@ -438,6 +534,20 @@ def run_monitor_round():
             log.warning(f"双账户收盘/PnL快照失败: {e}")
 
     # 5. 通知
+    if actionable and action_email_enabled:
+        try:
+            send_action_required_email(
+                round_time=round_time,
+                actionable=actionable,
+                prices=prices,
+                stocks=all_stocks,
+                now=round_dt,
+            )
+        except Exception as e:  # noqa: BLE001
+            log.warning(f"执行提醒邮件发送失败: {type(e).__name__}: {e}")
+    elif actionable:
+        log.info("执行提醒邮件已由桌面开关关闭。")
+
     if not MONITOR_POPUPS_ENABLED:
         log.info("稳定监控窗口模式：跳过弹框。设置 INVEST_MONITOR_POPUPS=1 可恢复弹框。")
         if actionable:
@@ -555,9 +665,11 @@ def main():
         log.info("当前非交易时段，等待开盘...")
 
     # 主循环
+    just_entered_trading = True
     while True:
         try:
             if not is_trading_time():
+                just_entered_trading = True
                 # 非交易时段，每分钟检查一次
                 now = datetime.now()
                 if now.weekday() >= 5:
@@ -570,8 +682,12 @@ def main():
                     time.sleep(60)
                 continue
 
-            # 交易时段：等待到下一个监控间隔节点
-            wait_until_next_round()
+            # 交易时段：刚开盘先跑一轮，之后等待到下一个监控间隔节点
+            if just_entered_trading:
+                just_entered_trading = False
+                log.info("开盘首轮，立即执行...")
+            else:
+                wait_until_next_round()
             run_monitor_round()
 
         except KeyboardInterrupt:

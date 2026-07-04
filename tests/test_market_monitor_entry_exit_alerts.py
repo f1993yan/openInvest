@@ -20,6 +20,7 @@ from jobs.market_monitor import (
     should_send_monitor_summary_popup,
     update_entry_exit_alert_state,
 )
+from jobs.market_monitor_notify import send_action_required_email
 from scripts.monitor_window_text import _llm_review_lots_hint
 from scripts.monitor_window_text import _operation_summary
 
@@ -94,6 +95,77 @@ def test_monitor_summary_popup_schedule_rules():
         now=datetime(2026, 6, 9, 10, 10),
         actionable=[{"symbol": "600900"}],
     )
+
+
+def test_action_required_email_is_disabled_by_default(monkeypatch, tmp_path):
+    monkeypatch.setenv("INVEST_MONITOR_EMAIL_ACTIONS", "0")
+    import jobs.market_monitor_notify as notify
+
+    monkeypatch.setattr(notify, "ACTION_EMAIL_STATE_PATH", tmp_path / "action_email_state.json")
+    called = {"value": False}
+    monkeypatch.setattr("services.notifier.send_email_html", lambda **_: called.update(value=True) or "x@example.com")
+
+    receiver = send_action_required_email(
+        round_time="10:30",
+        actionable=[{"symbol": "600900", "name": "长江电力", "verdict": "BUY", "suggested_alloc_cny": 5000}],
+        prices={"600900": {"price": 25.0}},
+        stocks=[{"symbol": "600900", "min_lot_size": 100}],
+        now=datetime(2026, 7, 1, 10, 30),
+    )
+
+    assert receiver == ""
+    assert called["value"] is False
+
+
+def test_action_required_email_renders_lots_reason_and_dedupes(monkeypatch, tmp_path):
+    monkeypatch.setenv("INVEST_MONITOR_EMAIL_ACTIONS", "1")
+    import jobs.market_monitor_notify as notify
+
+    monkeypatch.setattr(notify, "ACTION_EMAIL_STATE_PATH", tmp_path / "action_email_state.json")
+    sent = []
+    monkeypatch.setattr("services.notifier.render_markdown_email", lambda md, **_: f"<html>{md}</html>")
+
+    def _send_email(**kwargs):
+        sent.append(kwargs)
+        return "me@example.com"
+
+    monkeypatch.setattr("services.notifier.send_email_html", _send_email)
+    action = {
+        "symbol": "600900",
+        "name": "长江电力",
+        "verdict": "ACCUMULATE",
+        "confidence": 0.8,
+        "suggested_alloc_cny": 5000,
+        "optimizer_lots": 2,
+        "llm_review_lots": 1,
+        "alert_source": "selected_by_cash_risk_optimizer",
+        "alert_triggers": [{"side": "buy", "kind": "buy_breakout", "level": 26.5}],
+        "optimizer_review": "CONCLUSION: approve\nONE_LINE: 突破买点触发，风险收益比可接受。",
+    }
+
+    first = send_action_required_email(
+        round_time="10:30",
+        actionable=[action],
+        prices={"600900": {"price": 26.6}},
+        stocks=[{"symbol": "600900", "min_lot_size": 100}],
+        now=datetime(2026, 7, 1, 10, 30),
+    )
+    second = send_action_required_email(
+        round_time="10:40",
+        actionable=[action],
+        prices={"600900": {"price": 26.8}},
+        stocks=[{"symbol": "600900", "min_lot_size": 100}],
+        now=datetime(2026, 7, 1, 10, 40),
+    )
+
+    assert first == "me@example.com"
+    assert second == ""
+    assert len(sent) == 1
+    plain = sent[0]["plain_body"]
+    assert "长江电力 (600900)" in plain
+    assert "2手（LLM审核推荐1手）" in plain
+    assert "buy_breakout@26.50" in plain
+    assert "突破买点触发" in plain
 
 
 def test_entry_exit_alert_requires_two_consecutive_triggers(tmp_path):
@@ -349,6 +421,7 @@ def test_monitor_window_snapshot_contains_stable_status_fields():
 
     row = snapshot["rows"][0]
     assert snapshot["trading_mode"] == {"mode": "risk_off", "label": "主动避险"}
+    assert snapshot["monitor_action_email_enabled"] is True
     assert snapshot["counts"]["action_required"] == 1
     assert row["state"] == "action_required"
     assert row["buy_criteria"]["breakout_price"] == 10.5
@@ -363,6 +436,24 @@ def test_monitor_window_snapshot_contains_stable_status_fields():
     assert _llm_review_lots_hint(row) == "LLM审核推荐1手"
     assert row["units"] == 200
     assert row["is_holding"] is True
+
+
+def test_monitor_window_snapshot_can_disable_action_email_flag():
+    snapshot = build_monitor_window_snapshot(
+        round_time="10:30",
+        results=[],
+        actionable=[],
+        prices={},
+        stocks=[],
+        entry_exit_watch=[],
+        entry_exit_alerts=[],
+        suppressed_alerts=[],
+        cash=10000,
+        total_assets=100000,
+        monitor_action_email_enabled=False,
+    )
+
+    assert snapshot["monitor_action_email_enabled"] is False
 
 
 class _DummyLedger:
@@ -459,6 +550,191 @@ def test_repeated_trade_guard_allows_buy_when_previous_breakout_triggers():
     )
 
     assert guarded is result
+
+
+def test_repeated_trade_guard_blocks_sell_without_current_exit_trigger_after_buy():
+    result = {
+        "success": True,
+        "symbol": "002463",
+        "name": "沪电股份",
+        "market": "a",
+        "verdict": "SELL",
+        "confidence": 0.82,
+        "suggested_alloc_cny": -18000,
+    }
+    ledger = _DummyLedger([
+        {
+            "id": 2,
+            "ts": "2099-01-01T00:00:00+00:00",
+            "trade_date": "2099-01-01",
+            "symbol": "002463",
+            "direction": "BUY",
+            "source": "committee_auto",
+            "price": 146.0,
+        }
+    ])
+    state = {
+        "symbols": {
+            "002463": {
+                "position_exit_plan": {
+                    "effective_stop_price": 138.0,
+                    "take_profit_1_price": 158.0,
+                    "take_profit_2_price": 168.0,
+                }
+            }
+        }
+    }
+
+    guarded = apply_repeated_trade_guard(
+        result,
+        stock={"symbol": "002463", "market": "a", "position_pct": 10.0, "units": 200, "cost": 146.0},
+        current_price=145.0,
+        ledger=ledger,
+        entry_exit_state=state,
+    )
+
+    assert guarded["execution_blocked"] is True
+    assert guarded["execution_block_reason"] == "sell_waiting_for_current_exit_trigger"
+    assert guarded["verdict"] == "HOLD"
+
+
+def test_repeated_trade_guard_allows_sell_when_current_exit_trigger_after_buy():
+    result = {
+        "success": True,
+        "symbol": "002463",
+        "name": "沪电股份",
+        "market": "a",
+        "verdict": "SELL",
+        "confidence": 0.82,
+        "suggested_alloc_cny": -18000,
+    }
+    ledger = _DummyLedger([
+        {
+            "id": 2,
+            "ts": "2099-01-01T00:00:00+00:00",
+            "trade_date": "2099-01-01",
+            "symbol": "002463",
+            "direction": "BUY",
+            "source": "committee_auto",
+            "price": 146.0,
+        }
+    ])
+    state = {
+        "symbols": {
+            "002463": {
+                "position_exit_plan": {
+                    "effective_stop_price": 138.0,
+                    "take_profit_1_price": 158.0,
+                    "take_profit_2_price": 168.0,
+                }
+            }
+        }
+    }
+
+    guarded = apply_repeated_trade_guard(
+        result,
+        stock={"symbol": "002463", "market": "a", "position_pct": 10.0, "units": 200, "cost": 146.0},
+        current_price=137.5,
+        ledger=ledger,
+        entry_exit_state=state,
+    )
+
+    assert guarded is result
+
+
+def test_repeated_trade_guard_blocks_buyback_after_sell_without_new_trigger():
+    result = {
+        "success": True,
+        "symbol": "600900",
+        "name": "长江电力",
+        "verdict": "ACCUMULATE",
+        "confidence": 0.72,
+        "suggested_alloc_cny": 5000,
+    }
+    ledger = _DummyLedger([
+        {
+            "id": 3,
+            "ts": "2099-01-01T00:00:00+00:00",
+            "trade_date": "2099-01-01",
+            "symbol": "600900",
+            "direction": "SELL",
+            "source": "committee_auto",
+            "price": 29.0,
+        }
+    ])
+    state = {
+        "symbols": {
+            "600900": {
+                "entry_exit_points": {
+                    "buy_pullback_price": 27.0,
+                    "buy_breakout_price": 30.5,
+                    "reentry_price": 26.5,
+                }
+            }
+        }
+    }
+
+    guarded = apply_repeated_trade_guard(
+        result,
+        stock={"symbol": "600900", "position_pct": 0.0},
+        current_price=29.2,
+        ledger=ledger,
+        entry_exit_state=state,
+    )
+
+    assert guarded["execution_blocked"] is True
+    assert guarded["execution_block_reason"] == "recent_opposite_committee_trade_without_new_entry_exit_trigger"
+
+
+def test_repeated_trade_guard_allows_buyback_after_sell_on_pullback_or_breakout():
+    result = {
+        "success": True,
+        "symbol": "600900",
+        "name": "长江电力",
+        "verdict": "ACCUMULATE",
+        "confidence": 0.72,
+        "suggested_alloc_cny": 5000,
+    }
+    ledger = _DummyLedger([
+        {
+            "id": 3,
+            "ts": "2099-01-01T00:00:00+00:00",
+            "trade_date": "2099-01-01",
+            "symbol": "600900",
+            "direction": "SELL",
+            "source": "committee_auto",
+            "price": 29.0,
+        }
+    ])
+    state = {
+        "symbols": {
+            "600900": {
+                "entry_exit_points": {
+                    "buy_pullback_price": 27.0,
+                    "buy_breakout_price": 30.5,
+                    "reentry_price": 26.5,
+                }
+            }
+        }
+    }
+
+    pullback = apply_repeated_trade_guard(
+        result,
+        stock={"symbol": "600900", "position_pct": 0.0},
+        current_price=26.9,
+        ledger=ledger,
+        entry_exit_state=state,
+    )
+    breakout = apply_repeated_trade_guard(
+        result,
+        stock={"symbol": "600900", "position_pct": 0.0},
+        current_price=30.6,
+        ledger=ledger,
+        entry_exit_state=state,
+    )
+
+    assert pullback is result
+    assert breakout is result
 
 
 def test_alert_optimizer_blocks_limit_up_buy():
@@ -567,7 +843,7 @@ def test_cash_recovery_mode_preserves_cash_by_suppressing_marginal_buy():
     assert suppressed[0]["reason"].startswith("cash_reserve_insufficient:cash_recovery")
 
 
-def test_cash_recovery_mode_can_promote_cash_releasing_sell():
+def test_cash_recovery_mode_still_waits_for_current_exit_trigger():
     result = {
         "success": True,
         "symbol": "002185",
@@ -612,8 +888,7 @@ def test_cash_recovery_mode_can_promote_cash_releasing_sell():
     )
 
     assert active == []
-    assert [row["symbol"] for row in recovery] == ["002185"]
-    assert recovery[0]["trading_mode"] == "cash_recovery"
+    assert recovery == []
 
 
 def test_review_conclusion_uses_structured_field_not_stray_words():
@@ -931,7 +1206,19 @@ def test_sell_trigger_uses_policy_aware_threshold_below_plain_45():
         prices={"600900": {"price": 9.9, "change_pct": -1.0}},
         cash=10000,
         stocks=[{"symbol": "600900", "position_pct": 8.0, "units": 1000, "cost": 10.0}],
-        entry_exit_state={"symbols": {"600900": {"position_exit_plan": {"effective_stop_price": 10.0}}}},
+        entry_exit_state={
+            "symbols": {
+                "600900": {
+                    "position_exit_plan": {
+                        "version": 1,
+                        "entry_price": 10.0,
+                        "units": 1000,
+                        "effective_stop_price": 10.0,
+                        "hard_stop_price": 10.0,
+                    }
+                }
+            }
+        },
     )
 
     assert suppressed == []
@@ -940,7 +1227,7 @@ def test_sell_trigger_uses_policy_aware_threshold_below_plain_45():
     assert selected[0]["alert_score"] >= selected[0]["alert_threshold"]
 
 
-def test_high_confidence_held_sell_can_alert_without_price_trigger():
+def test_high_confidence_held_sell_waits_without_current_exit_trigger():
     result = {
         "success": True,
         "symbol": "002185",
@@ -974,9 +1261,9 @@ def test_high_confidence_held_sell_can_alert_without_price_trigger():
     )
 
     assert _sell_committee_execution_edge(result, stock, price) > 0.45
-    assert [row["symbol"] for row in selected] == ["002185"]
-    assert selected[0]["alert_threshold"] < 41.0
-    assert suppressed == []
+    assert selected == []
+    assert suppressed[0]["symbol"] == "002185"
+    assert suppressed[0]["reason"].startswith("sell_waiting_for_current_exit_trigger:")
 
 
 def test_weak_trim_without_trigger_stays_candidate_with_clear_reason():
@@ -1012,7 +1299,189 @@ def test_weak_trim_without_trigger_stays_candidate_with_clear_reason():
 
     assert selected == []
     assert suppressed
-    assert suppressed[0]["reason"].startswith("sell_waiting_for_trigger_or_edge:")
+    assert suppressed[0]["reason"].startswith("sell_waiting_for_current_exit_trigger:")
+
+
+def test_stale_position_stop_is_recomputed_from_current_holding_cost_before_alerting():
+    result = {
+        "success": True,
+        "symbol": "002463",
+        "name": "沪电股份",
+        "market": "a",
+        "verdict": "SELL",
+        "confidence": 0.66,
+        "suggested_alloc_cny": -28802,
+        "entry_exit_points": {
+            "atr_pct": 7.3373,
+            "expected_return_pct": 5.5455,
+            "reward_risk_ratio": 1.5,
+        },
+        "position_exit_policy": {
+            "max_loss_pct": 5.5,
+            "stop_atr_mult": 1.4,
+            "take_profit_r1": 1.0,
+            "take_profit_r2": 2.75,
+            "sell_reliability": 0.714286,
+            "sell_win_rate_lower": 0.365462,
+            "post_sell_positive_edge_lower": 0.342082,
+        },
+    }
+    stock = {"symbol": "002463", "position_pct": 8.5, "units": 200, "cost": 146.55, "min_lot_size": 100}
+    state = {
+        "symbols": {
+            "002463": {
+                "position_exit_plan": {
+                    "entry_price": 152.48,
+                    "units": 200,
+                    "effective_stop_price": 144.09,
+                    "hard_stop_price": 144.09,
+                    "take_profit_1_price": 160.0,
+                    "take_profit_2_price": 170.0,
+                    "version": 1,
+                },
+                "last_triggers": [{"side": "sell", "kind": "position_stop", "level": 144.09, "price": 144.01}],
+            }
+        }
+    }
+
+    selected, suppressed = select_optimal_actionable_alerts(
+        results=[result],
+        prices={"002463": {"price": 144.01, "change_pct": -5.75}},
+        cash=10000,
+        stocks=[stock],
+        entry_exit_state=state,
+        portfolio_value=342148,
+    )
+
+    assert selected == []
+    assert suppressed[0]["symbol"] == "002463"
+    assert suppressed[0]["reason"].startswith("sell_waiting_for_current_exit_trigger:")
+
+
+def test_a_share_same_day_buy_units_are_not_sellable_for_alerts():
+    result = {
+        "success": True,
+        "symbol": "002463",
+        "name": "沪电股份",
+        "market": "a",
+        "verdict": "HOLD",
+        "confidence": 0.52,
+        "suggested_alloc_cny": 0,
+        "entry_exit_points": {"expected_return_pct": 0.2, "reward_risk_ratio": 1.2},
+        "position_exit_policy": {
+            "sell_count": 30,
+            "sell_reliability": 0.8,
+            "sell_win_rate_lower": 0.6,
+            "post_sell_positive_edge_lower": 0.6,
+            "sell_utility_adjustment_pct": 3.0,
+            "avg_post_sell_net_edge_pct": 4.0,
+            "max_loss_pct": 4.0,
+        },
+    }
+    stock = {"symbol": "002463", "position_pct": 8.5, "units": 200, "cost": 146.55, "min_lot_size": 100}
+    state = {
+        "symbols": {
+            "002463": {
+                "position_exit_plan": {
+                    "effective_stop_price": 138.49,
+                    "hard_stop_price": 138.49,
+                    "take_profit_1_price": 154.61,
+                    "take_profit_2_price": 168.72,
+                    "entry_price": 146.55,
+                    "units": 200,
+                    "version": 1,
+                },
+                "last_triggers": [{"side": "sell", "kind": "position_stop", "level": 138.49, "price": 130.0}],
+            }
+        }
+    }
+
+    selected, suppressed = select_optimal_actionable_alerts(
+        results=[result],
+        prices={"002463": {"price": 130.0, "change_pct": -7.0}},
+        cash=10000,
+        stocks=[stock],
+        entry_exit_state=state,
+        portfolio_value=342148,
+        same_day_bought_units_by_symbol={"002463": 200},
+    )
+
+    assert selected == []
+    assert suppressed[0]["reason"] == "same_day_a_share_t1_sell_blocked"
+
+
+def test_alert_optimizer_blocks_buy_after_recent_real_sell_without_new_trigger():
+    result = {
+        "success": True,
+        "symbol": "600900",
+        "name": "长江电力",
+        "market": "a",
+        "verdict": "ACCUMULATE",
+        "confidence": 0.86,
+        "suggested_alloc_cny": 10000,
+        "entry_exit_points": {"expected_return_pct": 6.0, "reward_risk_ratio": 2.2},
+    }
+    selected, suppressed = select_optimal_actionable_alerts(
+        results=[result],
+        prices={"600900": {"price": 29.2, "change_pct": 0.3}},
+        cash=20000,
+        stocks=[{"symbol": "600900", "position_pct": 0.0, "min_lot_size": 100}],
+        entry_exit_state={
+            "symbols": {
+                "600900": {
+                    "entry_exit_points": {
+                        "buy_pullback_price": 27.0,
+                        "buy_breakout_price": 30.5,
+                        "reentry_price": 26.5,
+                    }
+                }
+            }
+        },
+        portfolio_value=100000,
+        recent_real_trades_by_symbol={
+            "600900": {"symbol": "600900", "direction": "SELL", "price": 29.0, "trade_date": "2099-01-01"}
+        },
+    )
+
+    assert selected == []
+    assert suppressed[0]["reason"] == "recent_opposite_real_trade_without_new_entry_exit_trigger:BUY"
+
+
+def test_alert_optimizer_allows_buy_after_recent_real_sell_on_fresh_trigger():
+    result = {
+        "success": True,
+        "symbol": "600900",
+        "name": "长江电力",
+        "market": "a",
+        "verdict": "ACCUMULATE",
+        "confidence": 0.86,
+        "suggested_alloc_cny": 10000,
+        "entry_exit_points": {"expected_return_pct": 6.0, "reward_risk_ratio": 2.2},
+    }
+    selected, suppressed = select_optimal_actionable_alerts(
+        results=[result],
+        prices={"600900": {"price": 26.9, "change_pct": -1.5}},
+        cash=20000,
+        stocks=[{"symbol": "600900", "position_pct": 0.0, "min_lot_size": 100}],
+        entry_exit_state={
+            "symbols": {
+                "600900": {
+                    "entry_exit_points": {
+                        "buy_pullback_price": 27.0,
+                        "buy_breakout_price": 30.5,
+                        "reentry_price": 26.5,
+                    }
+                }
+            }
+        },
+        portfolio_value=100000,
+        recent_real_trades_by_symbol={
+            "600900": {"symbol": "600900", "direction": "SELL", "price": 29.0, "trade_date": "2099-01-01"}
+        },
+    )
+
+    assert suppressed == []
+    assert selected[0]["symbol"] == "600900"
 
 
 def test_candidate_sell_is_not_rendered_as_plain_observation():

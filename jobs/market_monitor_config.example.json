@@ -4,6 +4,7 @@
   "t2_pending_cash": 0,
   "sync_real_account_from_config": true,
   "trading_mode": "active_profit",
+  "monitor_action_email_enabled": true,
   "max_action_alerts": 4,
   "max_single_position_pct": 25,
   "max_sector_position_pct": 35,

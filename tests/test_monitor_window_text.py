@@ -107,6 +107,16 @@ def test_negative_alloc_overrides_hold_display_to_trim(monkeypatch):
     assert "持有不动" not in text
 
 
+def test_executed_operation_summary_is_stable():
+    row = {
+        "symbol": "000063",
+        "state": "executed",
+        "operation": {"status": "executed", "verdict": "BUY", "suggested_alloc_cny": 6000},
+    }
+
+    assert _operation_summary(row) == "已执行"
+
+
 def test_low_confidence_boilerplate_is_removed(monkeypatch):
     import utils.market_data_provider
     monkeypatch.setattr(utils.market_data_provider, "get_history_data", lambda symbol, period="2y": pd.DataFrame())

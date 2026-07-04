@@ -6,8 +6,14 @@ import re
 from typing import Any, Dict, List, Optional, Tuple
 
 from jobs.market_monitor_common import _clamp, _safe_num
-from jobs.market_monitor_entry_exit import evaluate_entry_exit_triggers, evaluate_position_exit_plan_triggers, _stock_units
+from jobs.market_monitor_entry_exit import (
+    evaluate_entry_exit_triggers,
+    evaluate_position_exit_plan_triggers,
+    _stock_units,
+    _update_position_exit_plan,
+)
 from jobs.market_monitor_guards import _is_limit_up_buy_blocked
+from jobs.market_monitor_guards import _trigger_has_price_progress_from_trade
 from jobs.trading_mode import (
     DEFAULT_TRADING_MODE,
     normalize_trading_mode,
@@ -364,6 +370,111 @@ def _is_existing_position(stock: Dict[str, Any]) -> bool:
     return _safe_num(stock.get("position_pct")) > 0 or _stock_units(stock) > 0
 
 
+def _is_a_share_position(result: Dict[str, Any], stock: Dict[str, Any]) -> bool:
+    market = str(result.get("market") or stock.get("market") or "").strip().lower()
+    symbol = str(result.get("symbol") or stock.get("symbol") or "").strip().upper()
+    if market in {"a", "ashare", "a-share", "cn", "china", "sse", "szse", "sh", "sz"}:
+        return True
+    return symbol.isdigit() and len(symbol) == 6
+
+
+def _same_day_buy_units(
+    symbol: str,
+    same_day_bought_units_by_symbol: Optional[Dict[str, float]],
+) -> float:
+    if not same_day_bought_units_by_symbol:
+        return 0.0
+    return _safe_num(same_day_bought_units_by_symbol.get(symbol.upper()))
+
+
+def _alert_lot_size(stock: Dict[str, Any], result: Dict[str, Any]) -> int:
+    return max(1, int(stock.get("min_lot_size") or result.get("min_lot_size") or 100))
+
+
+def _sellable_units_for_alert(
+    result: Dict[str, Any],
+    *,
+    stock: Dict[str, Any],
+    same_day_bought_units_by_symbol: Optional[Dict[str, float]],
+) -> float:
+    units = _stock_units(stock)
+    symbol = str(result.get("symbol") or stock.get("symbol") or "").upper()
+    if _is_a_share_position(result, stock):
+        units -= _same_day_buy_units(symbol, same_day_bought_units_by_symbol)
+    return max(0.0, units)
+
+
+def _sellable_lots_for_alert(
+    result: Dict[str, Any],
+    *,
+    stock: Dict[str, Any],
+    same_day_bought_units_by_symbol: Optional[Dict[str, float]],
+) -> int:
+    lot = _alert_lot_size(stock, result)
+    sellable_units = _sellable_units_for_alert(
+        result,
+        stock=stock,
+        same_day_bought_units_by_symbol=same_day_bought_units_by_symbol,
+    )
+    if sellable_units <= 0:
+        return 0
+    return int(math.floor(sellable_units / lot))
+
+
+def _same_day_t1_block_reason(
+    result: Dict[str, Any],
+    *,
+    stock: Dict[str, Any],
+    same_day_bought_units_by_symbol: Optional[Dict[str, float]],
+) -> str:
+    symbol = str(result.get("symbol") or stock.get("symbol") or "").upper()
+    bought_units = _same_day_buy_units(symbol, same_day_bought_units_by_symbol)
+    if bought_units > 0 and _is_a_share_position(result, stock):
+        return "same_day_a_share_t1_sell_blocked"
+    return "discipline_review_no_sellable_lots"
+
+
+def _recent_trade_for_symbol(
+    symbol: str,
+    recent_trades_by_symbol: Optional[Dict[str, Dict[str, Any]]],
+) -> Dict[str, Any]:
+    if not recent_trades_by_symbol:
+        return {}
+    return dict(recent_trades_by_symbol.get(symbol.upper()) or {})
+
+
+def _trade_direction(trade: Dict[str, Any]) -> str:
+    return str(trade.get("direction") or "").upper()
+
+
+def _direction_has_trigger(direction: str, triggers: List[Dict[str, Any]]) -> bool:
+    side = direction.lower()
+    return any(str(t.get("side") or "").lower() == side for t in triggers)
+
+
+def _opposite_trade_wait_reason(
+    *,
+    direction: str,
+    triggers: List[Dict[str, Any]],
+    current_price: float,
+    recent_trade: Dict[str, Any],
+) -> str:
+    if not recent_trade:
+        return ""
+    if _trade_direction(recent_trade) == direction:
+        return ""
+    if not _direction_has_trigger(direction, triggers):
+        return f"recent_opposite_real_trade_without_new_entry_exit_trigger:{direction}"
+    if not _trigger_has_price_progress_from_trade(
+        direction=direction,
+        triggers=triggers,
+        current_price=current_price,
+        previous_trade=recent_trade,
+    ):
+        return f"recent_opposite_real_trade_without_price_progress:{direction}"
+    return ""
+
+
 def _confirmed_position_sell_trigger(
     *,
     symbol: str,
@@ -534,6 +645,7 @@ def _build_discipline_sell_candidate(
     triggers: List[Dict[str, Any]],
     entry_exit_state: Dict[str, Any],
     trading_mode: str,
+    same_day_bought_units_by_symbol: Optional[Dict[str, float]] = None,
 ) -> Optional[Dict[str, Any]]:
     symbol = str(result.get("symbol") or stock.get("symbol") or "").upper()
     if not symbol or not _is_existing_position(stock) or not any(t.get("side") == "sell" for t in triggers):
@@ -552,9 +664,13 @@ def _build_discipline_sell_candidate(
         confirmation_reason=confirmation_reason,
     )
     kind = str(review.get("trigger_kind") or "")
-    lot_size = int(stock.get("min_lot_size") or result.get("min_lot_size") or 100)
-    lot_size = max(lot_size, 1)
-    held_lots = _held_lots(stock, lot_size)
+    lot_size = _alert_lot_size(stock, result)
+    sellable_units = _sellable_units_for_alert(
+        result,
+        stock=stock,
+        same_day_bought_units_by_symbol=same_day_bought_units_by_symbol,
+    )
+    held_lots = int(math.floor(sellable_units / lot_size)) if sellable_units > 0 else 0
     sell_lots = _discipline_sell_lots(kind, held_lots)
     price = _safe_num(price_info.get("price"))
     if sell_lots <= 0 or price <= 0:
@@ -564,7 +680,11 @@ def _build_discipline_sell_candidate(
             "alert_source": DISCIPLINE_REVIEW_ALERT_SOURCE,
             "discipline_review": review,
             "alert_triggers": triggers,
-            "alert_wait_reason": "discipline_review_no_sellable_lots",
+            "alert_wait_reason": _same_day_t1_block_reason(
+                result,
+                stock=stock,
+                same_day_bought_units_by_symbol=same_day_bought_units_by_symbol,
+            ),
         }
     verdict = "SELL" if kind in {"position_stop", "cost_stop_loss", "stop_loss", "take_profit_2", "take_profit"} else "TRIM"
     confidence = _clamp(
@@ -607,7 +727,11 @@ def _sell_candidate_wait_label(reason: str) -> str:
         if edge_match:
             return f"{base}（净效用{edge_match.group(1)}pct）"
         return base
-    if "waiting_for_trigger_or_edge" in text:
+    if "same_day_a_share_t1_sell_blocked" in text:
+        base = "A股当天买入部分不可当天卖出"
+    elif "waiting_for_current_exit_trigger" in text:
+        base = "未触发当前止损/止盈线，暂不提示卖出"
+    elif "waiting_for_trigger_or_edge" in text:
         base = "卖出证据不足，未触发纪律线"
     elif "low_sell_score" in text:
         base = "卖出评分不足"
@@ -640,9 +764,17 @@ def _entry_trigger_for_result(
     previous = ((entry_exit_state.get("symbols") or {}).get(symbol) or {})
     is_holding = _safe_num(stock.get("position_pct")) > 0 or _stock_units(stock) > 0
     if is_holding:
+        position_exit_plan = _update_position_exit_plan(
+            previous.get("position_exit_plan"),
+            symbol=symbol,
+            stock=stock,
+            result=result,
+            current_price=current_price,
+            is_holding=True,
+        )
         return evaluate_position_exit_plan_triggers(
             current_price,
-            previous.get("position_exit_plan"),
+            position_exit_plan,
         )
     return evaluate_entry_exit_triggers(
         current_price,
@@ -910,6 +1042,8 @@ def select_optimal_actionable_alerts(
     max_single_position_pct: float = 25.0,
     max_sector_position_pct: float = 35.0,
     trading_mode: str = DEFAULT_TRADING_MODE,
+    same_day_bought_units_by_symbol: Optional[Dict[str, float]] = None,
+    recent_real_trades_by_symbol: Optional[Dict[str, Dict[str, Any]]] = None,
 ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
     """Pick executable alerts under cash and risk-distribution budgets.
 
@@ -968,6 +1102,7 @@ def select_optimal_actionable_alerts(
             triggers=triggers,
             entry_exit_state=entry_exit_state,
             trading_mode=mode,
+            same_day_bought_units_by_symbol=same_day_bought_units_by_symbol,
         )
 
         if verdict in {"HOLD", "REDUCE", "UNCLEAR"} or abs(alloc) <= 0:
@@ -1011,7 +1146,7 @@ def select_optimal_actionable_alerts(
                     suppressed.append({
                         "symbol": symbol,
                         "name": result.get("name"),
-                        "reason": _discipline_wait_reason(review),
+                        "reason": discipline_candidate.get("alert_wait_reason") or _discipline_wait_reason(review),
                         "discipline_review": review,
                         "alert_source": DISCIPLINE_REVIEW_ALERT_SOURCE,
                     })
@@ -1020,6 +1155,49 @@ def select_optimal_actionable_alerts(
         score = _action_score(result, stock=stock, price_info=price_info, triggers=triggers)
 
         if verdict in {"TRIM", "SELL"} and alloc < 0:
+            recent_trade = _recent_trade_for_symbol(symbol, recent_real_trades_by_symbol)
+            wait_reason = _opposite_trade_wait_reason(
+                direction="SELL",
+                triggers=triggers,
+                current_price=price,
+                recent_trade=recent_trade,
+            )
+            if wait_reason:
+                suppressed.append({
+                    "symbol": symbol,
+                    "name": result.get("name"),
+                    "reason": wait_reason,
+                    "recent_trade": recent_trade,
+                    "alert_source": "trade_cooldown",
+                })
+                continue
+            if not any(t.get("side") == "sell" for t in triggers):
+                suppressed.append({
+                    "symbol": symbol,
+                    "name": result.get("name"),
+                    "reason": f"sell_waiting_for_current_exit_trigger:{verdict}",
+                    "discipline_review": (discipline_candidate or {}).get("discipline_review") or {},
+                    "alert_source": (discipline_candidate or {}).get("alert_source") or "committee_sell",
+                })
+                continue
+            sellable_lots = _sellable_lots_for_alert(
+                result,
+                stock=stock,
+                same_day_bought_units_by_symbol=same_day_bought_units_by_symbol,
+            )
+            if sellable_lots <= 0:
+                suppressed.append({
+                    "symbol": symbol,
+                    "name": result.get("name"),
+                    "reason": _same_day_t1_block_reason(
+                        result,
+                        stock=stock,
+                        same_day_bought_units_by_symbol=same_day_bought_units_by_symbol,
+                    ),
+                    "discipline_review": (discipline_candidate or {}).get("discipline_review") or {},
+                    "alert_source": (discipline_candidate or {}).get("alert_source") or "committee_sell",
+                })
+                continue
             threshold = _sell_committee_alert_threshold(
                 result,
                 stock=stock,
@@ -1041,6 +1219,15 @@ def select_optimal_actionable_alerts(
                 if discipline_candidate:
                     selected["discipline_review"] = discipline_candidate.get("discipline_review") or {}
                     selected.setdefault("alert_source", "committee_sell")
+                    selected["optimizer_lots"] = min(
+                        int(_safe_num(discipline_candidate.get("optimizer_lots") or sellable_lots)),
+                        sellable_lots,
+                    )
+                    selected["alert_selected_lots"] = selected["optimizer_lots"]
+                    selected["llm_review_lots"] = min(
+                        int(_safe_num(discipline_candidate.get("llm_review_lots") or selected["optimizer_lots"])),
+                        selected["optimizer_lots"],
+                    )
                 selected["trading_mode"] = mode
                 selected["trading_mode_label"] = mode_label
                 sell_alerts.append(selected)
@@ -1060,6 +1247,22 @@ def select_optimal_actionable_alerts(
             continue
 
         if verdict not in {"BUY", "ACCUMULATE"} or alloc <= 0:
+            continue
+        recent_trade = _recent_trade_for_symbol(symbol, recent_real_trades_by_symbol)
+        wait_reason = _opposite_trade_wait_reason(
+            direction="BUY",
+            triggers=triggers,
+            current_price=price,
+            recent_trade=recent_trade,
+        )
+        if wait_reason:
+            suppressed.append({
+                "symbol": symbol,
+                "name": result.get("name"),
+                "reason": wait_reason,
+                "recent_trade": recent_trade,
+                "alert_source": "trade_cooldown",
+            })
             continue
         if _is_limit_up_buy_blocked(result, price_info):
             suppressed.append({"symbol": symbol, "name": result.get("name"), "reason": "limit_up_buy_blocked"})

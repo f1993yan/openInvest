@@ -393,6 +393,7 @@ class AccountLedger:
         alloc = float(result.get("suggested_alloc_cny", 0) or 0)
         if price <= 0 or abs(alloc) <= 0:
             return None
+        trade_date = trade_date or date.today().isoformat()
         if verdict in {"BUY", "ACCUMULATE"}:
             direction = "BUY"
         elif verdict in {"TRIM", "SELL"}:
@@ -411,7 +412,14 @@ class AccountLedger:
             units = _round_down_to_lot(min(units, cash / price), lot)
         else:
             held = float((holding or {}).get("units", 0) or 0)
-            units = _round_down_to_lot(min(units, held), lot)
+            sellable = self._sellable_units_for_trade_date(
+                account=COMMITTEE_ACCOUNT,
+                symbol=symbol,
+                trade_date=trade_date,
+                current_units=held,
+                market=str((holding or {}).get("market") or ""),
+            )
+            units = _round_down_to_lot(min(units, sellable), lot)
         if units <= 0:
             return None
         return self._apply_trade(
@@ -540,6 +548,7 @@ class AccountLedger:
         strict: bool,
     ) -> ExecutedTrade:
         _validate_account(account)
+        symbol = str(symbol or "").strip().upper()
         direction = direction.upper()
         if direction not in {"BUY", "SELL"}:
             raise ValueError("direction must be BUY or SELL")
@@ -594,6 +603,22 @@ class AccountLedger:
                     if strict:
                         raise ValueError(f"insufficient holding: sell {units}, have {current_units}")
                     units = current_units
+                sellable_units = self._sellable_units_for_trade_date(
+                    account=account,
+                    symbol=symbol,
+                    trade_date=trade_date,
+                    current_units=current_units,
+                    market=market,
+                )
+                if units > sellable_units + 1e-6:
+                    if strict:
+                        raise ValueError(
+                            f"A股T+1限制: {symbol} 今日可卖 {sellable_units:.0f} 股，"
+                            f"本次尝试卖出 {units:.0f} 股"
+                        )
+                    units = sellable_units
+                if units <= 1e-6:
+                    raise ValueError(f"A股T+1限制: {symbol} 今日无可卖股数")
                 new_units = max(0.0, current_units - units)
                 new_avg = current_avg
                 proceeds = units * price
@@ -700,6 +725,34 @@ class AccountLedger:
             (account, symbol),
         ).fetchone()
         return dict(row) if row else None
+
+    def _same_day_buy_units(self, *, account: str, symbol: str, trade_date: str) -> float:
+        row = self.conn.execute(
+            """SELECT COALESCE(SUM(units), 0) AS units
+               FROM trades
+               WHERE account = ? AND UPPER(symbol) = ? AND direction = 'BUY'
+                 AND trade_date = ?""",
+            (account, symbol.upper(), trade_date[:10]),
+        ).fetchone()
+        return float(row["units"] if row else 0.0)
+
+    def _sellable_units_for_trade_date(
+        self,
+        *,
+        account: str,
+        symbol: str,
+        trade_date: str,
+        current_units: float,
+        market: str,
+    ) -> float:
+        if not _is_a_share_market(symbol, market):
+            return max(0.0, current_units)
+        same_day_buy_units = self._same_day_buy_units(
+            account=account,
+            symbol=symbol,
+            trade_date=trade_date,
+        )
+        return max(0.0, current_units - same_day_buy_units)
 
     def _has_accounts(self) -> bool:
         row = self.conn.execute("SELECT COUNT(*) AS n FROM accounts").fetchone()
@@ -883,13 +936,68 @@ class AccountLedger:
             # Write config to disk
             config_path.write_text(json.dumps(config, ensure_ascii=False, indent=2), encoding="utf-8")
 
-            # Update snapshot
+            # Update snapshot without destroying the current monitor results.
+            # Rebuilding from config here drops all other actionable cards after
+            # the user records one trade, so preserve existing rows and only
+            # refresh account-backed fields.
             try:
-                from scripts.monitor_window_services import _load_config_snapshot
-                from jobs.market_monitor_snapshot import write_monitor_window_snapshot
+                snapshot = None
+                if snapshot_path.exists():
+                    try:
+                        loaded = json.loads(snapshot_path.read_text(encoding="utf-8"))
+                        if isinstance(loaded, dict) and isinstance(loaded.get("rows"), list):
+                            snapshot = loaded
+                    except Exception:
+                        snapshot = None
+                if snapshot is None:
+                    from scripts.monitor_window_services import _load_config_snapshot
 
-                snapshot = _load_config_snapshot("实时同步账本数据", source_path=snapshot_path)
-                write_monitor_window_snapshot(snapshot, snapshot_path)
+                    snapshot = _load_config_snapshot("实时同步账本数据", source_path=snapshot_path)
+                else:
+                    holding_by_symbol = {
+                        str(h["symbol"]).strip().upper(): h
+                        for h in ledger_holdings
+                    }
+                    for row in snapshot.get("rows") or []:
+                        sym = str(row.get("symbol") or "").strip().upper()
+                        holding = holding_by_symbol.get(sym)
+                        if not holding:
+                            continue
+                        units = float(holding.get("units") or 0.0)
+                        avg_cost = float(holding.get("avg_cost") or 0.0)
+                        row["units"] = round(units, 4)
+                        row["cost"] = avg_cost if units > 0 else 0.0
+                        row["position_pct"] = round((units * avg_cost) / total_assets * 100.0, 4) if total_assets > 0 else 0.0
+                        row["is_holding"] = units > 0
+                        row["market"] = holding.get("market") or row.get("market", "a")
+                        row["sector"] = holding.get("sector") or row.get("sector", "")
+                        row["industry"] = holding.get("industry") or row.get("industry", "")
+                        row["min_lot_size"] = int(holding.get("min_lot_size") or row.get("min_lot_size") or 100)
+                    counts = dict(snapshot.get("counts") or {})
+                    rows = list(snapshot.get("rows") or [])
+                    counts.update({
+                        "symbols": len(rows),
+                        "action_required": sum(1 for row in rows if row.get("state") == "action_required"),
+                        "errors": sum(1 for row in rows if not row.get("success", True)),
+                    })
+                    snapshot["counts"] = counts
+                    snapshot["generated_at"] = datetime.now().isoformat(timespec="seconds")
+                    snapshot["message"] = "实时同步账本数据"
+                snapshot["cash_cny"] = config["cash"]
+                snapshot["available_cash_cny"] = config["cash"]
+                snapshot["t2_pending_cash_cny"] = config["t2_pending_cash"]
+                snapshot["total_cash_cny"] = round(config["cash"] + config["t2_pending_cash"], 2)
+                snapshot["total_assets_cny"] = round(total_assets, 2)
+                try:
+                    from jobs.trading_mode import DEFAULT_TRADING_MODE, trading_mode_payload
+
+                    snapshot["trading_mode"] = trading_mode_payload(config.get("trading_mode", DEFAULT_TRADING_MODE))
+                except Exception:
+                    pass
+                snapshot_path.parent.mkdir(parents=True, exist_ok=True)
+                tmp_snapshot = snapshot_path.with_suffix(".tmp")
+                tmp_snapshot.write_text(json.dumps(snapshot, ensure_ascii=False, indent=2), encoding="utf-8")
+                tmp_snapshot.replace(snapshot_path)
             except Exception:
                 # If it fails, delete snapshot so it's rebuilt on next load
                 if snapshot_path.exists():
@@ -920,6 +1028,14 @@ def _is_hk_market(symbol: str, market: str) -> bool:
     return market_text in {"hk", "hkg", "hongkong"} or symbol_text.endswith(".HK") or (
         symbol_text.isdigit() and len(symbol_text) == 5
     )
+
+
+def _is_a_share_market(symbol: str, market: str) -> bool:
+    market_text = str(market or "").strip().lower()
+    symbol_text = str(symbol or "").strip().upper()
+    if market_text in {"a", "ashare", "a-share", "cn", "china", "sse", "szse", "sh", "sz"}:
+        return True
+    return symbol_text.isdigit() and len(symbol_text) == 6
 
 
 def _settlement_date(trade_date: str, *, sessions: int, calendar_code: str) -> str:

@@ -243,10 +243,12 @@ uv run pytest tests/test_gold_price.py tests/test_backtest_no_lookahead.py tests
 - `TRIM` 分两类：`stop_loss/bearish/risk/drawdown/exit_policy` 是风控型减仓，不要求买回点；`range_trade/take_profit_reentry/swing` 是战术型高抛低接，必须给低于现价的买回点，否则降级 `HOLD`。
 - 已触发持仓纪律线的卖出提醒会用板块策略质量、Wilson 胜率下界、保守卖出期望和卖出后路径效用调整提醒阈值，避免该卖时被普通观察状态淹没。
 - 委员会给 `HOLD` 时，如果已持仓 A 股连续触发止盈/减仓线或即时触发止损线，提醒层会生成 `position_exit_discipline_review` 纪律复核候选：用“卖出期望 - 继续持有证据 - 交易摩擦”做净效用比较。止盈止损参数本身来自历史回测，因此会乘以 `sell_reliability`、`sell_win_rate_lower` 和卖出后路径优势下界，不能把价格线当成 100% 正确的机械卖点。
-- 未触发纪律线但委员会给出强 `SELL/TRIM` 时，提醒层会额外评估持仓风险释放：委员会置信度、建议卖出金额占持仓比例、保守卖出胜率、卖出后路径效用和当日走弱程度共同决定是否进入 `需要操作`。
+- 未触发当前纪律线时，委员会强 `SELL/TRIM` 只作为候选/复核，不直接进入 `需要操作`；卖出动作必须先触发锁定的止损/止盈/减仓线，再用 Wilson 胜率下界、卖出后路径净优势和执行摩擦计算净效用。
+- 当天或冷却窗口内发生过同标的真实/影子反向成交时，不做“一刀切禁买回/禁卖出”：再次买入必须重新触发回踩、再入场或突破线，并且价格相对上次成交价已经穿越对应边界；再次卖出必须触发当前持仓纪律线。这样用价格线和统计效用约束换手，而不是用固定时间硬挡机会。
 - 每周止盈止损优化默认回看最近 62 天，同步写入 `sell_utility_adjustment_pct`、`sell_reliability` 和 `sell_evidence_score`。这些参数用 Wilson 下界和样本收缩得到，只影响已有持仓的确定性卖出效用，不改变入场点，也不新增/删除 App 接口字段。
 - 板块参数按东方财富行业优先，实时源只返回部分标的时会继续用 `data/sector_cache.json` 和本地配置补齐；单票或卖出路径样本偏少的板块会标记 `sample_quality=thin/sparse` 并收缩卖出效用，降低过拟合。
 - 盘中监控启动后会读取 `data/sector_cache.json`，对 A 股标的用东方财富板块覆盖运行时 `sector`，并保留原配置为 `config_sector`。这样委员会上下文、`position_exit_plan` 参数读取、告警板块分布和窗口展示都使用与周更优化一致的板块名。
+- 如需盘中出现 `需要操作` 时发邮件，配置 `EMAIL_SENDER`、`EMAIL_PASSWORD`、`DIGEST_EMAIL_TO` 并设置 `.env` 的 `INVEST_MONITOR_EMAIL_ACTIONS=1`。这是邮件总开关；桌面窗口标题栏的 `邮件开/邮件关` 会写入 `jobs/market_monitor_config.json` 的 `monitor_action_email_enabled`，可在运行中临时关闭执行邮件。邮件会列出标的、买/卖方向、推荐手数、LLM 审核手数差异、触发线/来源和原因；同一交易日相同触发只发送一次。
 
 诊断卖出阈值是否过严：
 
