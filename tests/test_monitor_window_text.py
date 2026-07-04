@@ -1,7 +1,12 @@
 import pandas as pd
 import numpy as np
+import sqlite3
 from scripts.monitor_window_text import _beginner_summary_lines, _detail_line_style, _operation_summary, _sector_summary
-from scripts.monitor_window_services import _fill_missing_row_sectors
+from scripts.monitor_window_services import (
+    _compute_tech_from_local_history,
+    _config_stock_row,
+    _fill_missing_row_sectors,
+)
 
 def test_beginner_summary_lines_includes_chan_analysis(monkeypatch):
     # Prepare mock DataFrame with sufficient rows
@@ -157,6 +162,57 @@ def test_fill_missing_row_sectors_uses_cache_for_existing_snapshot():
     assert filled[0]["sector"] == "电力行业"
     assert filled[0]["industry"] == "电力行业"
     assert filled[0]["sector_source"] == "eastmoney_sector_cache"
+
+
+def test_config_stock_row_prefers_cached_tech_without_history(monkeypatch):
+    import scripts.monitor_window_services as services
+
+    monkeypatch.setattr(
+        services,
+        "_find_latest_cached_committee_result",
+        lambda symbol: {
+            "entry_exit_points": {"atr_pct": 3.4},
+            "technical": {"ma20": 18.2, "ma120": 16.8},
+        },
+    )
+
+    def fail_history(*args, **kwargs):
+        raise AssertionError("history fallback should not run when cached tech is present")
+
+    monkeypatch.setattr(services, "_compute_tech_from_local_history", fail_history)
+
+    row = _config_stock_row({"symbol": "002185", "name": "华天科技", "market": "a"}, {})
+
+    assert row["technical"]["atr_pct"] == 3.4
+    assert row["technical"]["ma20"] == 18.2
+    assert row["technical"]["ma120"] == 16.8
+
+
+def test_compute_tech_from_local_history_reads_sqlite_cache_only(tmp_path):
+    db_path = tmp_path / "market_data.db"
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            """
+            CREATE TABLE daily_prices (
+                symbol TEXT, date TEXT, close REAL, source TEXT,
+                high REAL, low REAL, volume REAL,
+                PRIMARY KEY (symbol, date)
+            )
+            """
+        )
+        dates = pd.date_range("2026-01-01", periods=140, freq="D")
+        for idx, date in enumerate(dates):
+            close = 10.0 + idx * 0.05
+            conn.execute(
+                "INSERT INTO daily_prices VALUES (?, ?, ?, ?, ?, ?, ?)",
+                ("002185", date.strftime("%Y-%m-%d"), close, "test", close + 0.2, close - 0.2, 10000),
+            )
+
+    tech = _compute_tech_from_local_history("002185", "a", db_path=db_path)
+
+    assert tech["ma20"] is not None
+    assert tech["ma120"] is not None
+    assert tech["atr_pct"] > 0
 
 
 def test_low_confidence_boilerplate_is_removed(monkeypatch):

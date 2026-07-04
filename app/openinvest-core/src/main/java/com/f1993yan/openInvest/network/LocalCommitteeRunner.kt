@@ -36,6 +36,9 @@ object LocalCommitteeRunner {
         optimizerReviewEnabled: Boolean,
         maxDebateRounds: Int,
         changePct: Double,
+        ma20: Double? = null,
+        ma120: Double? = null,
+        atrPct: Double? = null,
         onResult: (Result<CommitteeStatusResponse>) -> Unit
     ) {
         val prefs = context.getSharedPreferences("open_invest_prefs", Context.MODE_PRIVATE)
@@ -94,7 +97,10 @@ object LocalCommitteeRunner {
                     maxDebateRounds,
                     serverPort,
                     changePct,
-                    tradingMode
+                    tradingMode,
+                    ma20,
+                    ma120,
+                    atrPct
                 )
 
                 val jsonResult = pyResult.toString()

@@ -72,7 +72,9 @@ data class Technical(
     val entry_exit_model: String? = null,
     val low_confidence: Boolean? = null,
     val atr_pct: Double? = null,
-    val expected_return_pct: Double? = null
+    val expected_return_pct: Double? = null,
+    val ma20: Double? = null,
+    val ma120: Double? = null
 )
 
 data class Operation(

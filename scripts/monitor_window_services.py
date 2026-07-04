@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import math
 import os
 import subprocess
@@ -20,6 +21,8 @@ from scripts.monitor_window_constants import (
 from jobs.trading_mode import DEFAULT_TRADING_MODE, normalize_trading_mode, trading_mode_label, trading_mode_payload
 
 SECTOR_CACHE_PATH = ROOT / "data" / "sector_cache.json"
+MARKET_DB_PATH = ROOT / "db" / "market_data.db"
+log = logging.getLogger(__name__)
 
 
 def _safe_num(value: Any, default: float = 0.0) -> float:
@@ -696,6 +699,117 @@ def _find_latest_cached_committee_result(symbol: str) -> Optional[Dict[str, Any]
     return None
 
 
+def _positive_metric(value: Any) -> Optional[float]:
+    number = _safe_num(value)
+    return number if number > 0 else None
+
+
+def _extract_tech_from_cached_result(cached: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    """Read technical fields already produced by the monitor/committee pipeline."""
+    result: Dict[str, Any] = {"ma20": None, "ma120": None, "atr_pct": 0.0}
+    if not isinstance(cached, dict):
+        return result
+
+    sources: List[Dict[str, Any]] = []
+    for key in ("technical", "market_metrics", "metrics", "entry_exit_points"):
+        value = cached.get(key)
+        if isinstance(value, dict):
+            sources.append(value)
+    sources.append(cached)
+
+    for field in ("ma20", "ma120"):
+        for source in sources:
+            metric = _positive_metric(source.get(field))
+            if metric is not None:
+                result[field] = metric
+                break
+
+    for source in sources:
+        metric = _positive_metric(source.get("atr_pct"))
+        if metric is not None:
+            result["atr_pct"] = metric
+            break
+
+    return result
+
+
+def _history_symbol_variants(symbol: str, market: str = "a") -> List[str]:
+    variants = _symbol_variants(symbol)
+    text = str(symbol or "").strip().upper()
+    market_key = str(market or "").strip().lower()
+    digits = "".join(ch for ch in text if ch.isdigit())
+    if market_key in {"hk", "h", "hongkong"} and digits:
+        variants.extend([digits, digits.zfill(5), f"{digits.zfill(5)}.HK"])
+    out: List[str] = []
+    for item in variants:
+        if item and item not in out:
+            out.append(item)
+    return out
+
+
+def _compute_tech_from_local_history(
+    symbol: str,
+    market: str = "a",
+    *,
+    db_path: Optional[Path] = None,
+) -> Dict[str, Any]:
+    """Compute MA/ATR from local SQLite cache only.
+
+    This deliberately avoids the project history-data providers. The desktop
+    window should display cached monitor state, not trigger network fetches or
+    DB synchronization during UI refresh.
+    """
+    db = Path(db_path) if db_path is not None else MARKET_DB_PATH
+    if not symbol or not db.exists():
+        return {"ma20": None, "ma120": None, "atr_pct": 0.0}
+
+    try:
+        import sqlite3
+
+        import pandas as pd
+
+        from utils.market_metrics import compute_metrics
+
+        uri = f"file:{db.as_posix()}?mode=ro"
+        with sqlite3.connect(uri, uri=True, timeout=1.0) as conn:
+            for variant in _history_symbol_variants(symbol, market):
+                df = pd.read_sql_query(
+                    (
+                        "SELECT date AS Date, close AS Close, high AS High, "
+                        "low AS Low, volume AS Volume FROM daily_prices "
+                        "WHERE UPPER(symbol) = ? ORDER BY date ASC"
+                    ),
+                    conn,
+                    params=(variant.upper(),),
+                )
+                if df.empty:
+                    continue
+                df["Date"] = pd.to_datetime(df["Date"])
+                df = df.set_index("Date")
+                for col in ("High", "Low", "Volume"):
+                    if col in df.columns and df[col].isna().all():
+                        df = df.drop(columns=[col])
+                df = df.tail(180)
+                if not df.empty:
+                    m = compute_metrics(df)
+                    return {
+                        "ma20": _positive_metric(m.get("ma20")),
+                        "ma120": _positive_metric(m.get("ma120")),
+                        "atr_pct": _safe_num(m.get("atr_pct")),
+                    }
+    except Exception as exc:  # noqa: BLE001
+        log.debug("local history technical fallback failed for %s: %s", symbol, exc)
+
+    return {"ma20": None, "ma120": None, "atr_pct": 0.0}
+
+
+def _tech_for_config_row(symbol: str, market: str, cached: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    tech = _extract_tech_from_cached_result(cached)
+    if tech.get("ma20") is not None or tech.get("ma120") is not None or _safe_num(tech.get("atr_pct")) > 0:
+        return tech
+    return _compute_tech_from_local_history(symbol, market)
+
+
 def _config_stock_row(stock: Dict[str, Any], price_info: Dict[str, Any], total_assets: float = 0.0) -> Dict[str, Any]:
     symbol = str(stock.get("symbol") or "").strip()
     position_pct = _safe_num(stock.get("position_pct"))
@@ -750,6 +864,9 @@ def _config_stock_row(stock: Dict[str, Any], price_info: Dict[str, Any], total_a
         technical_regime = cached.get("regime") or technical_regime
         technical_quant_view = cached.get("quant_signal") or technical_quant_view
 
+    tech = _tech_for_config_row(symbol, stock.get("market", "a"), cached)
+    atr_pct = _safe_num(tech.get("atr_pct"))
+
     return {
         "symbol": symbol,
         "name": stock.get("name") or price_info.get("name") or symbol,
@@ -778,7 +895,9 @@ def _config_stock_row(stock: Dict[str, Any], price_info: Dict[str, Any], total_a
             "market_data_excerpt": "",
             "entry_exit_model": "",
             "low_confidence": True,
-            "atr_pct": 0.0,
+            "ma20": tech.get("ma20"),
+            "ma120": tech.get("ma120"),
+            "atr_pct": atr_pct,
             "expected_return_pct": 0.0,
         },
         "operation": {

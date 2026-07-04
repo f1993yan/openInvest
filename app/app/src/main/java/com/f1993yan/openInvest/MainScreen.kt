@@ -530,7 +530,10 @@ fun MainScreen(modifier: Modifier = Modifier, onSaveUrl: (String) -> Unit) {
                             t2PendingCash = snap.t2_pending_cash_cny,
                             optimizerReviewEnabled = true,
                             maxDebateRounds = 2,
-                            changePct = row.price.change_pct
+                            changePct = row.price.change_pct,
+                            ma20 = row.technical?.ma20,
+                            ma120 = row.technical?.ma120,
+                            atrPct = row.technical?.atr_pct
                         ) { result ->
                             runChannel.trySend(result)
                         }

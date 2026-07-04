@@ -101,7 +101,10 @@ fun CommitteeAnalysisDialog(
             t2PendingCash = t2PendingCash,
             optimizerReviewEnabled = true,
             maxDebateRounds = 4,
-            changePct = targetRow.price.change_pct
+            changePct = targetRow.price.change_pct,
+            ma20 = targetRow.technical?.ma20,
+            ma120 = targetRow.technical?.ma120,
+            atrPct = targetRow.technical?.atr_pct
         ) { runResult ->
             runResult.fold(
                 onSuccess = { done ->

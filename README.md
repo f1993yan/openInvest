@@ -263,6 +263,13 @@ uv run python scripts/diagnose_ashare_sell_threshold.py --symbols "600183,002185
 
 桌面窗口读取 `data/market_monitor/latest_window.json`、`data/daily_stock_selection/latest.json` 和 `data/weekend_news/` 下的最新结果。它不再按秒重新跑业务逻辑，只在委员会、选股或新闻任务写入新快照后局部刷新界面。
 
+主窗口的技术面字段遵循“快照优先、只读兜底”的原则：
+
+- 正常来源是 `jobs/market_monitor_snapshot.py` 写入的 `technical` 和 `entry_exit_points`，包括 `atr_pct`、入场/出场线、买卖点模型等。
+- 配置兜底快照由 `scripts/monitor_window_services.py` 生成时，会先读取最近一次委员会/监控缓存里的 `ma20`、`ma120`、`atr_pct`。
+- 如果缓存缺失，窗口服务只会以只读方式查询本地 `db/market_data.db` 计算 MA/ATR；它不会调用历史行情 provider，不联网，不同步行情，也不写 DB。
+- 因此桌面窗口刷新不承担行情抓取职责。若技术指标为空，优先检查委员会快照、`data/committee_cache/` 和本地 `market_data.db` 是否已有该标的历史数据。
+
 主窗口只展示标的监控，多个标的按操作优先级用卡片堆叠展示：
 
 - `需要操作`、`触发确认`、`单轮触发` 优先于普通观察。

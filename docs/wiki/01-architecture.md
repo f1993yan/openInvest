@@ -63,7 +63,7 @@
 |----|-----------|------|
 | 启动 | `start-invest-backend.bat` → `start_invest_backend.py` | 读取 `.env`，清理旧进程，启动监控、调度器和桌面窗口 |
 | UI | `scripts/monitor_desktop_window.py` | 独立窗口主循环、卡片布局、悬浮窗协调 |
-| UI 服务 | `scripts/monitor_window_services.py` | 读取监控快照、手动交易、关注列表、最新价 |
+| UI 服务 | `scripts/monitor_window_services.py` | 读取监控快照、手动交易、关注列表、最新价；配置兜底快照只读本地技术指标，不触发行情同步 |
 | 监控入口 | `jobs/market_monitor.py` | 仅保留 CLI 入口和兼容导出，旧导入仍可用 |
 | 监控通用 | `jobs/market_monitor_common.py` | 路径、日志、交易时段常量、通用数值函数 |
 | 行情/委员会 | `jobs/market_monitor_quotes.py` | 新浪行情、直接 Python 调用委员会，不依赖 8766 HTTP |
@@ -90,6 +90,14 @@ market_monitor_runtime.run_monitor_round()
 ```
 
 桌面窗口的手动单标的分析是同一状态源的增量路径：双击卡片后，窗口直接调用最新委员会分析，成功结果会合成一行监控快照并回写 `data/market_monitor/latest_window.json`，随后主窗口重新排序和渲染。它不会修改真实持仓，只有用户点击“我已遵循买入/卖出”或手动交易面板执行时才写 `AccountLedger(real)`。
+
+桌面窗口技术指标的来源顺序：
+
+1. 正常监控轮次由 `jobs/market_monitor_snapshot.py` 把委员会结果中的 `entry_exit_points` 和 `technical` 写入 `data/market_monitor/latest_window.json`。
+2. 当没有可用监控快照、窗口退回配置兜底快照时，`scripts.monitor_window_services._config_stock_row()` 会优先读取最近一次委员会缓存里的 `ma20`、`ma120`、`atr_pct`。
+3. 若缓存仍缺失，`_compute_tech_from_local_history()` 只以 SQLite `mode=ro` 查询本地 `db/market_data.db`，用 `utils.market_metrics.compute_metrics()` 计算 MA/ATR；该路径不调用历史行情 provider，不联网，不同步行情，不写库。
+
+这条边界很重要：桌面窗口是快照消费者，不是行情抓取任务。技术指标缺失时，应先检查监控快照、`data/committee_cache/` 和 `db/market_data.db`，不要在 UI 刷新路径里新增联网拉历史 K 线的逻辑。
 
 交易模式位于提醒优化层，不改委员会原始 verdict：
 

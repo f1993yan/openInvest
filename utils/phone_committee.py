@@ -276,7 +276,10 @@ def run_committee_local(
     max_debate_rounds: int = 4,
     server_port: str = "8765",
     change_pct: float = 0.0,
-    trading_mode: str = "active_profit"
+    trading_mode: str = "active_profit",
+    ma20: Optional[float] = None,
+    ma120: Optional[float] = None,
+    atr_pct: Optional[float] = None
 ) -> str:
     """本地手机端执行投资委员会分析的入口"""
     t0 = datetime.now()
@@ -353,16 +356,46 @@ def run_committee_local(
         from core.regime import format_regime_brief
 
         df_2y = get_history_data(symbol, "2y")
+        tech_report = ""
         if df_2y.empty:
-            market_data = "市场数据暂缺（akshare 查询失败）"
-            regime_brief = "无技术判定（数据为空）"
             metrics = {}
         else:
             tech_report = analyze_multi_timeframe(df_2y, symbol)
             metrics = compute_metrics(df_2y)
+
+        # Inject metrics passed from phone side (e.g. from server snapshot cache)
+        if ma20 is not None:
+            metrics["ma20"] = ma20
+        if ma120 is not None:
+            metrics["ma120"] = ma120
+        if atr_pct is not None:
+            metrics["atr_pct"] = atr_pct
+
+        if metrics.get("ma20") is None or metrics.get("ma120") is None or metrics.get("atr_pct") is None:
+            # Fallback to local resolved_snapshot.json cache if still missing
+            try:
+                from pathlib import Path
+                snapshot_path = Path("/data/data/com.f1993yan.openInvest/files/resolved_snapshot.json")
+                if snapshot_path.exists():
+                    import json
+                    snap_data = json.loads(snapshot_path.read_text(encoding="utf-8"))
+                    for r in (snap_data.get("rows") or []):
+                        if str(r.get("symbol") or "").strip() == symbol.strip():
+                            tech = r.get("technical") or {}
+                            for k, py_k in [("ma20", "ma20"), ("ma120", "ma120"), ("atr_pct", "atr_pct")]:
+                                if metrics.get(py_k) is None and tech.get(k) is not None:
+                                    metrics[py_k] = float(tech[k])
+            except Exception as se:
+                log.warning(f"Failed to read phone local resolved_snapshot.json fallback: {se}")
+
+        if not metrics or metrics.get("ma20") is None:
+            market_data = "市场数据暂缺（akshare 查询失败且本地快照无指标）"
+            regime_brief = "无技术判定（数据为空）"
+        else:
             regime_brief = format_regime_brief(metrics, symbol=symbol)
             macro_data = get_macro_data()
-            market_data = f"{macro_data}\n\n--- 技术分析 ---\n{tech_report}\n\n--- REGIME ---\n{regime_brief}"
+            tech_section = tech_report if tech_report else "(技术指标由快照/外部传入提供)"
+            market_data = f"{macro_data}\n\n--- 技术分析 ---\n{tech_section}\n\n--- REGIME ---\n{regime_brief}"
 
         # 3. 拉 regime brief 及基本面 snapshot
         from core.fundamental_model import assess_fundamentals

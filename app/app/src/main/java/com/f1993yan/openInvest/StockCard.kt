@@ -172,12 +172,13 @@ fun StockCard(row: HoldingRow, onClick: () -> Unit, onLongClick: (() -> Unit)? =
                     }
                 }
             }
-
             val buyCriteria = row.buy_criteria
             val exitPoints = row.exit_points
+            val technical = row.technical
             val hasBuyPoints = buyCriteria?.pullback_price != null || buyCriteria?.breakout_price != null || buyCriteria?.reentry_price != null
             val hasExitPoints = exitPoints?.stop_loss_price != null || exitPoints?.take_profit_price != null
-
+            val hasTechnical = technical?.ma20 != null || technical?.ma120 != null || technical?.atr_pct != null
+ 
             if (row._is_resolving) {
                 Spacer(modifier = Modifier.height(8.dp))
                 Row(verticalAlignment = Alignment.CenterVertically) {
@@ -194,7 +195,7 @@ fun StockCard(row: HoldingRow, onClick: () -> Unit, onLongClick: (() -> Unit)? =
                         color = TextSecondary
                     )
                 }
-            } else if (hasBuyPoints || hasExitPoints) {
+            } else if (hasBuyPoints || hasExitPoints || hasTechnical) {
                 Spacer(modifier = Modifier.height(8.dp))
                 Column(
                     modifier = Modifier.fillMaxWidth(),
@@ -225,6 +226,18 @@ fun StockCard(row: HoldingRow, onClick: () -> Unit, onLongClick: (() -> Unit)? =
                             fontSize = 11.sp,
                             fontWeight = FontWeight.Bold,
                             color = AShareFallGreen
+                        )
+                    }
+                    if (hasTechnical) {
+                        val techText = buildString {
+                            technical?.ma20?.let { append("MA20:¥${String.format("%.2f", it)} ") }
+                            technical?.ma120?.let { append("MA120:¥${String.format("%.2f", it)} ") }
+                            technical?.atr_pct?.let { append("ATR:${String.format("%.2f", it)}% ") }
+                        }.trim()
+                        Text(
+                            text = "技术: $techText",
+                            fontSize = 11.sp,
+                            color = TextSecondary
                         )
                     }
                 }
