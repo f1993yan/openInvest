@@ -296,6 +296,22 @@ async def health():
 _account_ledger = None
 
 
+def _account_ledger_db_path() -> Path:
+    from db.account_ledger import DB_PATH
+
+    return Path(DB_PATH)
+
+
+def _close_account_ledger() -> None:
+    global _account_ledger
+    if _account_ledger is not None:
+        try:
+            _account_ledger.conn.close()
+        except Exception:
+            pass
+    _account_ledger = None
+
+
 def _get_account_ledger():
     global _account_ledger
     if _account_ledger is None:
@@ -984,13 +1000,13 @@ async def import_monitor_config(background_tasks: BackgroundTasks, config: Dict[
         MONITOR_CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
         MONITOR_CONFIG_PATH.write_text(json.dumps(config, ensure_ascii=False, indent=2), encoding="utf-8")
 
-        def _rebuild_ledger_and_cleanup():
+        def _refresh_ledger_and_cleanup():
             try:
                 _ledger = _get_account_ledger()
-                _ledger.initialize_from_monitor_config(config, reset=True)
-                log.info("Ledger re-initialized with new imported monitor config (reset=True)")
+                _ledger.ensure_initialized(config)
+                log.info("Ledger refreshed from imported monitor config without destructive reset")
             except Exception as le:
-                log.warning(f"Failed to re-initialize ledger after import: {le}")
+                log.warning(f"Failed to refresh ledger after import: {le}")
             try:
                 from scripts.monitor_window_constants import DEFAULT_SNAPSHOT
                 if DEFAULT_SNAPSHOT.exists():
@@ -999,8 +1015,8 @@ async def import_monitor_config(background_tasks: BackgroundTasks, config: Dict[
             except Exception as se:
                 log.warning(f"Failed to delete stale snapshot file: {se}")
 
-        background_tasks.add_task(_rebuild_ledger_and_cleanup)
-        return {"ok": True, "message": "Monitor configuration saved, rebuilding ledger in background"}
+        background_tasks.add_task(_refresh_ledger_and_cleanup)
+        return {"ok": True, "message": "Monitor configuration saved, refreshing ledger in background"}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to save monitor config: {str(e)}")
 
@@ -1241,22 +1257,23 @@ async def get_env_policies():
 
 @app.post("/api/config/account_ledger")
 async def import_account_ledger(file: UploadFile = File(...)):
-    """上传并覆盖双账户账本文件 (account_ledger.sqlite)"""
+    """上传并覆盖双账户账本文件 (accounts.db)"""
     try:
-        db_path = _PROJECT_ROOT / "db" / "account_ledger.sqlite"
+        db_path = _account_ledger_db_path()
         db_path.parent.mkdir(parents=True, exist_ok=True)
-        
-        # Reset the global ledger variable to close current connections
-        global _account_ledger
-        _account_ledger = None
-        
-        # Write file content
-        with open(db_path, "wb") as buffer:
-            content = await file.read()
-            buffer.write(content)
-            
-        # Re-initialize ledger
-        _get_account_ledger()
+
+        _close_account_ledger()
+
+        tmp_path = db_path.with_suffix(db_path.suffix + ".tmp")
+        with open(tmp_path, "wb") as buffer:
+            buffer.write(await file.read())
+        tmp_path.replace(db_path)
+
+        ledger = _get_account_ledger()
+        try:
+            ledger.sync_to_config_and_snapshot()
+        except Exception as sync_err:
+            log.warning(f"Failed to sync config/snapshot after account ledger import: {sync_err}")
         return {"ok": True, "message": "Account ledger database imported successfully"}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to save account ledger: {str(e)}")
@@ -1266,11 +1283,17 @@ async def import_account_ledger(file: UploadFile = File(...)):
 async def download_account_ledger():
     """下载双账户账本文件"""
     try:
-        db_path = _PROJECT_ROOT / "db" / "account_ledger.sqlite"
+        ledger = _get_account_ledger()
+        try:
+            ledger.conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+            ledger.conn.commit()
+        except Exception as checkpoint_err:
+            log.warning(f"Failed to checkpoint account ledger before download: {checkpoint_err}")
+        db_path = _account_ledger_db_path()
         if db_path.exists():
             return FileResponse(
                 path=str(db_path),
-                filename="account_ledger.sqlite",
+                filename="accounts.db",
                 media_type="application/octet-stream"
             )
         raise HTTPException(status_code=404, detail="Account ledger database file not found")

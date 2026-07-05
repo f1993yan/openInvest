@@ -975,6 +975,12 @@ class AccountLedger:
 
                     snapshot = _load_config_snapshot("实时同步账本数据", source_path=snapshot_path)
                 else:
+                    if ledger_holdings and not (snapshot.get("rows") or []):
+                        from scripts.monitor_window_services import _load_config_snapshot
+
+                        snapshot = _load_config_snapshot("实时同步账本数据", source_path=snapshot_path)
+                    if snapshot is None:
+                        snapshot = {"rows": []}
                     holding_by_symbol = {
                         str(h["symbol"]).strip().upper(): h
                         for h in ledger_holdings

@@ -35,6 +35,16 @@ from scripts.monitor_window_selection import MonitorSelectionMixin
 from scripts.monitor_window_trade import MonitorTradeMixin
 
 
+def _account_ledger_db_path() -> Path:
+    from db.account_ledger import DB_PATH
+
+    return Path(DB_PATH)
+
+
+def _config_has_targets(config: Dict[str, Any]) -> bool:
+    return bool((config.get("holdings") or []) or (config.get("watchlist") or []))
+
+
 class MonitorWindow(MonitorNewsMixin, MonitorSelectionMixin, MonitorTradeMixin, MonitorAnalysisMixin):
     def __init__(
         self,
@@ -599,6 +609,19 @@ class MonitorWindow(MonitorNewsMixin, MonitorSelectionMixin, MonitorTradeMixin, 
 
         import requests
         try:
+            try:
+                from db.account_ledger import AccountLedger
+
+                ledger = AccountLedger()
+                ledger.sync_to_config_and_snapshot()
+                try:
+                    ledger.conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+                    ledger.conn.commit()
+                except Exception as checkpoint_err:
+                    print(f"Failed to checkpoint account ledger before upload: {checkpoint_err}")
+            except Exception as ledger_err:
+                print(f"Failed to refresh config from ledger before upload: {ledger_err}")
+
             with open(config_path, "r", encoding="utf-8") as f:
                 config_data = json.load(f)
 
@@ -656,8 +679,8 @@ class MonitorWindow(MonitorNewsMixin, MonitorSelectionMixin, MonitorTradeMixin, 
                 except Exception as se_err:
                     print(f"Failed to read/upload sector cache: {se_err}")
 
-            # 3. 上传 db/account_ledger.sqlite
-            db_path = ROOT / "db" / "account_ledger.sqlite"
+            # 3. 上传真实双账户账本 db/accounts.db
+            db_path = _account_ledger_db_path()
             if db_path.exists():
                 try:
                     url_ledger = f"{self.remote_server_url.rstrip('/')}/api/config/account_ledger"
@@ -682,20 +705,18 @@ class MonitorWindow(MonitorNewsMixin, MonitorSelectionMixin, MonitorTradeMixin, 
 
         import requests
         try:
+            config_path = ROOT / "jobs" / "market_monitor_config.json"
+            config_received = False
             url_config = f"{self.remote_server_url.rstrip('/')}/api/config/monitor_config"
             resp_config = requests.get(url_config, timeout=10)
+            config_data: Dict[str, Any] = {}
             if resp_config.status_code == 200:
+                config_received = True
                 config_data = resp_config.json()
-                config_path = ROOT / "jobs" / "market_monitor_config.json"
-                config_path.parent.mkdir(parents=True, exist_ok=True)
-                with open(config_path, "w", encoding="utf-8") as f:
-                    json.dump(config_data, f, ensure_ascii=False, indent=2)
-                try:
-                    from db.account_ledger import AccountLedger
-                    ledger = AccountLedger()
-                    ledger.initialize_from_monitor_config(config_data, reset=True)
-                except Exception as le:
-                    print(f"Failed to re-initialize ledger after sync: {le}")
+                if _config_has_targets(config_data):
+                    config_path.parent.mkdir(parents=True, exist_ok=True)
+                    with open(config_path, "w", encoding="utf-8") as f:
+                        json.dump(config_data, f, ensure_ascii=False, indent=2)
             elif resp_config.status_code == 404:
                 pass
             else:
@@ -757,17 +778,39 @@ class MonitorWindow(MonitorNewsMixin, MonitorSelectionMixin, MonitorTradeMixin, 
             except Exception as sector_err:
                 print(f"Failed to sync sector cache: {sector_err}")
 
-            # 3. 同步 db/account_ledger.sqlite
+            # 3. 同步真实双账户账本 db/accounts.db，再由账本回写 config/snapshot
+            ledger_synced = False
             try:
                 url_ledger = f"{self.remote_server_url.rstrip('/')}/api/config/account_ledger"
                 resp_ledger = requests.get(url_ledger, timeout=15)
                 if resp_ledger.status_code == 200:
-                    db_path = ROOT / "db" / "account_ledger.sqlite"
+                    db_path = _account_ledger_db_path()
                     db_path.parent.mkdir(parents=True, exist_ok=True)
-                    with open(db_path, "wb") as f:
+                    tmp_path = db_path.with_suffix(db_path.suffix + ".tmp")
+                    with open(tmp_path, "wb") as f:
                         f.write(resp_ledger.content)
+                    tmp_path.replace(db_path)
+                    ledger_synced = True
             except Exception as db_err:
                 print(f"Failed to sync account ledger: {db_err}")
+
+            try:
+                from db.account_ledger import AccountLedger
+
+                ledger = AccountLedger()
+                if ledger_synced:
+                    if config_received and not _config_has_targets(config_data) and not config_path.exists():
+                        config_path.parent.mkdir(parents=True, exist_ok=True)
+                        with open(config_path, "w", encoding="utf-8") as f:
+                            json.dump(config_data, f, ensure_ascii=False, indent=2)
+                    ledger.sync_to_config_and_snapshot()
+                elif _config_has_targets(config_data):
+                    ledger.ensure_initialized(config_data)
+                    ledger.sync_to_config_and_snapshot()
+                elif config_data:
+                    print("Remote monitor config has no targets and no ledger was synced; keeping local target list unchanged.")
+            except Exception as le:
+                print(f"Failed to refresh ledger/config after sync: {le}")
 
             messagebox.showinfo("成功", "所有配置文件及账本数据库同步成功！")
             self.refresh()
