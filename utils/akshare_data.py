@@ -78,7 +78,7 @@ def _cache_is_fresh(df: pd.DataFrame) -> bool:
     """
     if df.empty:
         return False
-    if len(df) < 10:  # 缓存只有几天数据不完整，需要重新拉全量
+    if len(df) < 150:  # 缓存行数不够计算MA120等中长期指标，需要重新拉全量
         return False
     try:
         latest = pd.to_datetime(df.index[-1]).date()
