@@ -191,6 +191,14 @@ class AccountLedger:
                     )
             self.conn.commit()
             self.sync_to_config_and_snapshot()
+
+            if self._external_sync_enabled:
+                symbols = [
+                    s.get("symbol")
+                    for s in list(config.get("holdings", []) or []) + list(config.get("watchlist", []) or [])
+                    if s.get("symbol")
+                ]
+                trigger_background_backfill(symbols)
             return True
 
     def ensure_initialized(self, config: Dict[str, Any]) -> None:
@@ -789,6 +797,8 @@ class AccountLedger:
             self.conn.commit()
             if account == REAL_ACCOUNT:
                 self.sync_to_config_and_snapshot()
+            if self._external_sync_enabled:
+                trigger_background_backfill([symbol])
             return True
 
     def update_holding(
@@ -1147,3 +1157,67 @@ def prices_from_sina_result(prices: Dict[str, Dict[str, Any]]) -> Dict[str, floa
         for symbol, info in prices.items()
         if float(info.get("price") or 0) > 0
     }
+
+
+def trigger_background_backfill(symbols: List[str]) -> None:
+    import threading
+    t = threading.Thread(target=_bg_backfill_task, args=(symbols,), daemon=True)
+    t.start()
+
+
+def _bg_backfill_task(symbols: List[str]) -> None:
+    import time
+    import json
+    from pathlib import Path
+    try:
+        from utils.akshare_data import get_history_data
+        from scripts.monitor_window_services import _compute_tech_from_local_history
+    except ImportError:
+        return
+
+    updated_any = False
+    for sym in symbols:
+        sym = sym.strip().upper()
+        if not sym:
+            continue
+        try:
+            df = get_history_data(sym, period="2y")
+            if df is not None and not df.empty:
+                updated_any = True
+        except Exception:
+            pass
+
+    if updated_any:
+        try:
+            project_root = Path(__file__).resolve().parent.parent
+            snapshot_path = project_root / "data" / "market_monitor" / "latest_window.json"
+            if snapshot_path.exists():
+                time.sleep(0.5)
+                with open(snapshot_path, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                
+                rows = data.get("rows", [])
+                snapshot_updated = False
+                for row in rows:
+                    row_sym = str(row.get("symbol") or "").strip().upper()
+                    if row_sym in symbols:
+                        tech = _compute_tech_from_local_history(row_sym)
+                        if tech and (tech.get("ma20") is not None or tech.get("ma120") is not None):
+                            row["technical"] = {
+                                "regime": row.get("technical", {}).get("regime", "等待交易时段监控刷新"),
+                                "quant_view": row.get("technical", {}).get("quant_view", ""),
+                                "market_data_excerpt": row.get("technical", {}).get("market_data_excerpt", ""),
+                                "entry_exit_model": row.get("technical", {}).get("entry_exit_model", ""),
+                                "low_confidence": row.get("technical", {}).get("low_confidence", True),
+                                "ma20": tech.get("ma20"),
+                                "ma120": tech.get("ma120"),
+                                "atr_pct": tech.get("atr_pct"),
+                                "expected_return_pct": row.get("technical", {}).get("expected_return_pct", 0.0)
+                            }
+                            snapshot_updated = True
+                
+                if snapshot_updated:
+                    with open(snapshot_path, "w", encoding="utf-8") as f:
+                        json.dump(data, f, ensure_ascii=False, indent=2)
+        except Exception:
+            pass
