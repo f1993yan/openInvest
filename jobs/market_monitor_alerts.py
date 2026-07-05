@@ -17,6 +17,7 @@ from jobs.market_monitor_guards import _is_limit_up_buy_blocked
 from jobs.market_monitor_guards import _trigger_has_price_progress_from_trade
 from jobs.trading_mode import (
     DEFAULT_TRADING_MODE,
+    TRADE_MODE_RISK_OFF,
     normalize_trading_mode,
     trading_mode_buy_lot_multiplier,
     trading_mode_buy_threshold,
@@ -40,6 +41,64 @@ SECTOR_PANIC_HARD_DOWN_RATIO = 0.20
 SECTOR_PANIC_MIN_MEDIAN_DROP_PCT = 3.0
 SECTOR_PANIC_MIN_EXCESS_DROP_PCT = 1.0
 SECTOR_PANIC_TARGET_WEAK_Z = -1.0
+
+
+def _entry_exit_atr_pct(result: Dict[str, Any]) -> float:
+    ee = result.get("entry_exit_points") or {}
+    tech = result.get("technical") or {}
+    return _clamp(
+        max(
+            _safe_num(ee.get("atr_pct")),
+            _safe_num(result.get("atr_pct")),
+            _safe_num(result.get("volatility_pct")),
+            _safe_num(tech.get("atr_pct")),
+        ),
+        0.0,
+        20.0,
+    )
+
+
+def _regime_volatility_gate(result: Dict[str, Any]) -> Dict[str, Any]:
+    """Deterministic regime/noise gate for alert thresholds.
+
+    This implements the conservative lesson from recent walk-forward papers:
+    raw return forecasts are weak, so execution should depend on regime and
+    volatility.  The gate only adjusts alert thresholds and lots; it never
+    changes committee verdicts or price trigger lines.
+    """
+    text = f"{result.get('regime', '')}\n{result.get('market_data', '')}\n{result.get('quant_view', '')}".lower()
+    atr_pct = _entry_exit_atr_pct(result)
+    is_crash = "crash" in text or "panic" in text or "崩" in text or "恐慌" in text
+    is_downtrend = "downtrend" in text or "bear" in text or "下行" in text or "空头" in text
+    is_uptrend = "uptrend" in text or "recovery" in text or "上行" in text or "多头" in text or "修复" in text
+    high_noise = is_crash or atr_pct >= 4.5 or (is_downtrend and atr_pct >= 3.2)
+    low_noise = (is_uptrend or "range_bound" in text or "震荡" in text) and 0.5 <= atr_pct <= 2.8
+    if high_noise:
+        return {
+            "state": "high_noise",
+            "atr_pct": round(atr_pct, 4),
+            "buy_threshold_adjustment": 8.0 if not is_crash else 10.0,
+            "buy_lot_multiplier": 0.5,
+            "sell_threshold_adjustment": 4.0,
+            "reason": "高波动/下行状态：买入收紧，委员会单独卖出需要更强确认",
+        }
+    if low_noise:
+        return {
+            "state": "low_noise",
+            "atr_pct": round(atr_pct, 4),
+            "buy_threshold_adjustment": -2.0,
+            "buy_lot_multiplier": 1.0,
+            "sell_threshold_adjustment": 0.0,
+            "reason": "低噪声趋势/震荡状态：允许价格触发买点略微放宽",
+        }
+    return {
+        "state": "normal",
+        "atr_pct": round(atr_pct, 4),
+        "buy_threshold_adjustment": 0.0,
+        "buy_lot_multiplier": 1.0,
+        "sell_threshold_adjustment": 0.0,
+        "reason": "常规波动状态",
+    }
 
 
 def _has_llm_hold_conflict(result: Dict[str, Any]) -> bool:
@@ -327,6 +386,8 @@ def _sell_committee_alert_threshold(
     # Edge is in [0, 1].  Strong evidence can reduce the no-trigger threshold
     # by up to 9 points, but the floor keeps marginal sells as candidates.
     threshold -= 9.0 * edge
+    if mode == TRADE_MODE_RISK_OFF:
+        threshold += _safe_num(_regime_volatility_gate(result).get("sell_threshold_adjustment"))
     return round(_clamp(threshold, floor - mode_floor_offset, 52.0), 2)
 
 
@@ -1465,11 +1526,24 @@ def select_optimal_actionable_alerts(
         if _is_limit_up_buy_blocked(result, price_info):
             suppressed.append({"symbol": symbol, "name": result.get("name"), "reason": "limit_up_buy_blocked"})
             continue
-        if score < buy_threshold:
+        regime_gate = _regime_volatility_gate(result) if mode == TRADE_MODE_RISK_OFF else {
+            "state": "disabled",
+            "atr_pct": _entry_exit_atr_pct(result),
+            "buy_threshold_adjustment": 0.0,
+            "buy_lot_multiplier": 1.0,
+            "sell_threshold_adjustment": 0.0,
+            "reason": "仅主动避险模式启用 regime/波动门控",
+        }
+        effective_buy_threshold = round(
+            buy_threshold + _safe_num(regime_gate.get("buy_threshold_adjustment")),
+            2,
+        )
+        if score < effective_buy_threshold:
             suppressed.append({
                 "symbol": symbol,
                 "name": result.get("name"),
-                "reason": f"low_score:{score:.1f}<{buy_threshold:.1f}:{mode}",
+                "reason": f"low_score:{score:.1f}<{effective_buy_threshold:.1f}:{mode}:{regime_gate.get('state')}",
+                "regime_volatility_gate": regime_gate,
             })
             continue
 
@@ -1481,9 +1555,17 @@ def select_optimal_actionable_alerts(
         max_lots = min(max(suggested_lots, 1), affordable_lots)
         if buy_lot_multiplier < 1.0:
             max_lots = max(1, int(math.floor(max_lots * buy_lot_multiplier))) if max_lots > 0 else 0
+        gate_lot_multiplier = _safe_num(regime_gate.get("buy_lot_multiplier"), 1.0)
+        if gate_lot_multiplier < 1.0:
+            max_lots = max(1, int(math.floor(max_lots * gate_lot_multiplier))) if max_lots > 0 else 0
         if max_lots <= 0:
             reason = "cash_reserve_insufficient" if buy_cash_budget < cash else "cash_insufficient"
-            suppressed.append({"symbol": symbol, "name": result.get("name"), "reason": f"{reason}:{mode}"})
+            suppressed.append({
+                "symbol": symbol,
+                "name": result.get("name"),
+                "reason": f"{reason}:{mode}",
+                "regime_volatility_gate": regime_gate,
+            })
             continue
 
         group: List[Dict[str, Any]] = []
@@ -1524,6 +1606,8 @@ def select_optimal_actionable_alerts(
             option["trading_mode"] = mode
             option["trading_mode_label"] = mode_label
             option["alert_buy_threshold"] = buy_threshold
+            option["effective_buy_threshold"] = effective_buy_threshold
+            option["regime_volatility_gate"] = regime_gate
             option["alert_cash_reserve_cny"] = round(reserve_cash, 2)
             option["alert_cost_cny"] = cost
             option["alert_triggers"] = triggers

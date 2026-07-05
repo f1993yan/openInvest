@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import sys
 from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -18,6 +19,8 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple
 import pandas as pd
 
 ROOT = Path(__file__).resolve().parent.parent
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 
 
 DEFAULT_SYMBOLS: Dict[str, str] = {}
@@ -238,6 +241,39 @@ def _committee_style_signal(symbol: str, hist: pd.DataFrame) -> Dict[str, Any]:
         "atr_pct": _safe_float(metrics.get("atr_pct"), _safe_float(plan.get("atr_pct"), 2.0)),
         "entry_exit_points": plan,
         "regime": regime_brief,
+    }
+
+
+def _signal_regime_volatility_gate(signal: Dict[str, Any]) -> Dict[str, Any]:
+    text = str(signal.get("regime") or "").lower()
+    atr_pct = _clamp(_safe_float(signal.get("atr_pct")), 0.0, 20.0)
+    is_crash = "crash" in text or "panic" in text or "崩" in text or "恐慌" in text
+    is_downtrend = "downtrend" in text or "bear" in text or "下行" in text or "空头" in text
+    is_uptrend = "uptrend" in text or "recovery" in text or "上行" in text or "多头" in text or "修复" in text
+    high_noise = is_crash or atr_pct >= 4.5 or (is_downtrend and atr_pct >= 3.2)
+    low_noise = (is_uptrend or "range_bound" in text or "震荡" in text) and 0.5 <= atr_pct <= 2.8
+    if high_noise:
+        return {
+            "state": "high_noise",
+            "atr_pct": round(atr_pct, 4),
+            "buy_score_adjustment": 8.0 if not is_crash else 10.0,
+            "buy_lot_multiplier": 0.5,
+            "committee_sell_band_adjustment": 0.04,
+        }
+    if low_noise:
+        return {
+            "state": "low_noise",
+            "atr_pct": round(atr_pct, 4),
+            "buy_score_adjustment": -2.0,
+            "buy_lot_multiplier": 1.0,
+            "committee_sell_band_adjustment": 0.0,
+        }
+    return {
+        "state": "normal",
+        "atr_pct": round(atr_pct, 4),
+        "buy_score_adjustment": 0.0,
+        "buy_lot_multiplier": 1.0,
+        "committee_sell_band_adjustment": 0.0,
     }
 
 
@@ -491,6 +527,7 @@ def run_backtest(
     fee_rate: float = 0.0005,
     max_ops_per_symbol_per_day: int = 5,
     committee_sell_stop_band: float = 1.03,
+    strategy_mode: str = "legacy",
 ) -> Dict[str, Any]:
     dates = _calendar(histories, start, end)
     cash = float(initial_cash)
@@ -543,7 +580,15 @@ def run_backtest(
                 shares_to_sell = min(pos.shares, shares_to_sell)
             elif (
                 signals.get(symbol, {}).get("verdict") in {"SELL", "TRIM"}
-                and close < pos.effective_stop * max(1.0, committee_sell_stop_band)
+                and close < pos.effective_stop * max(
+                    1.0,
+                    committee_sell_stop_band
+                    + (
+                        _safe_float(_signal_regime_volatility_gate(signals.get(symbol, {})).get("committee_sell_band_adjustment"))
+                        if strategy_mode == "regime_vol_gate"
+                        else 0.0
+                    ),
+                )
             ):
                 exit_reason = "委员会风险减仓"
                 fill = close
@@ -591,7 +636,13 @@ def run_backtest(
                 continue
             if signal["verdict"] not in {"BUY", "ACCUMULATE"}:
                 continue
-            if _safe_float(signal.get("score")) < params.min_score_to_buy:
+            gate = _signal_regime_volatility_gate(signal) if strategy_mode == "regime_vol_gate" else {
+                "state": "legacy",
+                "buy_score_adjustment": 0.0,
+                "buy_lot_multiplier": 1.0,
+            }
+            effective_min_score = params.min_score_to_buy + _safe_float(gate.get("buy_score_adjustment"))
+            if _safe_float(signal.get("score")) < effective_min_score:
                 continue
             row = rows.get(symbol)
             if row is None or _is_limit_up(symbol, row):
@@ -618,6 +669,7 @@ def run_backtest(
                 continue
             lot = _lot_size(symbol)
             target_cash = min(max(_safe_float(signal.get("alloc_cny")), fill * lot), cash)
+            target_cash *= _clamp(_safe_float(gate.get("buy_lot_multiplier"), 1.0), 0.1, 1.0)
             shares = int(target_cash // (fill * lot)) * lot
             if shares < lot:
                 continue
@@ -653,6 +705,8 @@ def run_backtest(
                 "cash_after": round(cash, 2),
                 "reason": reason,
                 "score": signal["score"],
+                "effective_min_score": round(effective_min_score, 4),
+                "regime_gate": gate,
                 "verdict": signal["verdict"],
                 "stop": pos.effective_stop,
                 "tp1": pos.take_profit_1,
@@ -743,6 +797,7 @@ def run_backtest(
         "symbol_daily_rows": symbol_daily_rows,
         "diagnostics": {
             "committee_sell_stop_band": round(max(1.0, committee_sell_stop_band), 4),
+            "strategy_mode": strategy_mode,
         },
     }
 
@@ -937,6 +992,7 @@ def optimize_exit_params(
     max_ops_per_symbol_per_day: int,
     param_grid: List[ExitParams],
     committee_sell_stop_band: float = 1.03,
+    strategy_mode: str = "legacy",
 ) -> Dict[str, Any]:
     best: Optional[Dict[str, Any]] = None
     all_results: List[Dict[str, Any]] = []
@@ -952,6 +1008,7 @@ def optimize_exit_params(
             fee_rate=fee_rate,
             max_ops_per_symbol_per_day=max_ops_per_symbol_per_day,
             committee_sell_stop_band=committee_sell_stop_band,
+            strategy_mode=strategy_mode,
         )
         score = result["metrics"].get("policy_quality_score", result["metrics"].get("objective_score", result["metrics"]["return_risk_ratio"]))
         compact = {
@@ -1064,6 +1121,12 @@ def main() -> None:
     parser.add_argument("--fee-rate", type=float, default=0.0005, help="万五=0.0005")
     parser.add_argument("--max-ops", type=int, default=5)
     parser.add_argument("--committee-sell-stop-band", type=float, default=1.03)
+    parser.add_argument(
+        "--strategy-mode",
+        default="legacy",
+        choices=["legacy", "regime_vol_gate", "compare_regime_gate"],
+        help="legacy=旧方案；regime_vol_gate=regime/波动门控；compare_regime_gate=同口径对比两者",
+    )
     parser.add_argument("--out", default=str(ROOT / "reports" / "ashare_committee_exit_backtest.json"))
     parser.add_argument("--trades-csv", default=str(ROOT / "reports" / "ashare_committee_exit_trades.csv"))
     parser.add_argument("--daily-csv", default=str(ROOT / "reports" / "ashare_committee_exit_daily_samples.csv"))
@@ -1090,7 +1153,27 @@ def main() -> None:
         max_ops_per_symbol_per_day=args.max_ops,
         param_grid=param_grid,
         committee_sell_stop_band=args.committee_sell_stop_band,
+        strategy_mode="legacy" if args.strategy_mode == "compare_regime_gate" else args.strategy_mode,
     )
+    if args.strategy_mode == "compare_regime_gate":
+        gated = optimize_exit_params(
+            histories=histories,
+            names=names,
+            start=start,
+            end=end,
+            signal_cache=signal_cache,
+            initial_cash=args.initial_cash,
+            fee_rate=args.fee_rate,
+            max_ops_per_symbol_per_day=args.max_ops,
+            param_grid=param_grid,
+            committee_sell_stop_band=args.committee_sell_stop_band,
+            strategy_mode="regime_vol_gate",
+        )
+        result = {
+            "method": "legacy_vs_regime_vol_gate",
+            "legacy": result,
+            "regime_vol_gate": gated,
+        }
     result["discrete_optimization"] = grid_diagnostics
     result["config"] = {
         "symbols": names,
@@ -1100,6 +1183,7 @@ def main() -> None:
         "fee_rate": args.fee_rate,
         "max_ops_per_symbol_per_day": args.max_ops,
         "committee_sell_stop_band": args.committee_sell_stop_band,
+        "strategy_mode": args.strategy_mode,
         "a_share_rules": {
             "lot_size": 100,
             "star_market_first_buy_lot": 200,
@@ -1108,24 +1192,36 @@ def main() -> None:
         },
     }
     if args.update_env:
-        result["env_update"] = update_env_exit_params(result["best"]["params"], Path(args.env_path))
+        best_payload = result["legacy"]["best"] if args.strategy_mode == "compare_regime_gate" else result["best"]
+        result["env_update"] = update_env_exit_params(best_payload["params"], Path(args.env_path))
     out = Path(args.out)
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
-    _write_csv(result["best"]["trades"], Path(args.trades_csv))
-    _write_csv(result["best"]["symbol_daily_rows"], Path(args.daily_csv))
+    best = result["legacy"]["best"] if args.strategy_mode == "compare_regime_gate" else result["best"]
+    _write_csv(best["trades"], Path(args.trades_csv))
+    _write_csv(best["symbol_daily_rows"], Path(args.daily_csv))
 
-    best = result["best"]
-    print(json.dumps({
+    payload = {
         "output": str(out),
         "trades_csv": args.trades_csv,
         "daily_csv": args.daily_csv,
         "config": result["config"],
-        "best_params": best["params"],
-        "metrics": best["metrics"],
-        "trades": best["trades"],
-        "top_results": result["top_results"][:5],
-    }, ensure_ascii=False, indent=2))
+    }
+    if args.strategy_mode == "compare_regime_gate":
+        payload.update({
+            "legacy_best_params": result["legacy"]["best"]["params"],
+            "legacy_metrics": result["legacy"]["best"]["metrics"],
+            "regime_vol_gate_best_params": result["regime_vol_gate"]["best"]["params"],
+            "regime_vol_gate_metrics": result["regime_vol_gate"]["best"]["metrics"],
+        })
+    else:
+        payload.update({
+            "best_params": best["params"],
+            "metrics": best["metrics"],
+            "trades": best["trades"],
+            "top_results": result["top_results"][:5],
+        })
+    print(json.dumps(payload, ensure_ascii=False, indent=2))
 
 
 if __name__ == "__main__":

@@ -881,6 +881,36 @@ def test_cash_recovery_mode_preserves_cash_by_suppressing_marginal_buy():
     assert suppressed[0]["reason"].startswith("cash_reserve_insufficient:cash_recovery")
 
 
+def test_regime_volatility_gate_only_applies_in_risk_off_mode():
+    result = {
+        "success": True,
+        "symbol": "600183",
+        "name": "生益科技",
+        "market": "a",
+        "verdict": "ACCUMULATE",
+        "confidence": 0.92,
+        "suggested_alloc_cny": 30000,
+        "fundamental_score": 80,
+        "regime": "REGIME: crash",
+        "entry_exit_points": {"reward_risk_ratio": 2.0, "atr_pct": 6.0},
+    }
+    common = dict(
+        results=[result],
+        prices={"600183": {"price": 20.0, "change_pct": -2.0}},
+        cash=100000,
+        stocks=[{"symbol": "600183", "position_pct": 0, "min_lot_size": 100}],
+        entry_exit_state={},
+        portfolio_value=100000,
+    )
+
+    active, _ = select_optimal_actionable_alerts(**common, trading_mode="active_profit")
+    risk_off, suppressed = select_optimal_actionable_alerts(**common, trading_mode="risk_off")
+
+    assert active[0]["regime_volatility_gate"]["state"] == "disabled"
+    assert risk_off == []
+    assert suppressed[0]["regime_volatility_gate"]["state"] == "high_noise"
+
+
 def test_cash_recovery_mode_still_waits_for_current_exit_trigger():
     result = {
         "success": True,

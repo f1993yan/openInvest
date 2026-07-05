@@ -461,6 +461,9 @@ def run() -> Dict[str, Any]:
     max_symbols_per_sector = max(1, min(3, int(os.getenv("INVEST_EXIT_PARAM_OPT_MAX_SYMBOLS_PER_SECTOR", "3"))))
     max_trials_per_sector = max(27, int(os.getenv("INVEST_EXIT_PARAM_OPT_MAX_TRIALS_PER_SECTOR", "243")))
     history_period = os.getenv("INVEST_EXIT_PARAM_OPT_HISTORY_PERIOD", "2y")
+    strategy_mode = os.getenv("INVEST_EXIT_PARAM_OPT_STRATEGY_MODE", "legacy").strip() or "legacy"
+    if strategy_mode not in {"legacy", "regime_vol_gate"}:
+        strategy_mode = "legacy"
     start, end = _default_dates(days)
 
     config = _load_monitor_config()
@@ -505,6 +508,7 @@ def run() -> Dict[str, Any]:
                 fee_rate=fee_rate,
                 max_ops_per_symbol_per_day=max_ops,
                 param_grid=param_grid,
+                strategy_mode=strategy_mode,
             )
         except Exception as exc:  # noqa: BLE001
             sector_results[sector] = {
@@ -577,6 +581,7 @@ def run() -> Dict[str, Any]:
             "max_symbols_per_sector": max_symbols_per_sector,
             "max_trials_per_sector": max_trials_per_sector,
             "history_period": history_period,
+            "strategy_mode": strategy_mode,
             "sector_source": sector_source,
             "sector_mapping": sector_by_symbol,
             "sector_warnings": sector_warnings,
