@@ -181,8 +181,153 @@ def _a_share_prefix(symbol: str) -> str:
     return f"sz{symbol}"  # fallback
 
 
+def _eastmoney_secid(symbol: str) -> str:
+    """Eastmoney secid for A-share/index daily K-line endpoints."""
+    if _is_index(symbol):
+        return _KNOWN_INDICES[symbol].replace("sh", "1.").replace("sz", "0.")
+    first = symbol[0]
+    market = "1" if first == "6" else "0"
+    return f"{market}.{symbol}"
+
+
+def _fetch_eastmoney_daily(symbol: str, period: str, *, adjust: str = "qfq") -> pd.DataFrame:
+    """Fetch daily A-share/index bars from Eastmoney without py_mini_racer.
+
+    AkShare's Sina path can instantiate py_mini_racer on some versions. The
+    project-level py_mini_racer stub avoids a Windows V8 crash, but any AkShare
+    code path that truly needs JS then returns empty data. Eastmoney's K-line
+    API is plain JSON and keeps the selector from losing its whole candidate
+    pool when that happens.
+    """
+    try:
+        import requests
+
+        fqt = {"none": "0", "qfq": "1", "hfq": "2"}.get(adjust, "1")
+        base_url = "https://push2his.eastmoney.com/api/qt/stock/kline/get"
+        params = {
+            "secid": _eastmoney_secid(symbol),
+            "fields1": "f1,f2,f3,f4,f5,f6",
+            "fields2": "f51,f52,f53,f54,f55,f56,f57,f58,f59,f60,f61",
+            "klt": "101",
+            "fqt": fqt,
+            "beg": _parse_period_to_start(period),
+            "end": "20500101",
+            # Eastmoney applies lmt even when beg is supplied. Calendar days
+            # safely over-request trading bars while keeping responses bounded.
+            "lmt": str(max(200, min(_period_to_days(period), 5000))),
+        }
+        headers = {
+            "User-Agent": "Mozilla/5.0",
+            "Referer": "https://quote.eastmoney.com/",
+        }
+        try:
+            resp = requests.get(base_url, params=params, headers=headers, timeout=15)
+        except Exception:
+            resp = requests.get(
+                base_url.replace("https://", "http://"),
+                params=params,
+                headers=headers,
+                timeout=15,
+            )
+        resp.raise_for_status()
+        payload = resp.json()
+        klines = ((payload.get("data") or {}).get("klines") or [])
+        if not klines:
+            log.warning(f"eastmoney A股 {symbol} 返回空数据")
+            return pd.DataFrame()
+        rows = []
+        for line in klines:
+            parts = str(line).split(",")
+            if len(parts) < 6:
+                continue
+            rows.append(
+                {
+                    "Date": pd.to_datetime(parts[0]),
+                    "Open": float(parts[1]),
+                    "Close": float(parts[2]),
+                    "High": float(parts[3]),
+                    "Low": float(parts[4]),
+                    "Volume": float(parts[5]),
+                }
+            )
+        if not rows:
+            return pd.DataFrame()
+        df = pd.DataFrame(rows).set_index("Date").sort_index()
+        df.index.name = "Date"
+        return _apply_period_filter(df, period)
+    except Exception as e:
+        log.warning(f"eastmoney A股 {symbol} 拉取失败: {e}")
+        return pd.DataFrame()
+
+
+def _fetch_tencent_daily(symbol: str, period: str, adjust: str = "qfq") -> pd.DataFrame:
+    """Direct Tencent K-line HTTP fallback — no akshare / py_mini_racer dependency.
+
+    URL: https://web.ifzq.gtimg.cn/appstock/app/fqkline/get
+    Response is plain JSON with kline entries: [date, open, close, high, low, volume]
+    """
+    try:
+        import requests
+
+        days = _period_to_days(period)
+        prefix = _a_share_prefix(symbol)  # e.g. "sz002185"
+        param = f"{prefix},day,,,{days},qfq"
+        url = "https://web.ifzq.gtimg.cn/appstock/app/fqkline/get"
+        resp = requests.get(
+            url,
+            params={"param": param},
+            headers={"User-Agent": "Mozilla/5.0"},
+            timeout=15,
+        )
+        resp.raise_for_status()
+        payload = resp.json()
+        if payload.get("code") != 0:
+            log.warning(f"tencent K线 {symbol} 返回错误: {payload.get('msg','')}")
+            return pd.DataFrame()
+
+        stock_data = (payload.get("data") or {}).get(prefix) or {}
+        # qfqday key contains forward-adjusted daily bars
+        klines = stock_data.get("qfqday") or stock_data.get("day") or []
+
+        if not klines:
+            log.warning(f"tencent K线 {symbol} 返回空K线数据")
+            return pd.DataFrame()
+
+        rows = []
+        for row in klines:
+            if len(row) < 6:
+                continue
+            rows.append({
+                "Date": pd.to_datetime(row[0]),
+                "Open": float(row[1]),
+                "Close": float(row[2]),
+                "High": float(row[3]),
+                "Low": float(row[4]),
+                "Volume": float(row[5]),
+            })
+        if not rows:
+            return pd.DataFrame()
+        df = pd.DataFrame(rows).set_index("Date").sort_index()
+        df.index.name = "Date"
+        return _apply_period_filter(df, period)
+    except Exception as e:
+        log.warning(f"tencent K线 {symbol} 拉取失败: {e}")
+        return pd.DataFrame()
+
+
 def _fetch_a_share(symbol: str, period: str) -> pd.DataFrame:
-    """拉 A 股日线（使用新浪数据源，避免东方财富被防火墙拦截）"""
+    """拉 A 股日线：东财 → 腾讯 → Sina（直连HTTP，不经过 akshare 以避免 py_mini_racer）"""
+    # 1. 东方财富 JSON API
+    df = _fetch_eastmoney_daily(symbol, period, adjust="qfq")
+    if not df.empty:
+        return df
+
+    # 2. 腾讯 K 线 API（直连 HTTP，无 py_mini_racer 依赖）
+    df = _fetch_tencent_daily(symbol, period, adjust="qfq")
+    if not df.empty:
+        return df
+
+    # 3. 新浪日线（通过 akshare，可能触发 py_mini_racer — 最后兜底）
     try:
         import akshare as ak
         sina_symbol = _a_share_prefix(symbol)
@@ -190,7 +335,6 @@ def _fetch_a_share(symbol: str, period: str) -> pd.DataFrame:
         if df is None or df.empty:
             log.warning(f"akshare A股 {sina_symbol} 返回空数据")
             return pd.DataFrame()
-        # stock_zh_a_daily 返回列名是小写英文：date/open/high/low/close/volume
         df = _map_sina_columns(df)
         return _apply_period_filter(df, period)
     except Exception as e:
@@ -199,18 +343,29 @@ def _fetch_a_share(symbol: str, period: str) -> pd.DataFrame:
 
 
 def _fetch_hk_stock(symbol: str, period: str) -> pd.DataFrame:
-    """拉港股日线（使用新浪数据源）"""
+    """拉港股日线（优先 akshare，失败时退回腾讯直连国内源）"""
     try:
         import akshare as ak
         df = ak.stock_hk_daily(symbol=symbol, adjust="qfq")
-        if df is None or df.empty:
-            log.warning(f"akshare 港股 {symbol} 返回空数据")
-            return pd.DataFrame()
-        df = _map_sina_columns(df)
-        return _apply_period_filter(df, period)
+        if df is not None and not df.empty:
+            df = _map_sina_columns(df)
+            return _apply_period_filter(df, period)
+        log.warning(f"akshare 港股 {symbol} 返回空数据")
     except Exception as e:
         log.error(f"akshare 港股 {symbol} 拉取失败: {e}")
-        return pd.DataFrame()
+
+    try:
+        from utils.cn_market_provider import fetch_history as _cn_fetch_history
+
+        df = _cn_fetch_history(f"{str(symbol).zfill(5)}.HK", period)
+        if df is not None and not df.empty:
+            return df
+        log.warning(f"cn_market_provider 港股 {symbol} 返回空数据")
+    except Exception as e:
+        log.warning(f"cn_market_provider 港股 {symbol} 拉取失败: {e}")
+
+    return pd.DataFrame()
+
 
 
 # 已知指数代码 → 前缀映射（避免与 A 股代码冲突，如 000001 既是平安银行也是上证指数）
@@ -232,6 +387,9 @@ def _is_index(symbol: str) -> bool:
 
 def _fetch_index(symbol: str, period: str) -> pd.DataFrame:
     """拉指数数据（使用新浪源 stock_zh_a_daily，指数不支持前复权）"""
+    df = _fetch_eastmoney_daily(symbol, period, adjust="none")
+    if not df.empty:
+        return df
     try:
         sina_symbol = _KNOWN_INDICES.get(symbol, f"sh{symbol}")
         import akshare as ak

@@ -167,6 +167,20 @@ uv run python -c "from utils.market_data_provider import get_history_data; df = 
 | Close 列为空 | 周末 / 假期没新数据 | 这是正常的，DB 兜底应该接管 |
 | BetaShares 403 NDQ.AX 拉不到 | NDQ 走自家 scraper 失败 | yfinance fallback 自动接（journal 里看到 `🔄 yfinance fallback`）|
 
+### A 股日度选股 `stocks` 为空
+
+如果 `data/daily_stock_selection/latest.json` 里新闻、板块有内容，但 `stocks` 是空列表，通常不是窗口展示问题，而是候选股打分阶段拿不到可用 OHLCV。
+
+```bash
+uv run python -c "from utils.market_data_provider import get_history_data; df = get_history_data('002185', '6mo'); print(df.tail()); print(df.shape)"
+```
+
+排查顺序：
+
+- 先确认 `utils.market_data_provider.get_history_data()` 对 6 位 A 股代码能返回 `Open/High/Low/Close/Volume`。
+- A 股历史日线应优先命中东方财富 JSON 或腾讯 K 线直连；如果日志显示落到 AkShare/Sina 且触发 `StubMiniRacerError`，说明该兜底路径需要 JS，应该补直连数据源或修复上游接口。
+- 新增关注列表后，如果主窗口技术指标为空，先等 API 后台预拉任务写入 `db/market_data.db`，或手动跑一次监控/选股任务刷新缓存。
+
 ### 数据源全景诊断
 
 GUI `/system` → "数据源" tab 一眼看所有数据源最后成功时间 + is_stale。

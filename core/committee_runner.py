@@ -23,9 +23,9 @@ from core.regime_probability import (
     build_probability_table_from_ohlc,
     get_regime_probability,
 )
-from utils.exchange_fee import (
-    analyze_multi_timeframe, get_history_data, get_macro_data,
-)
+from utils.exchange_fee import analyze_multi_timeframe, get_macro_data
+from utils.market_data_provider import get_history_data
+
 from utils.market_metrics import compute_metrics
 
 log = logging.getLogger(__name__)

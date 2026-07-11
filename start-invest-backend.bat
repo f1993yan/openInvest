@@ -23,6 +23,10 @@ if "%OPENINVEST_ROOT%"=="" set "OPENINVEST_ROOT=%SCRIPT_DIR%"
 for %%I in ("%OPENINVEST_ROOT%\.") do set "OPENINVEST_ROOT=%%~fI"
 cd /d "%OPENINVEST_ROOT%" || exit /b 1
 
+rem Ensure project-level py_mini_racer stub is found before site-packages
+rem (the real mini_racer V8 DLL crashes on affected Windows/Python combinations)
+set "PYTHONPATH=%OPENINVEST_ROOT%;%PYTHONPATH%"
+
 if not "%OPENINVEST_PYTHON%"=="" (
     set "PYTHON_CMD=%OPENINVEST_PYTHON%"
 ) else if exist ".venv\Scripts\python.exe" (

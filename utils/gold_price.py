@@ -52,7 +52,7 @@ def _get_db_fallback_snapshot(offset_pct: float) -> Optional[GoldPriceSnapshot]:
             is_stale=True,
         )
     except Exception as e:
-        print(f"⚠️ 黄金 DB 兜底也失败: {e}")
+        print(f"[WARN] Gold DB fallback also failed: {e}")
         return None
 
 
@@ -72,12 +72,12 @@ def get_gold_snapshot(offset_pct: float = 0.015) -> Optional[GoldPriceSnapshot]:
         gold_usd = fetch_spot("GC=F")
         usdcny = fetch_spot("USDCNY=X")
         if gold_usd is None or usdcny is None:
-            print("⚠️ 黄金 provider 数据为空，尝试 DB 兜底")
+            print("[WARN] Gold provider returned empty, trying DB fallback")
             return _get_db_fallback_snapshot(offset_pct)
         gold_usd = float(gold_usd)
         usdcny = float(usdcny)
     except Exception as e:
-        print(f"⚠️ 黄金 provider 拉取失败 ({e})，尝试 DB 兜底")
+        print(f"[WARN] Gold provider fetch failed ({e}), trying DB fallback")
         return _get_db_fallback_snapshot(offset_pct)
 
     # 写 DB cache 给下次兜底用
@@ -89,7 +89,7 @@ def get_gold_snapshot(offset_pct: float = 0.015) -> Optional[GoldPriceSnapshot]:
         _store.save_generic_price("GC=F", today, gold_usd, source="cn_market_provider")
         _store.save_generic_price("USDCNY=X", today, usdcny, source="cn_market_provider")
     except Exception as e:
-        print(f"⚠️ 黄金 DB 写缓存失败（不影响本次返回）: {e}")
+        print(f"[WARN] Gold DB cache write failed (non-fatal): {e}")
 
     spot = (gold_usd / GOLD_OZ_PER_GRAM) * usdcny
     bank = spot * (1 + offset_pct)
@@ -130,4 +130,4 @@ if __name__ == "__main__":
     if snap:
         print(format_gold_report(snap))
     else:
-        print("⚠️ 无法获取黄金数据")
+        print("[WARN] Unable to fetch gold data")

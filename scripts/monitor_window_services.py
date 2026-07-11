@@ -761,13 +761,14 @@ def _compute_tech_from_local_history(
     """
     db = Path(db_path) if db_path is not None else MARKET_DB_PATH
     if not symbol or not db.exists():
-        return {"ma20": None, "ma120": None, "atr_pct": 0.0}
+        return {"ma20": None, "ma120": None, "atr_pct": 0.0, "regime_brief": ""}
 
     try:
         import sqlite3
 
         import pandas as pd
 
+        from core.regime import format_regime_brief
         from utils.market_metrics import compute_metrics
 
         uri = f"file:{db.as_posix()}?mode=ro"
@@ -796,18 +797,42 @@ def _compute_tech_from_local_history(
                         "ma20": _positive_metric(m.get("ma20")),
                         "ma120": _positive_metric(m.get("ma120")),
                         "atr_pct": _safe_num(m.get("atr_pct")),
+                        "regime_brief": format_regime_brief(m, symbol=symbol),
                     }
     except Exception as exc:  # noqa: BLE001
         log.debug("local history technical fallback failed for %s: %s", symbol, exc)
 
-    return {"ma20": None, "ma120": None, "atr_pct": 0.0}
+    return {"ma20": None, "ma120": None, "atr_pct": 0.0, "regime_brief": ""}
 
 
 def _tech_for_config_row(symbol: str, market: str, cached: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     tech = _extract_tech_from_cached_result(cached)
-    if tech.get("ma20") is not None or tech.get("ma120") is not None or _safe_num(tech.get("atr_pct")) > 0:
-        return tech
-    return _compute_tech_from_local_history(symbol, market)
+    cached_complete = (
+        tech.get("ma20") is not None
+        and tech.get("ma120") is not None
+        and _safe_num(tech.get("atr_pct")) > 0
+    )
+    if cached_complete:
+        return {**tech, "regime_brief": ""}
+
+    local_tech = _compute_tech_from_local_history(symbol, market)
+    local_complete = (
+        local_tech.get("ma20") is not None
+        and local_tech.get("ma120") is not None
+        and _safe_num(local_tech.get("atr_pct")) > 0
+    )
+
+    if local_complete:
+        return local_tech
+
+    return {
+        "ma20": tech.get("ma20") if tech.get("ma20") is not None else local_tech.get("ma20"),
+        "ma120": tech.get("ma120") if tech.get("ma120") is not None else local_tech.get("ma120"),
+        "atr_pct": _safe_num(tech.get("atr_pct")) if _safe_num(tech.get("atr_pct")) > 0 else _safe_num(local_tech.get("atr_pct")),
+        "regime_brief": local_tech.get("regime_brief") or "",
+    }
+
+
 
 
 def _config_stock_row(stock: Dict[str, Any], price_info: Dict[str, Any], total_assets: float = 0.0) -> Dict[str, Any]:
@@ -866,8 +891,22 @@ def _config_stock_row(stock: Dict[str, Any], price_info: Dict[str, Any], total_a
 
     tech = _tech_for_config_row(symbol, stock.get("market", "a"), cached)
     atr_pct = _safe_num(tech.get("atr_pct"))
+    if tech.get("regime_brief") and (
+        not technical_regime
+        or technical_regime == "等待交易时段监控刷新"
+        or "缺少必要指标" in technical_regime
+    ):
+        technical_regime = str(tech.get("regime_brief"))
+    if tech.get("regime_brief") and (
+        not technical_quant_view
+        or technical_quant_view == "当前显示本地持仓配置"
+        or "数据缺失" in technical_quant_view
+        or "多周期数据缺失" in technical_quant_view
+    ):
+        technical_quant_view = "已根据本地历史K线补齐均线与波动率；更完整买卖点结论等待下一轮委员会分析刷新。"
 
     return {
+
         "symbol": symbol,
         "name": stock.get("name") or price_info.get("name") or symbol,
         "market": stock.get("market", "a"),

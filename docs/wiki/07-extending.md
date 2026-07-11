@@ -97,6 +97,8 @@
    - 标的代码搜索：修改 `search_symbols(query, limit)`。
    - 宏观指标快照：修改 `get_macro_snapshot(as_of_date)`。
    - 宏观文本报告：修改 `get_macro_data()`。
+   - A 股/港股历史日线的底层兜底在 `utils/akshare_data.py`：A 股优先东方财富 JSON、腾讯 K 线，再到 AkShare/Sina；港股优先 AkShare，再到 `utils.cn_market_provider`。
+   - Windows 本地环境存在项目级 `py_mini_racer` stub，用于阻断真实 V8 DLL 崩溃。新增行情源时优先选择不需要 JS 执行的 HTTP/JSON 接口；确实需要 JS 的 AkShare 路径应显式失败并提供可观测日志。
 
 2. **验证数据格式兼容性**：
    - `get_history_data` 返回的 DataFrame 必须包含标准大写列名：`Open`, `High`, `Low`, `Close`, `Volume`，索引需为 `Date` 并为 `DatetimeIndex`。

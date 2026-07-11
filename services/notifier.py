@@ -100,7 +100,7 @@ def send_email_html(
     sender = os.getenv("EMAIL_SENDER")
     password = os.getenv("EMAIL_PASSWORD")
     if not sender or not password:
-        print("⚠️ Email credentials not found in .env. Skipping email notification.")
+        print("[WARN] Email credentials not found in .env. Skipping email notification.")
         return ""
     receiver = receiver or _resolve_receiver(default_sender=sender)
 
@@ -115,28 +115,28 @@ def send_email_html(
     last_exc: Exception | None = None
     for attempt in range(1, max_retries + 1):
         try:
-            print(f"🔄 [Attempt {attempt}/{max_retries}] 正在连接 SMTP 服务器...")
+            print(f"[INFO] [Attempt {attempt}/{max_retries}] Connecting to SMTP server...")
             # 注：smtplib.SMTP timeout=30 已 cover per-call，不动 socket.setdefaulttimeout
             context = ssl.create_default_context()
             with smtplib.SMTP("smtp.gmail.com", 587, timeout=30) as server:
                 server.ehlo()
                 server.starttls(context=context)
                 server.ehlo()
-                print(f"🔑 [Attempt {attempt}/{max_retries}] 正在验证身份...")
+                print(f"[INFO] [Attempt {attempt}/{max_retries}] Authenticating...")
                 server.login(sender, password)
-                print(f"📨 [Attempt {attempt}/{max_retries}] 正在发送数据...")
+                print(f"[INFO] [Attempt {attempt}/{max_retries}] Sending email...")
                 server.sendmail(sender, [receiver], msg.as_string())
-            print(f"✅ Email successfully sent to {receiver}")
+            print(f"[OK] Email sent to {receiver}")
             return receiver
         except (socket.timeout, smtplib.SMTPException, ConnectionError, OSError) as e:
             last_exc = e
-            print(f"❌ [Attempt {attempt}/{max_retries}] 发送失败: {e}")
+            print(f"[ERROR] [Attempt {attempt}/{max_retries}] Send failed: {e}")
             if attempt < max_retries:
-                print(f"⏳ 等待 {retry_interval} 秒后进行下一次重试...")
+                print(f"[INFO] Waiting {retry_interval}s before next retry...")
                 time.sleep(retry_interval)
                 retry_interval *= 2
 
-    print("⛔️ 已达到最大重试次数，放弃发送。")
+    print("[ERROR] Max retries reached, giving up.")
     raise EmailDeliveryError(
         f"send_email_html 重试 {max_retries} 次后仍失败: "
         f"{type(last_exc).__name__}: {last_exc}"

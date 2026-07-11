@@ -151,12 +151,12 @@ def _fetch_eastmoney_fund(code: str, start: str, end: str) -> Dict[str, float]:
         resp = requests.get(url, headers=headers, timeout=10)
         resp.raise_for_status()
     except requests.RequestException as e:
-        print(f"⚠️ eastmoney fund {code} 拉取失败: {e}")
+        print(f"[WARN] eastmoney fund {code} fetch failed: {e}")
         return {}
 
     m = _PINGZHONG_RE.search(resp.text)
     if not m:
-        print(f"⚠️ eastmoney fund {code}: Data_netWorthTrend 字段未找到")
+        print(f"[WARN] eastmoney fund {code}: Data_netWorthTrend field not found")
         return {}
 
     # JS array 大致是 [{"x":1234567890000,"y":1.0234,...}, ...]
@@ -164,7 +164,7 @@ def _fetch_eastmoney_fund(code: str, start: str, end: str) -> Dict[str, float]:
         # 用 eval 太危险，手工解析关键字段
         items = re.findall(r'\{"x":(\d+),"y":([\d.]+)', m.group(1))
     except Exception as e:
-        print(f"⚠️ eastmoney fund {code} 解析失败: {e}")
+        print(f"[WARN] eastmoney fund {code} parse failed: {e}")
         return {}
 
     start_dt = datetime.strptime(start, "%Y-%m-%d")

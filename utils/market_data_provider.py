@@ -245,30 +245,46 @@ def get_history_data(
     自动识别 CN/US/HK 等标的并走对应的数据源接入。
     """
     symbol_clean = symbol.strip().upper()
-    
-    # 判定是否为 A 股代码
-    is_a_share = False
+    akshare_symbol: Optional[str] = None
+    asset_label = "标的"
+
+    # 判定是否为 A 股 / 港股代码，并归一化为 akshare_data 可识别的裸码。
     if symbol_clean.isdigit() and len(symbol_clean) == 6:
-        is_a_share = True
-    elif (symbol_clean.startswith("SH") or symbol_clean.startswith("SZ")) and symbol_clean[2:].isdigit() and len(symbol_clean[2:]) == 6:
-        is_a_share = True
-        
-    if is_a_share:
+        akshare_symbol = symbol_clean
+        asset_label = "A股"
+    elif symbol_clean.startswith(("SH", "SZ")) and symbol_clean[2:].isdigit() and len(symbol_clean[2:]) == 6:
+        akshare_symbol = symbol_clean[2:]
+        asset_label = "A股"
+    elif symbol_clean.endswith((".SS", ".SH", ".SZ")) and symbol_clean[:-3].isdigit() and len(symbol_clean[:-3]) == 6:
+        akshare_symbol = symbol_clean[:-3]
+        asset_label = "A股"
+    elif symbol_clean.endswith(".HK") and symbol_clean[:-3].isdigit() and 1 <= len(symbol_clean[:-3]) <= 5:
+        akshare_symbol = symbol_clean[:-3].zfill(5)
+        asset_label = "港股"
+    elif symbol_clean.isdigit() and 1 <= len(symbol_clean) <= 5:
+        akshare_symbol = symbol_clean.zfill(5)
+        asset_label = "港股"
+
+    if akshare_symbol is not None:
         try:
             from utils.akshare_data import get_history_data as _ak_get_history_data
-            df = _ak_get_history_data(symbol, period)
+            df = _ak_get_history_data(akshare_symbol, period, as_of_date=as_of_date)
             if df is not None and not df.empty:
                 return df
         except Exception as e:
-            log.warning(f"akshare 获取 A 股历史行情失败 for {symbol}: {e}")
+            log.warning(f"akshare 获取{asset_label}历史行情失败 for {symbol}: {e}")
             
     # 全球/美股/外汇等走 exchange_fee (yfinance) 数据源
     try:
         from utils.exchange_fee import get_history_data as _fallback_get_history_data
-        return _fallback_get_history_data(symbol, period, as_of_date=as_of_date)
+        fallback_symbol = symbol_clean
+        if akshare_symbol is not None and asset_label == "港股":
+            fallback_symbol = f"{akshare_symbol}.HK"
+        return _fallback_get_history_data(fallback_symbol, period, as_of_date=as_of_date)
     except Exception as e:
         log.warning(f"exchange_fee 获取历史行情失败 for {symbol}: {e}")
         return pd.DataFrame()
+
 
 def search_symbols(query: str, limit: int = 8) -> List[Dict[str, Any]]:
     """搜索标的代码与简称。

@@ -157,7 +157,8 @@ start-invest-backend.bat
 - `jobs.market_monitor_runtime.run_monitor_round()` 是一轮盘中监控的唯一编排入口，负责行情、委员会、账本、新闻、告警和快照输出。
 - `scripts/monitor_desktop_window.py` 只消费 `data/market_monitor/latest_window.json`，窗口跟随委员会/选股/新闻输出文件变化刷新，不再单独定义业务刷新频率。
 - 桌面窗口里双击单标的会走 `scripts.monitor_window_services._run_latest_committee_for_row()` 直接跑最新委员会；成功后由 `scripts.monitor_window_analysis._dialog_row_from_committee_result()` 合成行状态，再通过 `scripts.monitor_desktop_window.MonitorWindow._apply_committee_row_update()` 回写内存行和 `latest_window.json`。
-- 当窗口退回配置兜底快照时，`scripts.monitor_window_services._config_stock_row()` 的技术指标只读缓存：先取最近委员会结果里的 `technical/market_metrics/metrics/entry_exit_points`，缺失时再由 `_compute_tech_from_local_history()` 只读 `db/market_data.db` 计算 `ma20/ma120/atr_pct`。该路径不调用 `utils.market_data_provider.get_history_data()` 或旧历史行情 provider，避免 UI 刷新触发联网、行情同步或 DB 写入。
+- 当窗口退回配置兜底快照时，`scripts.monitor_window_services._config_stock_row()` 的技术指标只读缓存：先取最近委员会结果里的 `technical/market_metrics/metrics/entry_exit_points`，缺失时再由 `_compute_tech_from_local_history()` 只读 `db/market_data.db` 计算 `ma20/ma120/atr_pct` 并生成 `regime_brief`。该路径不调用 `utils.market_data_provider.get_history_data()` 或旧历史行情 provider，避免 UI 刷新触发联网、行情同步或 DB 写入。
+- Web/API 的 `POST/PUT/DELETE /api/holdings` 会在账本更新后追加后台任务：新增标的先预拉 2 年历史行情写入缓存，再刷新 `latest_window.json`；更新/删除则直接刷新快照。这是配置变化后的快照维护，不是桌面 UI 刷新路径。
 - 弹框默认关闭，稳定窗口是主交互面；只有显式开启相关环境变量时才恢复旧 Windows 弹框。
 
 模块定位：
@@ -186,7 +187,7 @@ start-invest-backend.bat
 - 交易模式在 `jobs/trading_mode.py` 定义，并由 `jobs/market_monitor_alerts.py` 使用：`主动盈利` 保持旧的期望最大化，`现金回收` 增加现金保留和卖出释放现金效用，`主动避险` 提高买入门槛并强化风险卖出。它只改变提醒优化层，不改变 `entry_exit_points`、`position_exit_plan` 或委员会原始 verdict。
 - 主窗口文案在 `scripts/monitor_window_text.py`：方向性委员会结果但未成为可执行提醒时显示“候选卖/候选买”，避免和普通“观察”混淆。快照原因来自 `jobs/market_monitor_snapshot.py` 的 `operation.reason`。
 - 详情弹窗颜色也在 `scripts/monitor_window_text.py` / `scripts/monitor_window_analysis.py`：风险行红色加粗、正向证据绿色加粗、背景信息灰色。这是 Tk 桌面渲染层，不改变 `utils.phone_committee`、HTTP 或 Android App 的 JSON 接口。
-- 主窗口 `technical.ma20/ma120/atr_pct` 正常来自 `jobs/market_monitor_snapshot.py`；只有配置兜底快照才会在 `scripts.monitor_window_services` 里补算，而且只读本地 `market_data.db`。如果维护者发现窗口技术指标为空，应补监控快照或本地行情缓存，不要把历史行情拉取放进 UI 服务。
+- 主窗口 `technical.ma20/ma120/atr_pct` 正常来自 `jobs/market_monitor_snapshot.py`；只有配置兜底快照才会在 `scripts.monitor_window_services` 里补算，而且只读本地 `market_data.db`。如果维护者发现窗口技术指标为空，应先确认 API 后台预拉或监控任务是否已把历史行情写入本地缓存，不要把历史行情拉取放进 UI 服务。
 - 卖出阈值诊断脚本是 `scripts/diagnose_ashare_sell_threshold.py`。它比较不同 `committee_sell_stop_band` 的收益/回撤、卖出胜率下界、卖出后规避回撤和错过反弹成本；如果多组 band 结果完全一致，说明委员会卖出带不是约束点，应优先检查提醒筛选、止盈止损参数或 UI 状态。
 - 周度优化的 `policy_quality_score` 会纳入卖出后 5 日路径效用：`avg_post_sell_net_edge_pct = avoided_drawdown - missed_rebound`。这个指标为负时，说明卖出经常躲过一部分下跌但错过更大的反弹，参数优化会相应惩罚该策略。
 - 周度参数优化的行业映射会先用更像浏览器的东方财富直连，失败后尝试 AkShare，再读 `data/sector_cache.json`；缓存仍缺失时才使用本地配置里的 `sector`/`industry`。

@@ -191,7 +191,7 @@ def get_history_data(
                     )
                 df_db = _STORE.get_history_df(symbol)
         except Exception as e:
-            print(f"❌ market provider sync failed for {symbol}: {e}")
+            print(f"[ERROR] market provider sync failed for {symbol}: {e}")
 
     if not df_db.empty:
         return _apply_cutoff(df_db, as_of_date)
@@ -200,7 +200,7 @@ def get_history_data(
     safe_symbol = symbol.replace("=", "").replace(".", "_").replace("/", "")
     csv_path = os.path.join(CACHE_DIR, f"{safe_symbol}_{period}.csv")
     if os.path.exists(csv_path):
-        print(f"⚠️ [Emergency] DB Empty. Using legacy CSV for {symbol}")
+        print(f"[WARN] Emergency: DB Empty. Using legacy CSV for {symbol}")
         try:
             df_csv = pd.read_csv(csv_path, index_col=0, parse_dates=True)
             if not df_csv.empty:
@@ -458,7 +458,7 @@ def get_cost_snapshot(
             safe_symbol = "AUDCNY=X".replace("=", "").replace(".", "_").replace("/", "")
             stale_path = os.path.join(CACHE_DIR, f"{safe_symbol}_2y.csv")
             if os.path.exists(stale_path):
-                print("⚠️ [Emergency] Using stale cache for spot rate.")
+                print("[WARN] Emergency: Using stale cache for spot rate.")
                 try:
                     df_stale = pd.read_csv(stale_path, index_col=0, parse_dates=True)
                     spot_rate = float(df_stale['Close'].iloc[-1])

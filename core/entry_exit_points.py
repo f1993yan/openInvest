@@ -41,6 +41,8 @@ class EntryExitPlan:
     downside_quantile_pct: float
     upside_quantile_pct: float
     cvar_95_loss_pct: float
+    ma20: float
+    ma120: float
     atr_pct: float
     reward_risk_ratio: float
     low_confidence: bool
@@ -140,6 +142,8 @@ def compute_entry_exit_points(
             downside_quantile_pct=0.0,
             upside_quantile_pct=0.0,
             cvar_95_loss_pct=0.0,
+            ma20=_safe_float(metrics.get("ma20")),
+            ma120=_safe_float(metrics.get("ma120")),
             atr_pct=atr_pct,
             reward_risk_ratio=0.0,
             low_confidence=True,
@@ -196,6 +200,8 @@ def compute_entry_exit_points(
         downside_quantile_pct=round(q20, 4),
         upside_quantile_pct=round(q80, 4),
         cvar_95_loss_pct=round(cvar_loss, 4),
+        ma20=round(_safe_float(metrics.get("ma20")), 2),
+        ma120=round(_safe_float(metrics.get("ma120")), 2),
         atr_pct=round(atr_pct, 4),
         reward_risk_ratio=round(reward_risk, 4),
         low_confidence=low_confidence,

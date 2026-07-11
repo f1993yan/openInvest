@@ -64,6 +64,7 @@
 | 启动 | `start-invest-backend.bat` → `start_invest_backend.py` | 读取 `.env`，清理旧进程，启动监控、调度器和桌面窗口 |
 | UI | `scripts/monitor_desktop_window.py` | 独立窗口主循环、卡片布局、悬浮窗协调 |
 | UI 服务 | `scripts/monitor_window_services.py` | 读取监控快照、手动交易、关注列表、最新价；配置兜底快照只读本地技术指标，不触发行情同步 |
+| 行情中间层 | `utils.market_data_provider.py` / `utils.akshare_data.py` | 统一实时/历史行情路由；A 股历史优先东方财富/腾讯直连 HTTP，最后才走 AkShare/Sina |
 | 监控入口 | `jobs/market_monitor.py` | 仅保留 CLI 入口和兼容导出，旧导入仍可用 |
 | 监控通用 | `jobs/market_monitor_common.py` | 路径、日志、交易时段常量、通用数值函数 |
 | 行情/委员会 | `jobs/market_monitor_quotes.py` | 新浪行情、直接 Python 调用委员会，不依赖 8766 HTTP |
@@ -91,11 +92,13 @@ market_monitor_runtime.run_monitor_round()
 
 桌面窗口的手动单标的分析是同一状态源的增量路径：双击卡片后，窗口直接调用最新委员会分析，成功结果会合成一行监控快照并回写 `data/market_monitor/latest_window.json`，随后主窗口重新排序和渲染。它不会修改真实持仓，只有用户点击“我已遵循买入/卖出”或手动交易面板执行时才写 `AccountLedger(real)`。
 
+Web/API 的持仓和关注列表 CRUD 是另一条增量路径：`POST/PUT/DELETE /api/holdings` 写入真实账本后，会在后台任务里预拉相关标的历史行情并刷新 `latest_window.json`。这样新加入的关注标的不用等下一轮完整委员会，也能尽快在主窗口拿到最新价和本地 MA/ATR 兜底指标。
+
 桌面窗口技术指标的来源顺序：
 
-1. 正常监控轮次由 `jobs/market_monitor_snapshot.py` 把委员会结果中的 `entry_exit_points` 和 `technical` 写入 `data/market_monitor/latest_window.json`。
+1. 正常监控轮次由 `jobs/market_monitor_snapshot.py` 把委员会结果中的 `entry_exit_points` 和 `technical` 写入 `data/market_monitor/latest_window.json`，其中 `entry_exit_points` 会带出 `ma20`、`ma120`、`atr_pct`。
 2. 当没有可用监控快照、窗口退回配置兜底快照时，`scripts.monitor_window_services._config_stock_row()` 会优先读取最近一次委员会缓存里的 `ma20`、`ma120`、`atr_pct`。
-3. 若缓存仍缺失，`_compute_tech_from_local_history()` 只以 SQLite `mode=ro` 查询本地 `db/market_data.db`，用 `utils.market_metrics.compute_metrics()` 计算 MA/ATR；该路径不调用历史行情 provider，不联网，不同步行情，不写库。
+3. 若缓存仍缺失，`_compute_tech_from_local_history()` 只以 SQLite `mode=ro` 查询本地 `db/market_data.db`，用 `utils.market_metrics.compute_metrics()` 计算 MA/ATR，并用 `core.regime.format_regime_brief()` 生成简短趋势说明；该路径不调用历史行情 provider，不联网，不同步行情，不写库。
 
 这条边界很重要：桌面窗口是快照消费者，不是行情抓取任务。技术指标缺失时，应先检查监控快照、`data/committee_cache/` 和 `db/market_data.db`，不要在 UI 刷新路径里新增联网拉历史 K 线的逻辑。
 
@@ -349,7 +352,8 @@ holdings:
 1. **多源新闻过滤与 NLP 提取**：结合百度热搜与国内热点新闻，通过 `domestic_hot_news.py` 匹配预设的 20+ 个热门板块主题。利用正则表达式提取新闻正文中的 6 位 A股 代码，并通过常见公司简称映射表进行补充识别。
 2. **北向资金流个股数据**：调用 `akshare` 获取东方财富的沪股通个股资金流数据，获取今日净买入额靠前的标的注入候选池。
 3. **板块资金流数据**：获取主力资金净流入强、行业内排名靠前的板块。
-4. **防反爬降级机制**：
+4. **历史 OHLCV 路由**：候选股打分前通过 `utils.market_data_provider.get_history_data()` 获取日线。A 股先归一化代码并走 `utils.akshare_data`，内部优先东方财富 JSON、其次腾讯 K 线，最后才使用 AkShare/Sina，避免 Windows 上 `py_mini_racer`/V8 崩溃或 JS 依赖路径把候选池清空。
+5. **防反爬降级机制**：
    - 考虑到直连东方财富 API 容易因高频请求被反爬封锁 IP，系统引入了基于 Playwright Chromium 真实浏览器的爬虫机制（`utils/browser_scraper.py`）。
    - 当 `akshare` 或 `requests` 直连请求失败时，系统将自动激活 Playwright 拦截并模拟提取板块资金流、北向个股资金及百度热搜，保证数据源的高可用性。
 

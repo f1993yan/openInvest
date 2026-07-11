@@ -27,12 +27,14 @@ openInvest 的目标不是替你下单，而是把投资决策过程变得可追
 当前行情和新闻入口：
 
 - **行情分发中间层**：`utils.market_data_provider` 提供统一的价格拉取（`fetch_prices`）、历史行情获取（`get_history_data`）以及标的代码检索（`search_symbols`）等接口。
-- **实时行情**：A 股及港股通过新浪行情直接提取。
-- **历史行情路由**：A 股自动调用 `utils.akshare_data`（新浪源）；全球/美股/外汇等资产走 `utils.exchange_fee`（yfinance 源）。
+- **实时行情**：A 股及港股优先通过腾讯批量行情提取，失败后降级 Sina；非交易时段优先复用进程内缓存。
+- **历史行情路由**：A 股/港股会先归一化代码。A 股日线优先走东方财富 JSON，其次腾讯 K 线，最后才使用 AkShare/Sina；港股优先 AkShare，失败后走 `utils.cn_market_provider`；全球/美股/外汇等资产走 `utils.exchange_fee`（yfinance 源）。
 - **标的检索**：`utils.market_data_provider.search_symbols`（通过 `akshare` 检索）。
 - **宏观快照及数据**：`utils.market_data_provider.get_macro_snapshot` 统一聚合国内宏观数据（上证指数、北向资金、在岸人民币汇率、10年期国债收益率），支持传入 `as_of_date` 拦截历史数据以防止回测中发生数据穿越。
 - **新闻**：国内新闻聚合、热榜、RSS、DDGS/web search。
 - **symbol 相关新闻**：`services.news_sources.symbol_news`，通过通用 web/news search 获取，不依赖行情包。
+
+Windows 本地启动脚本会把项目根目录放在 `PYTHONPATH` 前面，让项目内的 `py_mini_racer` stub 先于 site-packages 生效，规避受影响 Windows/Python 组合中真实 V8 DLL 的崩溃。生产行情路径应优先使用不需要 JS 的直连 HTTP 源；若某个 AkShare 兜底路径确实需要 JS，会显式失败而不是静默拖垮选股池。
 
 历史配置里仍可能出现字段名 `yfinance_proxy`。这是旧 schema 的兼容字段，用于表示行情代理 symbol，例如黄金用 `GC=F` 和 `USDCNY=X` 反推人民币克价；它不是包依赖。
 
@@ -265,10 +267,12 @@ uv run python scripts/diagnose_ashare_sell_threshold.py --symbols "600183,002185
 
 主窗口的技术面字段遵循“快照优先、只读兜底”的原则：
 
-- 正常来源是 `jobs/market_monitor_snapshot.py` 写入的 `technical` 和 `entry_exit_points`，包括 `atr_pct`、入场/出场线、买卖点模型等。
+- 正常来源是 `jobs/market_monitor_snapshot.py` 写入的 `technical` 和 `entry_exit_points`，包括 `ma20`、`ma120`、`atr_pct`、入场/出场线、买卖点模型等。
 - 配置兜底快照由 `scripts/monitor_window_services.py` 生成时，会先读取最近一次委员会/监控缓存里的 `ma20`、`ma120`、`atr_pct`。
-- 如果缓存缺失，窗口服务只会以只读方式查询本地 `db/market_data.db` 计算 MA/ATR；它不会调用历史行情 provider，不联网，不同步行情，也不写 DB。
+- 如果缓存缺失，窗口服务只会以只读方式查询本地 `db/market_data.db` 计算 MA/ATR，并生成简短趋势说明；它不会调用历史行情 provider，不联网，不同步行情，也不写 DB。
 - 因此桌面窗口刷新不承担行情抓取职责。若技术指标为空，优先检查委员会快照、`data/committee_cache/` 和本地 `market_data.db` 是否已有该标的历史数据。
+
+通过后台 API 新增、更新或删除持仓/关注标的后，服务端会异步预拉该标的历史行情并刷新 `latest_window.json`，让新标的尽快带上 MA/ATR 等展示字段。这个刷新发生在 API 后台任务里，不改变桌面窗口“只消费快照和本地缓存”的边界。
 
 主窗口只展示标的监控，多个标的按操作优先级用卡片堆叠展示：
 
@@ -406,6 +410,8 @@ sequenceDiagram
 - 账户现金约束，过滤资金不足以买入一手的标的。
 
 结果写入 `data/daily_stock_selection/latest.json`，桌面窗口底部以按钮展示候选标的。点击按钮会打开悬浮详情，展示为什么入选、什么位置更适合买入、风险在哪里，以及是否值得加入关注列表。
+
+如果 `latest.json` 里板块或新闻有数据、但 `stocks` 为空，优先排查历史日线是否取到：日度选股需要 OHLCV 才能计算趋势、ATR、收益路径和一手资金约束。当前 A 股历史日线已优先使用东方财富/腾讯直连 HTTP，避免 `py_mini_racer` 或 AkShare JS 路径异常导致整个候选池被清空。
 
 风险新闻量化是辅助判断模型，不是收益承诺。
 

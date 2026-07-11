@@ -45,6 +45,8 @@ APScheduler 自动发现的定时任务。每个 `.py` 配套一个 `.yml` 描�
 - `market_monitor_runtime.py` 运行时也会读取 `data/sector_cache.json`，把 A 股标的的 `sector` 统一成周更用的东方财富板块；原配置板块保留在 `config_sector`，不直接写回 config/ledger。
 - `sample_quality=thin/sparse` 时只收缩卖出效用字段，不丢弃止盈止损参数，避免单票板块过拟合。
 - 主窗口消费 `data/market_monitor/latest_window.json`，UI 改动优先看 `scripts/monitor_window_*.py`。
+- `.yml` cron 表达式统一使用 `mon-fri` 这类命名星期，避免不同 cron 解析器对 `1-5` 的含义不一致；周度 A 股止盈止损参数优化安排在周日 20:00。
+- Windows 控制台输出优先使用 `[INFO]` / `[WARN]` / `[ERROR]` 这类 ASCII 状态前缀，避免 GBK 终端遇到 emoji 日志时报编码错误。
 
 - `INDEX.md` — 所有 job 的输入/输出 spec（人类参考）
 - `*.yml` — APScheduler cron 配置（声明式）

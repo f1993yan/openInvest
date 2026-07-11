@@ -1037,8 +1037,56 @@ async def get_monitor_config():
 
 # ============ Holdings / Watchlist CRUD ============
 
+
+def _prefetch_symbol_data(symbol: str, market: str = "a") -> None:
+    """后台预拉标的历史行情数据，写入 SQLite 缓存供 MA/ATR 等技术指标计算。
+
+    get_history_data 内部有缓存判断（3 天内不重复拉取），所以重复调用开销很小。
+    """
+    try:
+        from utils.market_data_provider import get_history_data
+
+        history_symbol = str(symbol or "").strip().upper()
+        market_key = str(market or "").strip().lower()
+        if market_key in {"hk", "h", "hongkong"} and history_symbol.isdigit():
+            history_symbol = history_symbol.zfill(5)
+
+        df = get_history_data(history_symbol, "2y")
+        rows = 0 if df is None or df.empty else len(df)
+        log.info(f"Prefetched history for {history_symbol} ({market_key or market}): {rows} bars")
+    except Exception as e:  # noqa: BLE001
+        log.warning(f"Prefetch history failed for {symbol}: {e}")
+
+
+
+def _refresh_monitor_snapshot(reason: str = "holding_changed") -> None:
+    """后台重新生成监控快照（含实时价格 + 技术指标），不调用 DeepSeek/委员会。
+
+    构建新快照后原子替换旧文件：
+    1. 从 market_monitor_config.json 读持仓
+    2. 调 fetch_sina_prices 拉实时价
+    3. 调 _compute_tech_from_local_history 从 SQLite 算 MA20/MA120/ATR_PCT
+    """
+    try:
+        from scripts.monitor_window_services import _load_config_snapshot, _write_snapshot
+        from scripts.monitor_window_constants import DEFAULT_SNAPSHOT
+
+        snapshot = _load_config_snapshot(reason, source_path=DEFAULT_SNAPSHOT)
+        _write_snapshot(DEFAULT_SNAPSHOT, snapshot)
+        rows = snapshot.get("rows", [])
+        log.info(f"Monitor snapshot refreshed ({reason}): {len(rows)} symbols")
+    except Exception as e:  # noqa: BLE001
+        log.warning(f"Monitor snapshot refresh failed ({reason}): {e}")
+
+
+def _prefetch_and_refresh(symbol: str, market: str = "a") -> None:
+    """新增标的：先拉历史数据写入 DB，再刷新快照生成完整技术指标。"""
+    _prefetch_symbol_data(symbol, market)
+    _refresh_monitor_snapshot(f"added:{symbol}")
+
+
 @app.post("/api/holdings")
-async def add_holding_api(body: Dict[str, Any] = Body(...)):
+async def add_holding_api(background_tasks: BackgroundTasks, body: Dict[str, Any] = Body(...)):
     """新增持仓或自选标的。如果 is_tracking_only=True 则放入 watchlist，否则放入 holdings。"""
     try:
         symbol = str(body.get("symbol") or "").strip().upper()
@@ -1076,7 +1124,10 @@ async def add_holding_api(body: Dict[str, Any] = Body(...)):
         )
         if not success:
             raise HTTPException(status_code=500, detail="Failed to add holding to ledger")
-            
+
+        # 标的变化：后台拉历史数据 + 刷新快照（含 MA/ATR 等技术指标）
+        background_tasks.add_task(_prefetch_and_refresh, symbol, market)
+
         return {"ok": True, "message": "已加入关注列表" if is_tracking_only else "已加入持仓列表"}
     except Exception as e:
         if isinstance(e, HTTPException):
@@ -1085,7 +1136,7 @@ async def add_holding_api(body: Dict[str, Any] = Body(...)):
 
 
 @app.put("/api/holdings/{symbol}")
-async def update_holding_api(symbol: str, body: Dict[str, Any] = Body(...)):
+async def update_holding_api(background_tasks: BackgroundTasks, symbol: str, body: Dict[str, Any] = Body(...)):
     """更新持仓或自选状态。如果 is_tracking_only=True 则将标的移入/保留在 watchlist，否则移入/保留在 holdings。"""
     try:
         symbol = symbol.strip().upper()
@@ -1110,7 +1161,10 @@ async def update_holding_api(symbol: str, body: Dict[str, Any] = Body(...)):
         )
         if not success:
             raise HTTPException(status_code=500, detail="Failed to update holding in ledger")
-            
+
+        # 标的变化：后台刷新快照
+        background_tasks.add_task(_refresh_monitor_snapshot, f"updated:{symbol}")
+
         return {"ok": True, "message": "持仓数据更新成功"}
     except Exception as e:
         if isinstance(e, HTTPException):
@@ -1119,7 +1173,7 @@ async def update_holding_api(symbol: str, body: Dict[str, Any] = Body(...)):
 
 
 @app.delete("/api/holdings/{symbol}")
-async def delete_holding_api(symbol: str):
+async def delete_holding_api(background_tasks: BackgroundTasks, symbol: str):
     """删除持仓或自选标的。"""
     try:
         symbol = symbol.strip().upper()
@@ -1139,7 +1193,10 @@ async def delete_holding_api(symbol: str):
         success = _ledger.delete_holding(REAL_ACCOUNT, symbol)
         if not success:
             raise HTTPException(status_code=500, detail="Failed to delete holding from ledger")
-            
+
+        # 标的变化：后台刷新快照（移除已删除标的）
+        background_tasks.add_task(_refresh_monitor_snapshot, f"deleted:{symbol}")
+
         return {"ok": True, "message": "已删除关注"}
     except Exception as e:
         if isinstance(e, HTTPException):

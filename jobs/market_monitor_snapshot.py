@@ -321,6 +321,8 @@ def build_monitor_window_snapshot(
                 "market_data_excerpt": result.get("market_data", "")[:1200],
                 "entry_exit_model": ee.get("model_name", ""),
                 "low_confidence": bool(ee.get("low_confidence")),
+                "ma20": _safe_num(ee.get("ma20")),
+                "ma120": _safe_num(ee.get("ma120")),
                 "atr_pct": _safe_num(ee.get("atr_pct")),
                 "expected_return_pct": _safe_num(ee.get("expected_return_pct")),
                 "buy_signal_backtest": result.get("buy_signal_backtest", {}),
