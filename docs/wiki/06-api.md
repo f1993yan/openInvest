@@ -241,14 +241,24 @@ POST body schema：
 浏览器 → CF Access (验证邮箱) → CF proxy → Caddy → 后端 127.0.0.1:8765
 ```
 
-**后端不做 auth**：
-- 后端只绑 127.0.0.1，公网扫不到
-- Caddy 只反代 /api/* 到 8765
-- CF Access 在边缘验证 JWT（仅授权邮箱通过）
-- 路径都可信 → 后端不重复验证
+这里有两个 FastAPI surface，不能混为一谈：
 
-→ 加 JWT 校验是过度工程，但**前提是没人能直连源站 IP**。
-→ 加固方案：Caddy 加 `@cloudflare` matcher 仅放行 CF IP 段（未来）。
+- `connectors.web_api` 的生产拓扑仍以 `127.0.0.1 + Caddy + Cloudflare Access` 为外层鉴权。
+- 桌面/移动同步使用的 `backend.server` 支持可选 `INVEST_API_TOKEN`。留空保持旧行为；配置后除 `/api/health` 和 CORS preflight 外，所有路由都要求 `Authorization: Bearer <token>`。
+
+桌面端远程 token 读取 `INVEST_REMOTE_API_TOKEN`，留空再回退 `INVEST_API_TOKEN`。不要把真实 token 写进 `.env.example` 或 Git。
+
+`backend.server` 的配置恢复端点还执行内容校验：空 monitor config、空账本、缺少关键表、SQLite header/quick-check 失败默认拒绝；只有显式 `force=true` 才允许清空。覆盖前备份落在 `data/backups/<backup_id>/`，manifest 只记录校验和、大小和 schema 版本。
+
+决策与账本增量接口：
+
+| Method | Path | 说明 |
+|--------|------|------|
+| GET | `/api/accounts/real/decisions` | 只返回 real 决策；不公开影子账户决策 |
+| POST | `/api/accounts/real/decisions/{decision_id}/response` | 记录接受/拒绝及原因 |
+| POST | `/api/accounts/real/trades` | `decision_id` / `idempotency_key` 均为可选，旧客户端请求不变 |
+| POST | `/api/config/account_ledger` | 校验、备份并原子恢复；`force=true` 可显式接受空账本 |
+| GET | `/api/config/account_ledger` | SQLite online backup 一致快照，不直接裸拷贝 WAL 主文件 |
 
 详见 [08-deployment.md#cloudflare-access](08-deployment.md#cloudflare-access)。
 
@@ -329,6 +339,8 @@ INVEST_WEB_DEV_CORS=1 uv run uvicorn ...
 ```
 
 → 后端会注入 CORS middleware 仅放行 `http://localhost:5173`。
+
+`backend.server` 不再使用 `allow_origins=["*"]`。它读取逗号分隔的 `INVEST_CORS_ORIGINS`，默认只含 `http://127.0.0.1:8765` 和 `http://localhost:8765`；原生 Android、Tk 和普通 HTTP 客户端不受浏览器 CORS 约束。
 
 ---
 

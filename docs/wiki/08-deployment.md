@@ -42,6 +42,12 @@ cp .env.example .env
 # 编辑 .env 填 DEEPSEEK_API_KEY / EMAIL_* / 等
 ```
 
+如果部署 `backend.server` 给桌面或移动端做跨机器同步，再生成一个随机高熵 token 写入服务器 `.env` 的 `INVEST_API_TOKEN`，客户端写入 `INVEST_REMOTE_API_TOKEN`。只使用 `connectors.web_api + Cloudflare Access` 且后端始终绑定 loopback 时可以留空。`INVEST_CORS_ORIGINS` 只接受实际浏览器来源，不要恢复 `*`。
+
+配置和账本恢复前的本地备份默认位于 `data/backups/`；该目录必须持久化但不能发布。SQLite 下载端点使用 online backup，因此不要再手工只复制 `.db` 而遗漏同目录的 `-wal`。
+
+Windows 桌面端从远程覆盖 `db/accounts.db` 时会暂时停止当前项目的后端、监控和调度进程，避免旧连接继续持有数据库文件；恢复完成后仅重启同步前确实运行的后端。进程识别同时匹配项目目录和已知模块名，避免结束其他 Python 项目。若窗口提示“配置成功但账本失败”，先检查是否还有第三方 SQLite 工具打开 `accounts.db`，关闭后重新同步；不要手工删除原库或 `-wal/-shm` 文件。
+
 ### 1.2 拉前端 dist
 
 ```bash

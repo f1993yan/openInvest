@@ -450,10 +450,14 @@ def _dialog_row_from_committee_result(row: Dict[str, Any], result: Dict[str, Any
             "verdict": verdict or result.get("verdict") or op.get("verdict") or "HOLD",
             "confidence": _safe_num(result.get("confidence"), _safe_num(op.get("confidence"))),
             "suggested_alloc_cny": alloc,
+            "analysis_id": str(result.get("analysis_id") or op.get("analysis_id") or ""),
+            "decision_id": str(result.get("decision_id") or op.get("decision_id") or ""),
         }
     )
     out["operation"] = op
     out["state"] = status
+    out["analysis_id"] = str(result.get("analysis_id") or out.get("analysis_id") or "")
+    out["decision_id"] = str(result.get("decision_id") or out.get("decision_id") or "")
     out["decision_synthesis"] = result.get("decision_synthesis", out.get("decision_synthesis", {}))
     out["buy_signal_backtest"] = result.get("buy_signal_backtest", out.get("buy_signal_backtest", {}))
     if result.get("entry_exit_points"):

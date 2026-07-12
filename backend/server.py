@@ -16,17 +16,16 @@ if _sys.platform == "win32":
     # 强制 UTF-8 模式：影响 filesystem encoding、stdio encoding、subprocess 默认编码
     _os.environ.setdefault("PYTHONUTF8", "1")
     _os.environ.setdefault("PYTHONIOENCODING", "utf-8")
-    # 重新打开 stdio 为 UTF-8（对已启动进程有效）
-    import io as _io
+    # 原地调整编码，不替换/关闭宿主进程（pytest、IDE、桌面启动器）的捕获流。
     try:
-        if hasattr(_sys.stdout, "buffer"):
-            _sys.stdout = _io.TextIOWrapper(_sys.stdout.buffer, encoding="utf-8", errors="replace")
-        if hasattr(_sys.stderr, "buffer"):
-            _sys.stderr = _io.TextIOWrapper(_sys.stderr.buffer, encoding="utf-8", errors="replace")
+        for _stream in (_sys.stdout, _sys.stderr):
+            if hasattr(_stream, "reconfigure"):
+                _stream.reconfigure(encoding="utf-8", errors="replace")
     except Exception:
         pass
 
 import logging
+import hmac
 import json
 import sys
 from datetime import datetime, timezone
@@ -45,10 +44,11 @@ try:
 except Exception:
     pass
 
-from fastapi import BackgroundTasks, Body, FastAPI, HTTPException, Query, UploadFile, File
-from fastapi.responses import FileResponse
+from fastapi import BackgroundTasks, Body, FastAPI, HTTPException, Query, Request, UploadFile, File
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
+from starlette.background import BackgroundTask
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(name)s] %(levelname)s: %(message)s")
 log = logging.getLogger("openinvest.backend")
@@ -59,12 +59,34 @@ app = FastAPI(
     version="0.1.0",
 )
 
+_cors_origins_raw = _os.getenv(
+    "INVEST_CORS_ORIGINS",
+    "http://127.0.0.1:8765,http://localhost:8765",
+)
+_cors_origins = [item.strip() for item in _cors_origins_raw.split(",") if item.strip()]
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_origins=_cors_origins,
+    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+    allow_headers=["Authorization", "Content-Type"],
 )
+
+
+@app.middleware("http")
+async def require_optional_api_token(request: Request, call_next):
+    """Protect every non-health route when INVEST_API_TOKEN is configured."""
+    expected = str(_os.getenv("INVEST_API_TOKEN") or "").strip()
+    if not expected or request.url.path == "/api/health" or request.method == "OPTIONS":
+        return await call_next(request)
+    auth = str(request.headers.get("Authorization") or "")
+    scheme, _, supplied = auth.partition(" ")
+    if scheme.lower() != "bearer" or not supplied or not hmac.compare_digest(supplied, expected):
+        return JSONResponse(
+            status_code=401,
+            content={"detail": "Missing or invalid bearer token"},
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    return await call_next(request)
 
 
 # ==========================================
@@ -155,6 +177,13 @@ class AccountTradeRequest(BaseModel):
     price: float = Field(..., gt=0)
     trade_date: Optional[str] = Field(None, pattern=r"^\d{4}-\d{2}-\d{2}$")
     note: Optional[str] = Field(None, max_length=512)
+    decision_id: Optional[str] = Field(None, min_length=8, max_length=128)
+    idempotency_key: Optional[str] = Field(None, min_length=8, max_length=256)
+
+
+class DecisionResponseRequest(BaseModel):
+    accepted: bool
+    reason: Optional[str] = Field(None, max_length=512)
 
 
 class AccountSnapshotRequest(BaseModel):
@@ -334,6 +363,30 @@ def _read_text_fallback(path: Path) -> str:
     return path.read_text(encoding="utf-8", errors="replace")
 
 
+def _validate_monitor_config(config: Dict[str, Any], *, force: bool = False) -> None:
+    if not isinstance(config, dict):
+        raise HTTPException(status_code=400, detail="Monitor config must be a JSON object")
+    holdings = config.get("holdings", [])
+    watchlist = config.get("watchlist", [])
+    if not isinstance(holdings, list) or not isinstance(watchlist, list):
+        raise HTTPException(status_code=400, detail="holdings and watchlist must be arrays")
+    if not force and not holdings and not watchlist:
+        raise HTTPException(
+            status_code=400,
+            detail="Refusing an empty monitor config; retry with force=true to clear all targets",
+        )
+    for item in [*holdings, *watchlist]:
+        if not isinstance(item, dict) or not str(item.get("symbol") or "").strip():
+            raise HTTPException(status_code=400, detail="Every monitor target must contain symbol")
+    for key in ("cash", "total_assets"):
+        if key in config:
+            try:
+                if float(config[key]) < 0:
+                    raise ValueError
+            except (TypeError, ValueError):
+                raise HTTPException(status_code=400, detail=f"{key} must be a non-negative number")
+
+
 @app.get("/api/accounts")
 async def list_dual_accounts() -> Dict[str, Any]:
     """Return real account and committee shadow-account state."""
@@ -370,6 +423,29 @@ async def list_account_pnl(
     return {"count": len(rows), "rows": rows}
 
 
+@app.get("/api/accounts/real/decisions")
+async def list_real_account_decisions(
+    limit: int = Query(200, ge=1, le=1000),
+) -> Dict[str, Any]:
+    rows = _get_account_ledger().list_decisions(account="real", limit=limit)
+    return {"count": len(rows), "rows": rows}
+
+
+@app.post("/api/accounts/real/decisions/{decision_id}/response")
+async def respond_to_real_account_decision(
+    decision_id: str,
+    body: DecisionResponseRequest = Body(...),
+) -> Dict[str, Any]:
+    updated = _get_account_ledger().record_decision_response(
+        decision_id,
+        accepted=body.accepted,
+        reason=body.reason or "",
+    )
+    if not updated:
+        raise HTTPException(status_code=404, detail="Real-account decision not found")
+    return {"ok": True, "decision_id": decision_id, "accepted": body.accepted}
+
+
 @app.post("/api/accounts/snapshot")
 async def snapshot_accounts(body: AccountSnapshotRequest = Body(default=AccountSnapshotRequest())) -> Dict[str, Any]:
     rows = _get_account_ledger().snapshot_daily_pnl(
@@ -382,6 +458,9 @@ async def snapshot_accounts(body: AccountSnapshotRequest = Body(default=AccountS
 @app.post("/api/accounts/real/trades")
 async def record_real_account_trade(body: AccountTradeRequest = Body(...)) -> Dict[str, Any]:
     try:
+        idempotency_key = body.idempotency_key
+        if body.decision_id and not idempotency_key:
+            idempotency_key = f"api-user:{body.decision_id}:{body.direction}:{body.units:g}"
         trade = _get_account_ledger().apply_user_trade(
             symbol=body.symbol,
             direction=body.direction,
@@ -389,6 +468,8 @@ async def record_real_account_trade(body: AccountTradeRequest = Body(...)) -> Di
             price=body.price,
             trade_date=body.trade_date,
             note=body.note or "",
+            decision_id=body.decision_id,
+            idempotency_key=idempotency_key,
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -991,14 +1072,24 @@ async def get_crawler_config():
 
 
 @app.post("/api/config/monitor_config")
-async def import_monitor_config(background_tasks: BackgroundTasks, config: Dict[str, Any] = Body(...)):
+async def import_monitor_config(
+    background_tasks: BackgroundTasks,
+    config: Dict[str, Any] = Body(...),
+    force: bool = Query(False),
+):
     """导入/覆盖仓位及自选标的配置文件 (market_monitor_config.json)
 
     写文件立即返回（~ms），账本重建和快照清理在后台执行，避免客户端超时。
     """
     try:
-        MONITOR_CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
-        MONITOR_CONFIG_PATH.write_text(json.dumps(config, ensure_ascii=False, indent=2), encoding="utf-8")
+        from utils.safe_persistence import backup_and_atomic_write_json
+
+        _validate_monitor_config(config, force=force)
+        backup = backup_and_atomic_write_json(
+            MONITOR_CONFIG_PATH,
+            config,
+            reason="api-monitor-config-import",
+        )
 
         def _refresh_ledger_and_cleanup():
             try:
@@ -1016,8 +1107,14 @@ async def import_monitor_config(background_tasks: BackgroundTasks, config: Dict[
                 log.warning(f"Failed to delete stale snapshot file: {se}")
 
         background_tasks.add_task(_refresh_ledger_and_cleanup)
-        return {"ok": True, "message": "Monitor configuration saved, refreshing ledger in background"}
+        return {
+            "ok": True,
+            "message": "Monitor configuration saved, refreshing ledger in background",
+            "backup_id": backup["backup_id"],
+        }
     except Exception as e:
+        if isinstance(e, HTTPException):
+            raise e
         raise HTTPException(status_code=500, detail=f"Failed to save monitor config: {str(e)}")
 
 
@@ -1205,14 +1302,23 @@ async def delete_holding_api(background_tasks: BackgroundTasks, symbol: str):
 
 
 @app.post("/api/config/exit_params")
-async def import_exit_params(params: Dict[str, Any] = Body(...)):
+async def import_exit_params(params: Dict[str, Any] = Body(...), force: bool = Query(False)):
     """导入/覆盖每周止盈参数配置文件 (weekly_exit_param_optimization.json)"""
     try:
         exit_path = _PROJECT_ROOT / "reports" / "weekly_exit_param_optimization.json"
-        exit_path.parent.mkdir(parents=True, exist_ok=True)
-        exit_path.write_text(json.dumps(params, ensure_ascii=False, indent=2), encoding="utf-8")
-        return {"ok": True, "message": "Weekly exit parameter optimization file imported successfully"}
+        if not force and not params:
+            raise HTTPException(status_code=400, detail="Refusing empty exit parameters; retry with force=true")
+        from utils.safe_persistence import backup_and_atomic_write_json
+
+        backup = backup_and_atomic_write_json(exit_path, params, reason="api-exit-params-import")
+        return {
+            "ok": True,
+            "message": "Weekly exit parameter optimization file imported successfully",
+            "backup_id": backup["backup_id"],
+        }
     except Exception as e:
+        if isinstance(e, HTTPException):
+            raise e
         raise HTTPException(status_code=500, detail=f"Failed to save exit parameters: {str(e)}")
 
 
@@ -1231,14 +1337,23 @@ async def get_exit_params():
 
 
 @app.post("/api/config/sector_cache")
-async def import_sector_cache(cache: Dict[str, Any] = Body(...)):
+async def import_sector_cache(cache: Dict[str, Any] = Body(...), force: bool = Query(False)):
     """导入/覆盖板块缓存文件 (sector_cache.json)"""
     try:
         cache_path = _PROJECT_ROOT / "data" / "sector_cache.json"
-        cache_path.parent.mkdir(parents=True, exist_ok=True)
-        cache_path.write_text(json.dumps(cache, ensure_ascii=False, indent=2), encoding="utf-8")
-        return {"ok": True, "message": "Sector cache file imported successfully"}
+        if not force and not cache:
+            raise HTTPException(status_code=400, detail="Refusing empty sector cache; retry with force=true")
+        from utils.safe_persistence import backup_and_atomic_write_json
+
+        backup = backup_and_atomic_write_json(cache_path, cache, reason="api-sector-cache-import")
+        return {
+            "ok": True,
+            "message": "Sector cache file imported successfully",
+            "backup_id": backup["backup_id"],
+        }
     except Exception as e:
+        if isinstance(e, HTTPException):
+            raise e
         raise HTTPException(status_code=500, detail=f"Failed to save sector cache: {str(e)}")
 
 
@@ -1257,7 +1372,7 @@ async def get_sector_cache():
 
 
 @app.post("/api/config/env_policies")
-async def import_env_policies(body: Dict[str, Any] = Body(...)):
+async def import_env_policies(body: Dict[str, Any] = Body(...), force: bool = Query(False)):
     """更新 .env 中的 INVEST_A_SHARE_SECTOR_EXIT_POLICIES 参数"""
     try:
         policies = body.get("policies", "")
@@ -1266,6 +1381,8 @@ async def import_env_policies(body: Dict[str, Any] = Body(...)):
             policies_str = json.dumps(policies, ensure_ascii=False)
         else:
             policies_str = str(policies)
+        if not force and not policies_str.strip():
+            raise HTTPException(status_code=400, detail="Refusing empty policies; retry with force=true")
             
         # Helper to update env file
         env_path = _PROJECT_ROOT / ".env"
@@ -1283,12 +1400,24 @@ async def import_env_policies(body: Dict[str, Any] = Body(...)):
                 break
         if not found:
             lines.append(new_line)
-        env_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        from utils.safe_persistence import backup_and_atomic_write_text
+
+        backup = backup_and_atomic_write_text(
+            env_path,
+            "\n".join(lines) + "\n",
+            reason="api-env-policies-import",
+        )
         
         # Also update os.environ immediately
         _os.environ[key] = policies_str
-        return {"ok": True, "message": "INVEST_A_SHARE_SECTOR_EXIT_POLICIES updated successfully"}
+        return {
+            "ok": True,
+            "message": "INVEST_A_SHARE_SECTOR_EXIT_POLICIES updated successfully",
+            "backup_id": backup["backup_id"],
+        }
     except Exception as e:
+        if isinstance(e, HTTPException):
+            raise e
         raise HTTPException(status_code=500, detail=f"Failed to save env policies: {str(e)}")
 
 
@@ -1313,26 +1442,41 @@ async def get_env_policies():
 
 
 @app.post("/api/config/account_ledger")
-async def import_account_ledger(file: UploadFile = File(...)):
+async def import_account_ledger(file: UploadFile = File(...), force: bool = Query(False)):
     """上传并覆盖双账户账本文件 (accounts.db)"""
     try:
         db_path = _account_ledger_db_path()
-        db_path.parent.mkdir(parents=True, exist_ok=True)
-
+        payload = await file.read(64 * 1024 * 1024 + 1)
+        if len(payload) > 64 * 1024 * 1024:
+            raise HTTPException(status_code=413, detail="Account ledger upload exceeds 64 MiB")
         _close_account_ledger()
+        from utils.safe_persistence import restore_sqlite_bytes
 
-        tmp_path = db_path.with_suffix(db_path.suffix + ".tmp")
-        with open(tmp_path, "wb") as buffer:
-            buffer.write(await file.read())
-        tmp_path.replace(db_path)
+        restore = restore_sqlite_bytes(
+            db_path,
+            payload,
+            reason="api-account-ledger-import",
+            required_tables=("accounts", "holdings", "trades", "daily_pnl"),
+            nonempty_tables=("accounts", "holdings"),
+            force=force,
+        )
 
         ledger = _get_account_ledger()
         try:
             ledger.sync_to_config_and_snapshot()
         except Exception as sync_err:
             log.warning(f"Failed to sync config/snapshot after account ledger import: {sync_err}")
-        return {"ok": True, "message": "Account ledger database imported successfully"}
+        return {
+            "ok": True,
+            "message": "Account ledger database imported successfully",
+            "backup_id": restore["backup_id"],
+            "sqlite_user_version": restore["restored"]["user_version"],
+        }
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
+        if isinstance(e, HTTPException):
+            raise e
         raise HTTPException(status_code=500, detail=f"Failed to save account ledger: {str(e)}")
 
 
@@ -1340,18 +1484,20 @@ async def import_account_ledger(file: UploadFile = File(...)):
 async def download_account_ledger():
     """下载双账户账本文件"""
     try:
-        ledger = _get_account_ledger()
-        try:
-            ledger.conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
-            ledger.conn.commit()
-        except Exception as checkpoint_err:
-            log.warning(f"Failed to checkpoint account ledger before download: {checkpoint_err}")
+        _get_account_ledger()
         db_path = _account_ledger_db_path()
         if db_path.exists():
+            from utils.safe_persistence import create_sqlite_export
+
+            export_path = create_sqlite_export(
+                db_path,
+                required_tables=("accounts", "holdings", "trades", "daily_pnl"),
+            )
             return FileResponse(
-                path=str(db_path),
+                path=str(export_path),
                 filename="accounts.db",
-                media_type="application/octet-stream"
+                media_type="application/octet-stream",
+                background=BackgroundTask(lambda: export_path.unlink(missing_ok=True)),
             )
         raise HTTPException(status_code=404, detail="Account ledger database file not found")
     except Exception as e:

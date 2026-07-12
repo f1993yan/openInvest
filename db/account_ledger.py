@@ -12,10 +12,12 @@ cost), NOT total_assets — see _seed_equity.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import sqlite3
 import threading
+import uuid
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
@@ -26,6 +28,7 @@ DB_PATH = os.path.join(os.path.dirname(__file__), "accounts.db")
 REAL_ACCOUNT = "real"
 COMMITTEE_ACCOUNT = "committee"
 VALID_ACCOUNTS = {REAL_ACCOUNT, COMMITTEE_ACCOUNT}
+SCHEMA_VERSION = 2
 
 
 @dataclass
@@ -38,6 +41,9 @@ class ExecutedTrade:
     cash_delta: float
     source: str
     note: str = ""
+    id: Optional[int] = None
+    decision_id: Optional[str] = None
+    idempotency_key: Optional[str] = None
 
 
 class AccountLedger:
@@ -98,9 +104,43 @@ class AccountLedger:
                     source TEXT NOT NULL,
                     verdict TEXT,
                     confidence REAL,
-                    note TEXT
+                    note TEXT,
+                    decision_id TEXT,
+                    idempotency_key TEXT
                 )
             """)
+            _ensure_column(cur, "trades", "decision_id", "TEXT")
+            _ensure_column(cur, "trades", "idempotency_key", "TEXT")
+            cur.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS idx_trades_idempotency "
+                "ON trades(idempotency_key) WHERE idempotency_key IS NOT NULL"
+            )
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS decisions (
+                    decision_id TEXT PRIMARY KEY,
+                    analysis_id TEXT NOT NULL,
+                    account TEXT NOT NULL,
+                    ts TEXT NOT NULL,
+                    trade_date TEXT NOT NULL,
+                    symbol TEXT NOT NULL,
+                    verdict TEXT NOT NULL,
+                    confidence REAL,
+                    suggested_alloc_cny REAL NOT NULL DEFAULT 0,
+                    status TEXT NOT NULL DEFAULT 'proposed',
+                    executed_trade_id INTEGER,
+                    response_reason TEXT,
+                    outcome_json TEXT,
+                    updated_at TEXT NOT NULL
+                )
+            """)
+            cur.execute(
+                "CREATE INDEX IF NOT EXISTS idx_decisions_account_ts "
+                "ON decisions(account, ts DESC)"
+            )
+            cur.execute(
+                "CREATE INDEX IF NOT EXISTS idx_decisions_analysis "
+                "ON decisions(analysis_id, account, symbol)"
+            )
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS cash_settlements (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -134,6 +174,7 @@ class AccountLedger:
             """)
             _ensure_column(cur, "daily_pnl", "t2_pending_cash_cny", "REAL NOT NULL DEFAULT 0")
             self._repair_legacy_unsettled_hk_sells(cur)
+            cur.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
             self.conn.commit()
 
     def initialize_from_monitor_config(self, config: Dict[str, Any], *, reset: bool = False) -> bool:
@@ -147,6 +188,7 @@ class AccountLedger:
                 return False
             cur = self.conn.cursor()
             cur.execute("DELETE FROM daily_pnl")
+            cur.execute("DELETE FROM decisions")
             cur.execute("DELETE FROM trades")
             cur.execute("DELETE FROM cash_settlements")
             cur.execute("DELETE FROM holdings")
@@ -373,6 +415,8 @@ class AccountLedger:
         price: float,
         trade_date: Optional[str] = None,
         note: str = "",
+        decision_id: Optional[str] = None,
+        idempotency_key: Optional[str] = None,
     ) -> ExecutedTrade:
         """Record a user-confirmed real-account trade."""
         return self._apply_trade(
@@ -384,6 +428,8 @@ class AccountLedger:
             trade_date=trade_date,
             source="user_explicit",
             note=note,
+            decision_id=decision_id,
+            idempotency_key=idempotency_key,
             strict=True,
         )
 
@@ -397,6 +443,12 @@ class AccountLedger:
         """Apply committee recommendation to the shadow account if executable."""
         if not result.get("success"):
             return None
+        decision_id = str(result.get("decision_id") or "").strip() or None
+        idempotency_key = f"committee:{decision_id}" if decision_id else None
+        if idempotency_key:
+            existing = self._trade_by_idempotency_key(idempotency_key)
+            if existing is not None:
+                return existing
         verdict = str(result.get("verdict", "")).upper()
         alloc = float(result.get("suggested_alloc_cny", 0) or 0)
         if price <= 0 or abs(alloc) <= 0:
@@ -441,6 +493,8 @@ class AccountLedger:
             verdict=verdict,
             confidence=float(result.get("confidence", 0) or 0),
             note=f"alloc_cny={alloc:.2f}",
+            decision_id=decision_id,
+            idempotency_key=idempotency_key,
             strict=False,
         )
 
@@ -540,6 +594,183 @@ class AccountLedger:
             ).fetchall()
         return [dict(r) for r in rows]
 
+    @staticmethod
+    def make_decision_id(analysis_id: str, account: str, symbol: str) -> str:
+        _validate_account(account)
+        raw = f"{analysis_id}|{account}|{str(symbol).strip().upper()}"
+        return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:24]
+
+    @staticmethod
+    def new_analysis_id(symbol: str, source: str = "committee") -> str:
+        """Create one opaque root id shared by the real/shadow evaluations."""
+        clean_source = "".join(ch for ch in str(source or "committee").lower() if ch.isalnum() or ch in "-_")
+        clean_symbol = str(symbol or "unknown").strip().upper()
+        stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+        return f"{clean_source or 'committee'}:{clean_symbol}:{stamp}:{uuid.uuid4().hex[:12]}"
+
+    def record_decision(
+        self,
+        result: Dict[str, Any],
+        *,
+        account: str,
+        analysis_id: str,
+        trade_date: Optional[str] = None,
+    ) -> str:
+        """Persist one account-specific committee decision idempotently."""
+        _validate_account(account)
+        symbol = str(result.get("symbol") or "").strip().upper()
+        if not symbol:
+            raise ValueError("decision symbol is required")
+        analysis_id = str(analysis_id or "").strip()
+        if not analysis_id:
+            raise ValueError("analysis_id is required")
+        decision_id = str(result.get("decision_id") or "").strip() or self.make_decision_id(
+            analysis_id, account, symbol
+        )
+        now = _now()
+        day = trade_date or date.today().isoformat()
+        verdict = str(result.get("verdict") or "UNKNOWN").upper()
+        with self._lock:
+            self.conn.execute(
+                """INSERT INTO decisions
+                   (decision_id, analysis_id, account, ts, trade_date, symbol, verdict,
+                    confidence, suggested_alloc_cny, status, updated_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'proposed', ?)
+                   ON CONFLICT(decision_id) DO UPDATE SET
+                     verdict = excluded.verdict,
+                     confidence = excluded.confidence,
+                     suggested_alloc_cny = excluded.suggested_alloc_cny,
+                     updated_at = excluded.updated_at""",
+                (
+                    decision_id,
+                    analysis_id,
+                    account,
+                    now,
+                    day,
+                    symbol,
+                    verdict,
+                    float(result.get("confidence", 0) or 0),
+                    float(result.get("suggested_alloc_cny", 0) or 0),
+                    now,
+                ),
+            )
+            self.conn.commit()
+        result["analysis_id"] = analysis_id
+        result["decision_id"] = decision_id
+        result["decision_account"] = account
+        return decision_id
+
+    def record_decision_response(
+        self,
+        decision_id: str,
+        *,
+        accepted: bool,
+        reason: str = "",
+    ) -> bool:
+        """Record an explicit real-account accept/reject response."""
+        with self._lock:
+            cur = self.conn.execute(
+                """UPDATE decisions
+                   SET status = ?, response_reason = ?, updated_at = ?
+                   WHERE decision_id = ? AND account = ?""",
+                ("accepted" if accepted else "rejected", reason or None, _now(), decision_id, REAL_ACCOUNT),
+            )
+            self.conn.commit()
+            return cur.rowcount == 1
+
+    def record_decision_outcome(
+        self,
+        decision_id: str,
+        *,
+        horizon_days: int,
+        return_pct: float,
+        benchmark_return_pct: Optional[float] = None,
+        hit: Optional[bool] = None,
+    ) -> bool:
+        """Append one fixed-horizon outcome into the decision's JSON map."""
+        if horizon_days <= 0:
+            raise ValueError("horizon_days must be positive")
+        with self._lock:
+            row = self.conn.execute(
+                "SELECT outcome_json FROM decisions WHERE decision_id = ?",
+                (decision_id,),
+            ).fetchone()
+            if row is None:
+                return False
+            try:
+                outcomes = json.loads(row["outcome_json"] or "{}")
+            except Exception:
+                outcomes = {}
+            outcomes[f"{int(horizon_days)}d"] = {
+                "return_pct": round(float(return_pct), 6),
+                "benchmark_return_pct": (
+                    None if benchmark_return_pct is None else round(float(benchmark_return_pct), 6)
+                ),
+                "excess_return_pct": (
+                    None
+                    if benchmark_return_pct is None
+                    else round(float(return_pct) - float(benchmark_return_pct), 6)
+                ),
+                "hit": None if hit is None else bool(hit),
+                "evaluated_at": _now(),
+            }
+            self.conn.execute(
+                "UPDATE decisions SET outcome_json = ?, updated_at = ? WHERE decision_id = ?",
+                (json.dumps(outcomes, ensure_ascii=False, sort_keys=True), _now(), decision_id),
+            )
+            self.conn.commit()
+            return True
+
+    def list_decisions(
+        self,
+        account: Optional[str] = None,
+        limit: int = 200,
+    ) -> List[Dict[str, Any]]:
+        params: List[Any] = []
+        where = ""
+        if account:
+            _validate_account(account)
+            where = "WHERE account = ?"
+            params.append(account)
+        params.append(max(1, int(limit)))
+        with self._lock:
+            rows = self.conn.execute(
+                f"SELECT * FROM decisions {where} ORDER BY ts DESC LIMIT ?",
+                params,
+            ).fetchall()
+        out = []
+        for row in rows:
+            item = dict(row)
+            try:
+                item["outcomes"] = json.loads(item.pop("outcome_json") or "{}")
+            except Exception:
+                item["outcomes"] = {}
+                item.pop("outcome_json", None)
+            out.append(item)
+        return out
+
+    def _trade_by_idempotency_key(self, key: str) -> Optional[ExecutedTrade]:
+        with self._lock:
+            row = self.conn.execute(
+                "SELECT * FROM trades WHERE idempotency_key = ?",
+                (key,),
+            ).fetchone()
+        if row is None:
+            return None
+        return ExecutedTrade(
+            account=row["account"],
+            symbol=row["symbol"],
+            direction=row["direction"],
+            units=float(row["units"]),
+            price=float(row["price"]),
+            cash_delta=float(row["cash_delta"]),
+            source=row["source"],
+            note=row["note"] or "",
+            id=int(row["id"]),
+            decision_id=row["decision_id"],
+            idempotency_key=row["idempotency_key"],
+        )
+
     def _apply_trade(
         self,
         *,
@@ -553,6 +784,8 @@ class AccountLedger:
         verdict: Optional[str] = None,
         confidence: Optional[float] = None,
         note: str = "",
+        decision_id: Optional[str] = None,
+        idempotency_key: Optional[str] = None,
         strict: bool,
     ) -> ExecutedTrade:
         _validate_account(account)
@@ -563,106 +796,133 @@ class AccountLedger:
         if units <= 0 or price <= 0:
             raise ValueError("units and price must be positive")
         trade_date = trade_date or date.today().isoformat()
+        decision_id = str(decision_id or "").strip() or None
+        idempotency_key = str(idempotency_key or "").strip() or None
         with self._lock:
             self.settle_due_cash(account=account)
-            holding = self._get_holding(account, symbol)
-            if holding is None:
-                if direction == "SELL":
-                    raise ValueError(f"{account} has no holding for {symbol}")
-                holding = {
-                    "account": account,
-                    "symbol": symbol,
-                    "name": symbol,
-                    "market": "a",
-                    "sector": "",
-                    "industry": "",
-                    "units": 0.0,
-                    "avg_cost": price,
-                    "cost_currency": "CNY",
-                    "min_lot_size": 100,
-                }
-                self.conn.execute(
-                    """INSERT INTO holdings
-                       (account, symbol, name, market, sector, industry, units, avg_cost,
-                        cost_currency, min_lot_size)
-                       VALUES (?, ?, ?, ?, ?, ?, 0, ?, 'CNY', 100)""",
-                    (account, symbol, symbol, "a", "", "", price),
-                )
-            current_units = float(holding.get("units", 0) or 0)
-            current_avg = float(holding.get("avg_cost", 0) or 0)
-            market = str(holding.get("market") or "").strip().lower()
-            account_row = self.conn.execute(
-                "SELECT cash_cny FROM accounts WHERE account = ?",
-                (account,),
-            ).fetchone()
-            cash = float(account_row["cash_cny"] if account_row else 0)
-            if direction == "BUY":
-                cost = units * price
-                if cost > cash + 1e-6:
-                    if strict:
-                        raise ValueError(f"insufficient cash: need {cost:.2f}, have {cash:.2f}")
-                    units = cash / price
-                    cost = units * price
-                new_units = current_units + units
-                new_avg = ((current_avg * current_units) + cost) / new_units if new_units > 0 else price
-                cash_delta = -cost
-            else:
-                if units > current_units + 1e-6:
-                    if strict:
-                        raise ValueError(f"insufficient holding: sell {units}, have {current_units}")
-                    units = current_units
-                sellable_units = self._sellable_units_for_trade_date(
-                    account=account,
-                    symbol=symbol,
-                    trade_date=trade_date,
-                    current_units=current_units,
-                    market=market,
-                )
-                if units > sellable_units + 1e-6:
-                    if strict:
-                        raise ValueError(
-                            f"A股T+1限制: {symbol} 今日可卖 {sellable_units:.0f} 股，"
-                            f"本次尝试卖出 {units:.0f} 股"
-                        )
-                    units = sellable_units
-                if units <= 1e-6:
-                    raise ValueError(f"A股T+1限制: {symbol} 今日无可卖股数")
-                new_units = max(0.0, current_units - units)
-                new_avg = current_avg
-                proceeds = units * price
-                if _is_hk_market(symbol, market):
-                    cash_delta = 0.0
-                    settle_date = _settlement_date(trade_date, sessions=2, calendar_code="XHKG")
-                    note = _append_note(note, f"hk_t2_pending_cny={proceeds:.2f};settle_date={settle_date}")
+            self.conn.execute("BEGIN IMMEDIATE")
+            try:
+                if idempotency_key:
+                    existing = self.conn.execute(
+                        "SELECT * FROM trades WHERE idempotency_key = ?",
+                        (idempotency_key,),
+                    ).fetchone()
+                    if existing is not None:
+                        self.conn.commit()
+                        return self._trade_by_idempotency_key(idempotency_key)
+
+                holding = self._get_holding(account, symbol)
+                if holding is None:
+                    if direction == "SELL":
+                        raise ValueError(f"{account} has no holding for {symbol}")
+                    holding = {
+                        "account": account,
+                        "symbol": symbol,
+                        "name": symbol,
+                        "market": "a",
+                        "sector": "",
+                        "industry": "",
+                        "units": 0.0,
+                        "avg_cost": price,
+                        "cost_currency": "CNY",
+                        "min_lot_size": 100,
+                    }
                     self.conn.execute(
-                        """INSERT INTO cash_settlements
-                           (account, symbol, amount_cny, trade_date, settle_date, source, status, created_at)
-                           VALUES (?, ?, ?, ?, ?, ?, 'pending', ?)""",
-                        (account, symbol, proceeds, trade_date, settle_date, source, _now()),
+                        """INSERT INTO holdings
+                           (account, symbol, name, market, sector, industry, units, avg_cost,
+                            cost_currency, min_lot_size)
+                           VALUES (?, ?, ?, ?, ?, ?, 0, ?, 'CNY', 100)""",
+                        (account, symbol, symbol, "a", "", "", price),
                     )
+                current_units = float(holding.get("units", 0) or 0)
+                current_avg = float(holding.get("avg_cost", 0) or 0)
+                market = str(holding.get("market") or "").strip().lower()
+                account_row = self.conn.execute(
+                    "SELECT cash_cny FROM accounts WHERE account = ?",
+                    (account,),
+                ).fetchone()
+                cash = float(account_row["cash_cny"] if account_row else 0)
+                if direction == "BUY":
+                    cost = units * price
+                    if cost > cash + 1e-6:
+                        if strict:
+                            raise ValueError(f"insufficient cash: need {cost:.2f}, have {cash:.2f}")
+                        units = cash / price
+                        cost = units * price
+                    new_units = current_units + units
+                    new_avg = ((current_avg * current_units) + cost) / new_units if new_units > 0 else price
+                    cash_delta = -cost
                 else:
-                    cash_delta = proceeds
-            new_cash = cash + cash_delta
-            now = _now()
-            self.conn.execute(
-                "UPDATE accounts SET cash_cny = ?, updated_at = ? WHERE account = ?",
-                (new_cash, now, account),
-            )
-            self.conn.execute(
-                "UPDATE holdings SET units = ?, avg_cost = ? WHERE account = ? AND symbol = ?",
-                (new_units, new_avg, account, symbol),
-            )
-            self.conn.execute(
-                """INSERT INTO trades
-                   (ts, trade_date, account, symbol, direction, units, price, cash_delta,
-                    source, verdict, confidence, note)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                (now, trade_date, account, symbol, direction, units, price, cash_delta,
-                 source, verdict, confidence, note),
-            )
-            self.conn.commit()
-            if account == REAL_ACCOUNT:
-                self.sync_to_config_and_snapshot()
+                    if units > current_units + 1e-6:
+                        if strict:
+                            raise ValueError(f"insufficient holding: sell {units}, have {current_units}")
+                        units = current_units
+                    sellable_units = self._sellable_units_for_trade_date(
+                        account=account,
+                        symbol=symbol,
+                        trade_date=trade_date,
+                        current_units=current_units,
+                        market=market,
+                    )
+                    if units > sellable_units + 1e-6:
+                        if strict:
+                            raise ValueError(
+                                f"A股T+1限制: {symbol} 今日可卖 {sellable_units:.0f} 股，"
+                                f"本次尝试卖出 {units:.0f} 股"
+                            )
+                        units = sellable_units
+                    if units <= 1e-6:
+                        raise ValueError(f"A股T+1限制: {symbol} 今日无可卖股数")
+                    new_units = max(0.0, current_units - units)
+                    new_avg = current_avg
+                    proceeds = units * price
+                    if _is_hk_market(symbol, market):
+                        cash_delta = 0.0
+                        settle_date = _settlement_date(trade_date, sessions=2, calendar_code="XHKG")
+                        note = _append_note(note, f"hk_t2_pending_cny={proceeds:.2f};settle_date={settle_date}")
+                        self.conn.execute(
+                            """INSERT INTO cash_settlements
+                               (account, symbol, amount_cny, trade_date, settle_date, source, status, created_at)
+                               VALUES (?, ?, ?, ?, ?, ?, 'pending', ?)""",
+                            (account, symbol, proceeds, trade_date, settle_date, source, _now()),
+                        )
+                    else:
+                        cash_delta = proceeds
+                new_cash = cash + cash_delta
+                now = _now()
+                self.conn.execute(
+                    "UPDATE accounts SET cash_cny = ?, updated_at = ? WHERE account = ?",
+                    (new_cash, now, account),
+                )
+                self.conn.execute(
+                    "UPDATE holdings SET units = ?, avg_cost = ? WHERE account = ? AND symbol = ?",
+                    (new_units, new_avg, account, symbol),
+                )
+                cur = self.conn.execute(
+                    """INSERT INTO trades
+                       (ts, trade_date, account, symbol, direction, units, price, cash_delta,
+                        source, verdict, confidence, note, decision_id, idempotency_key)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (
+                        now, trade_date, account, symbol, direction, units, price, cash_delta,
+                        source, verdict, confidence, note, decision_id, idempotency_key,
+                    ),
+                )
+                trade_id = int(cur.lastrowid)
+                if decision_id:
+                    self.conn.execute(
+                        """UPDATE decisions
+                           SET status = 'executed', executed_trade_id = ?, updated_at = ?
+                           WHERE decision_id = ? AND account = ?""",
+                        (trade_id, now, decision_id, account),
+                    )
+                self.conn.commit()
+            except Exception:
+                self.conn.rollback()
+                raise
+
+        if account == REAL_ACCOUNT:
+            self.sync_to_config_and_snapshot()
         return ExecutedTrade(
             account=account,
             symbol=symbol,
@@ -672,6 +932,9 @@ class AccountLedger:
             cash_delta=cash_delta,
             source=source,
             note=note,
+            id=trade_id,
+            decision_id=decision_id,
+            idempotency_key=idempotency_key,
         )
 
     def _pending_cash(self, account: str) -> float:

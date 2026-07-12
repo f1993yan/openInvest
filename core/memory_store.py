@@ -27,12 +27,16 @@ def _file_lock(path: Path):
     """fcntl 排它锁 - 跨线程/进程都安全"""
     path.parent.mkdir(parents=True, exist_ok=True)
     lock_path = path.with_suffix(path.suffix + ".lock")
-    with open(lock_path, "w") as lock_file:
-        portalocker.lock(lock_file, portalocker.LOCK_EX)
-        try:
-            yield
-        finally:
-            portalocker.unlock(lock_file)
+    # portalocker.lock(..., LOCK_EX) 在 Windows 是一次非阻塞尝试；同进程
+    # 多线程竞争时会直接抛 AlreadyLocked，导致合法 RMW 丢失。Lock 会用
+    # NON_BLOCKING + 有界轮询等待，既覆盖线程也覆盖进程。
+    with portalocker.Lock(
+        str(lock_path),
+        mode="a",
+        timeout=30.0,
+        check_interval=0.02,
+    ):
+        yield
 
 
 def _atomic_write_text(path: Path, content: str, encoding: str = "utf-8") -> None:

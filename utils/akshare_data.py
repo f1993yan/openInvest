@@ -17,7 +17,7 @@ from __future__ import annotations
 import logging
 import os
 from datetime import datetime, timedelta
-from typing import Optional
+from typing import Any, Dict, Optional
 
 import numpy as np
 import pandas as pd
@@ -26,6 +26,8 @@ from db.market_store import MarketStore
 log = logging.getLogger(__name__)
 _STORE = MarketStore()
 _CACHE_MAX_STALE_DAYS = int(os.getenv("INVEST_AKSHARE_HISTORY_CACHE_STALE_DAYS", "3"))
+_SPLICE_MIN_OVERLAP = int(os.getenv("INVEST_ADJUSTMENT_SPLICE_MIN_OVERLAP", "8"))
+_SPLICE_MIN_SHIFT_BPS = float(os.getenv("INVEST_ADJUSTMENT_SPLICE_MIN_SHIFT_BPS", "10"))
 os.environ.setdefault("TQDM_DISABLE", "1")
 RUNNING_ON_PHONE = os.getenv("INVEST_RUNNING_ON_PHONE") == "1"
 
@@ -88,8 +90,35 @@ def _cache_is_fresh(df: pd.DataFrame) -> bool:
         return False
 
 
-def _save_to_cache(symbol: str, df: pd.DataFrame, source: str = "akshare") -> None:
+def _cache_rows(df: pd.DataFrame) -> list[tuple[str, float, Optional[float], Optional[float], Optional[float]]]:
+    rows = []
+    for idx, row in df.iterrows():
+        close = row.get("Close")
+        if pd.isna(close):
+            continue
+        rows.append(
+            (
+                pd.to_datetime(idx).strftime("%Y-%m-%d"),
+                float(close),
+                None if pd.isna(row.get("High")) else float(row.get("High")),
+                None if pd.isna(row.get("Low")) else float(row.get("Low")),
+                None if pd.isna(row.get("Volume")) else float(row.get("Volume")),
+            )
+        )
+    return rows
+
+
+def _save_to_cache(
+    symbol: str,
+    df: pd.DataFrame,
+    source: str = "akshare",
+    *,
+    replace: bool = False,
+) -> None:
     if df.empty:
+        return
+    if replace:
+        _STORE.replace_generic_history(symbol, _cache_rows(df), source=source)
         return
     for idx, row in df.iterrows():
         try:
@@ -107,6 +136,65 @@ def _save_to_cache(symbol: str, df: pd.DataFrame, source: str = "akshare") -> No
             )
         except Exception as e:  # noqa: BLE001
             log.debug(f"akshare cache save skip {symbol}: {e}")
+
+
+def adjustment_splice_diagnostics(
+    cached: pd.DataFrame,
+    fresh: pd.DataFrame,
+    *,
+    min_overlap: int = _SPLICE_MIN_OVERLAP,
+    min_shift_bps: float = _SPLICE_MIN_SHIFT_BPS,
+) -> Dict[str, Any]:
+    """Detect a uniform forward-adjustment basis shift on overlapping bars.
+
+    For overlap day ``j`` we evaluate ``d_j = log(new_close_j / old_close_j)``.
+    The median is the robust level shift and MAD estimates provider noise.  A
+    splice is accepted only when the shift exceeds both an economic floor and
+    six robust standard errors, with at least 80% of overlap residuals inside
+    a three-sigma band around that shift.
+    """
+    default = {
+        "detected": False,
+        "overlap": 0,
+        "median_log_shift": 0.0,
+        "median_shift_pct": 0.0,
+        "mad": 0.0,
+        "robust_standard_error": 0.0,
+        "consistent_fraction": 0.0,
+        "threshold_log": max(0.0, float(min_shift_bps)) / 10_000.0,
+    }
+    if cached is None or fresh is None or cached.empty or fresh.empty:
+        return default
+    try:
+        old = pd.to_numeric(cached["Close"], errors="coerce").rename("old")
+        new = pd.to_numeric(fresh["Close"], errors="coerce").rename("new")
+        overlap = pd.concat([old, new], axis=1, join="inner").dropna()
+        overlap = overlap[(overlap["old"] > 0) & (overlap["new"] > 0)]
+        if len(overlap) < max(3, int(min_overlap)):
+            return {**default, "overlap": len(overlap)}
+        shifts = np.log(overlap["new"].to_numpy() / overlap["old"].to_numpy())
+        median = float(np.median(shifts))
+        mad = float(np.median(np.abs(shifts - median)))
+        robust_sigma = 1.4826 * mad
+        robust_se = robust_sigma / np.sqrt(len(shifts))
+        economic_floor = max(0.0, float(min_shift_bps)) / 10_000.0
+        threshold = max(economic_floor, 6.0 * robust_se)
+        consistency_band = max(3.0 * robust_sigma, 0.0002)
+        consistent_fraction = float(np.mean(np.abs(shifts - median) <= consistency_band))
+        detected = abs(median) >= threshold and consistent_fraction >= 0.80
+        return {
+            "detected": bool(detected),
+            "overlap": len(overlap),
+            "median_log_shift": median,
+            "median_shift_pct": (float(np.exp(median)) - 1.0) * 100.0,
+            "mad": mad,
+            "robust_standard_error": robust_se,
+            "consistent_fraction": consistent_fraction,
+            "threshold_log": threshold,
+        }
+    except Exception as exc:  # noqa: BLE001
+        log.warning("复权拼接诊断失败: %s", exc)
+        return default
 
 
 def _map_sina_columns(df: pd.DataFrame) -> pd.DataFrame:
@@ -450,18 +538,42 @@ def get_history_data(
         return cached
 
     # 路由优先级：指数 > A股 > 港股（指数代码可能与 A 股代码冲突，如 000001）
+    is_a_share_route = False
     if _is_index(symbol):
         df = _fetch_index(symbol, period)
     elif _is_a_share(symbol):
+        is_a_share_route = True
         df = _fetch_a_share(symbol, period)
     elif _is_hk_stock(symbol):
         df = _fetch_hk_stock(symbol, period)
     else:
         log.warning(f"akshare 无法识别 symbol: {symbol}，尝试作为 A 股代码")
+        is_a_share_route = True
         df = _fetch_a_share(symbol, period)
 
     if not df.empty:
-        _save_to_cache(symbol, df, source="akshare")
+        splice = adjustment_splice_diagnostics(cached, df) if is_a_share_route else {"detected": False}
+        if splice.get("detected"):
+            log.warning(
+                "检测到 %s 前复权基准平移 %.4f%%（overlap=%s, MAD=%.8f），执行两年全量替换",
+                symbol,
+                float(splice.get("median_shift_pct", 0.0)),
+                splice.get("overlap", 0),
+                float(splice.get("mad", 0.0)),
+            )
+            full = df if period == "2y" else _fetch_a_share(symbol, "2y")
+            if not full.empty:
+                _save_to_cache(
+                    symbol,
+                    full,
+                    source="akshare:qfq:adjustment_basis_refresh",
+                    replace=True,
+                )
+                df = _apply_period_filter(full, period)
+            else:
+                log.error("%s 复权基准变化后两年全量刷新失败，保留旧缓存且不拼接新数据", symbol)
+        else:
+            _save_to_cache(symbol, df, source="akshare")
 
     # as_of_date 过滤（回测穿越防护）
     return _apply_cutoff(df, as_of_date)

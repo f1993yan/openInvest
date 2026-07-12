@@ -13,6 +13,8 @@ BACKGROUND_PROCESS_PATTERNS = (
     "jobs.weekend_news_crawl",
     "jobs.daily_stock_selection",
     "scripts.daily_stock_selection",
+    "backend.server",
+    "uvicorn",
 )
 BOARD_BG = "#f3f6fb"
 PANEL_BG = "#ffffff"

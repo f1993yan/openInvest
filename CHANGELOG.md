@@ -1,5 +1,36 @@
 # Changelog
 
+## Unreleased (2026-07-12)
+
+### Features
+
+* **decision-audit:** 每次盘中或桌面单标的委员会分析生成一个 `analysis_id`，并为 `real` / `committee` 派生互不相同的 `decision_id`；真实用户成交可关联决策，影子成交继续自动记账，但影子决策不进入桌面快照。
+* **intraday-sentinel:** 新增按标的/板块和交易时段校准的 10 分钟经验残差收益哨兵；至少 200 个样本后才启用 99.5% 双尾阈值，带行情陈旧校验和方向独立冷却，只触发 Python 委员会复核、快照更新和震动，不机械下单。
+* **backup-restore:** 配置与双账户账本导入在覆盖前生成时间戳备份和 SHA-256 manifest；SQLite 上传先做 header/schema/quick-check/非空校验，下载使用 online backup 合并 WAL 后导出一致快照。
+
+### Improvements
+
+* **accuracy:** 命中率统一使用成熟的固定 30 日窗口，补充同样本市场基率、标准 balanced accuracy、Wilson 下界和相对多数类基准优势；小样本桶同时隐藏 hit/rate，并阻断由整体数字反推单个隐藏桶。
+* **as-of:** 历史 verdict 复盘的 ATR 改为只使用决策日及以前的数据，价格锚点不再用决策日前不存在的未来首根 K 线。
+* **market-data:** A 股前复权缓存增加重叠对数价格比例的 median/MAD 拼接检测；确认统一复权基准平移后原子替换完整两年历史，避免新旧 qfq 基准混存。
+* **backtest:** 持仓标的缺失当日 K 线时默认使用最近有效收盘价估值，不再回退成本价；新增手续费、成交额换手、Sortino/下行风险、缺失持仓日诊断和成对区块 bootstrap 新旧对照脚本；对照行情默认冻结复用并校验总表/逐标的 SHA-256，避免后台缓存刷新让同一实验的绝对收益漂移。
+* **concurrency:** 真实/影子重复交易保护按账户各自读取成交历史；账本成交使用 `BEGIN IMMEDIATE + UNIQUE idempotency_key`，跨连接重试只执行一次；Windows memory 文件锁改为有界重试，EventStore 显式释放 WAL 句柄。
+* **desktop-sync:** 桌面端从远程同步账本前先停止本项目的 `backend.server` / `uvicorn` 和后台任务，释放 Windows SQLite 文件锁；同步完成后仅在原后端确实运行时通过统一启动器静默恢复。配置、参数和账本均在覆盖前备份，账本恢复成功后再由 ledger 回写 config/snapshot。
+
+### Security
+
+* **api:** `backend.server` 支持可选 `INVEST_API_TOKEN` Bearer 鉴权；未配置时保持旧行为，配置后除 `/api/health` 外均需 token。CORS 从通配符改为 `INVEST_CORS_ORIGINS` 明确白名单，桌面远程同步支持独立 `INVEST_REMOTE_API_TOKEN`。
+* **privacy:** 快照和桌面 UI 递归剔除 `shadow_result` / `shadow_*`；准确率公开 JSON 使用互补小样本抑制，避免从总数反推隐藏方向命中数。
+
+### Bug Fixes
+
+* **windows:** 后端 UTF-8 初始化改为原地 `stdio.reconfigure()`，不再替换并关闭 pytest、IDE 或桌面宿主提供的输出流。
+* **event-store:** 修复事件任务正常返回后未关闭 SQLite 连接导致 Windows 临时数据库无法删除的问题。
+
+### Docs
+
+* **wiki/readme:** 补充决策审计、幂等成交、经验分位数哨兵、复权拼接检测、固定期限准确率、可选 API token、安全恢复、Windows 远程同步停启顺序和可归因回测边界。
+
 ## Unreleased (2026-07-04)
 
 ### Features

@@ -367,6 +367,15 @@ def test_monitor_window_snapshot_contains_stable_status_fields():
         "verdict": "ACCUMULATE",
         "confidence": 0.72,
         "suggested_alloc_cny": 3000,
+        "analysis_id": "monitor:600900:test",
+        "decision_id": "real-decision-600900-test",
+        "shadow_result": {
+            "success": True,
+            "symbol": "600900",
+            "verdict": "SELL",
+            "suggested_alloc_cny": -5000,
+            "decision_id": "private-shadow-decision",
+        },
         "fundamental_model": "utility",
         "fundamental_score": 78,
         "quant_view": "trend improving",
@@ -434,6 +443,11 @@ def test_monitor_window_snapshot_contains_stable_status_fields():
     assert row["operation"]["optimizer_lots"] == 2
     assert row["operation"]["llm_review_lots"] == 1
     assert row["operation"]["llm_position_scale"] == "half"
+    assert row["analysis_id"] == "monitor:600900:test"
+    assert row["decision_id"] == "real-decision-600900-test"
+    assert row["operation"]["decision_id"] == "real-decision-600900-test"
+    assert "shadow_result" not in json.dumps(snapshot, ensure_ascii=False)
+    assert "private-shadow-decision" not in json.dumps(snapshot, ensure_ascii=False)
     assert _llm_review_lots_hint(row) == "LLM审核推荐1手"
     assert row["units"] == 200
     assert row["is_holding"] is True

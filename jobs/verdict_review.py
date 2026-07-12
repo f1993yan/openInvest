@@ -126,6 +126,8 @@ def _close_on_or_after(df, day) -> Optional[float]:
     自动过滤未成熟窗口。旧 bug 用 `<= target 的最后一根` 在 target 未来时
     会塌缩成"今天的收盘"，把只过了 3 天的样本标成 30d 收益。
     """
+    if df is None or df.empty or day < df.index.date.min():
+        return None
     sub = df[df.index.date >= day]
     if sub.empty:
         return None
@@ -262,6 +264,30 @@ def _atr_pct(symbol: str) -> float:
         return DEFAULT_DAILY_VOL_PCT
 
 
+def _atr_pct_asof(symbol: str, decision_date: str) -> float:
+    """Return ATR% using only information available on the decision date."""
+    global _REGIME_STORE
+    try:
+        import pandas as pd
+        from utils.market_metrics import compute_metrics
+
+        if _REGIME_STORE is None:
+            from db.market_store import MarketStore
+
+            _REGIME_STORE = MarketStore()
+        df = _REGIME_STORE.get_history_df(symbol, days=100000)
+        if df is None or df.empty:
+            return DEFAULT_DAILY_VOL_PCT
+        df = df[df.index <= pd.to_datetime(decision_date)].tail(400)
+        if len(df) < 20:
+            return DEFAULT_DAILY_VOL_PCT
+        atr = compute_metrics(df).get("atr_pct")
+        return float(atr) if atr and atr > 0 else DEFAULT_DAILY_VOL_PCT
+    except Exception as exc:  # noqa: BLE001
+        log.warning("_atr_pct_asof(%s,%s) fallback: %s", symbol, decision_date, exc)
+        return DEFAULT_DAILY_VOL_PCT
+
+
 # regime 计算复用一个 MarketStore 连接（避免每条 review 新开 sqlite 连接）
 _REGIME_STORE = None
 
@@ -303,11 +329,16 @@ def _decision_regime(symbol: str, decision_date: str) -> Optional[str]:
 _ATR_CACHE: Dict[str, float] = {}
 
 
-def _atr_pct_cached(symbol: str) -> float:
-    """_atr_pct 的进程内缓存（atr 用当前 1y 数据算，同 symbol 全程不变，避免每条 review 重拉行情）。"""
-    if symbol not in _ATR_CACHE:
-        _ATR_CACHE[symbol] = _atr_pct(symbol)
-    return _ATR_CACHE[symbol]
+def _atr_pct_cached(symbol: str, decision_date: Optional[str] = None) -> float:
+    """Cache ATR by ``(symbol, decision_date)`` to keep historical labels stable."""
+    key = f"{symbol}@{decision_date or 'latest'}"
+    if key not in _ATR_CACHE:
+        _ATR_CACHE[key] = (
+            _atr_pct_asof(symbol, decision_date)
+            if decision_date
+            else _atr_pct(symbol)
+        )
+    return _ATR_CACHE[key]
 
 
 def _flat_band(atr_pct: float, window_days: int) -> float:
@@ -405,7 +436,7 @@ def review_one(
     # 波动率阈值按资产定（HOLD 的"没动"判定 + 方向分类共用同一个 flat band）。
     # 改为对所有 verdict 都算 atr（带缓存）：directions 是 verdict 无关的"市场到底涨没涨"，
     # 必须和 HOLD 用同一条 flat band 才能让下游 regime 基率与 missed_up/avoided_down 口径一致。
-    atr = _atr_pct_cached(real_symbol)
+    atr = _atr_pct_cached(real_symbol, decision_date)
     for window in HIT_WINDOWS:
         ret = _window_return(real_symbol, holding, decision_date, window)
         if ret is not None:

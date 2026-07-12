@@ -627,7 +627,7 @@ class MonitorWindow(MonitorNewsMixin, MonitorSelectionMixin, MonitorTradeMixin, 
 
             url = f"{self.remote_server_url.rstrip('/')}/api/config/monitor_config"
             try:
-                resp = requests.post(url, json=config_data, timeout=60)
+                resp = requests.post(url, json=config_data, headers=_remote_api_headers(), timeout=60)
             except requests.exceptions.ConnectionError:
                 messagebox.showwarning("连接失败", f"无法连接到服务器 {url}。\n本地数据已自动保存，无需上传。")
                 return
@@ -653,7 +653,7 @@ class MonitorWindow(MonitorNewsMixin, MonitorSelectionMixin, MonitorTradeMixin, 
                         pass
 
                 url_exit = f"{self.remote_server_url.rstrip('/')}/api/config/exit_params"
-                resp_exit = requests.post(url_exit, json=exit_data, timeout=10)
+                resp_exit = requests.post(url_exit, json=exit_data, headers=_remote_api_headers(), timeout=10)
                 if resp_exit.status_code != 200:
                     messagebox.showerror("错误", f"上传每周止盈参数失败: HTTP {resp_exit.status_code}\n{resp_exit.text}")
                     return
@@ -662,7 +662,12 @@ class MonitorWindow(MonitorNewsMixin, MonitorSelectionMixin, MonitorTradeMixin, 
             sector_policies = os.getenv("INVEST_A_SHARE_SECTOR_EXIT_POLICIES", "")
             if sector_policies:
                 url_env = f"{self.remote_server_url.rstrip('/')}/api/config/env_policies"
-                resp_env = requests.post(url_env, json={"policies": sector_policies}, timeout=10)
+                resp_env = requests.post(
+                    url_env,
+                    json={"policies": sector_policies},
+                    headers=_remote_api_headers(),
+                    timeout=10,
+                )
                 if resp_env.status_code != 200:
                     print(f"Failed to upload env policies to server: {resp_env.status_code}")
 
@@ -673,7 +678,12 @@ class MonitorWindow(MonitorNewsMixin, MonitorSelectionMixin, MonitorTradeMixin, 
                     with open(sector_cache_path, "r", encoding="utf-8") as f:
                         sector_data = json.load(f)
                     url_sector = f"{self.remote_server_url.rstrip('/')}/api/config/sector_cache"
-                    resp_sector = requests.post(url_sector, json=sector_data, timeout=10)
+                    resp_sector = requests.post(
+                        url_sector,
+                        json=sector_data,
+                        headers=_remote_api_headers(),
+                        timeout=10,
+                    )
                     if resp_sector.status_code != 200:
                         print(f"Failed to upload sector cache to server: {resp_sector.status_code}")
                 except Exception as se_err:
@@ -684,8 +694,22 @@ class MonitorWindow(MonitorNewsMixin, MonitorSelectionMixin, MonitorTradeMixin, 
             if db_path.exists():
                 try:
                     url_ledger = f"{self.remote_server_url.rstrip('/')}/api/config/account_ledger"
-                    with open(db_path, "rb") as f:
-                        resp_ledger = requests.post(url_ledger, files={"file": f}, timeout=15)
+                    from utils.safe_persistence import create_sqlite_export
+
+                    export_path = create_sqlite_export(
+                        db_path,
+                        required_tables=("accounts", "holdings", "trades", "daily_pnl"),
+                    )
+                    try:
+                        with open(export_path, "rb") as f:
+                            resp_ledger = requests.post(
+                                url_ledger,
+                                files={"file": f},
+                                headers=_remote_api_headers(),
+                                timeout=30,
+                            )
+                    finally:
+                        export_path.unlink(missing_ok=True)
                     if resp_ledger.status_code != 200:
                         print(f"Failed to upload account ledger to server: {resp_ledger.status_code}")
                 except Exception as db_err:
@@ -704,19 +728,35 @@ class MonitorWindow(MonitorNewsMixin, MonitorSelectionMixin, MonitorTradeMixin, 
             return
 
         import requests
+        import socket
+        import time
+        import subprocess
+        import sys
+
+        # Check if local backend is running (so we can restart it afterwards)
+        local_backend_was_running = False
+        try:
+            with socket.create_connection(("127.0.0.1", 8765), timeout=0.5):
+                local_backend_was_running = True
+        except Exception:
+            pass
         try:
             config_path = ROOT / "jobs" / "market_monitor_config.json"
             config_received = False
             url_config = f"{self.remote_server_url.rstrip('/')}/api/config/monitor_config"
-            resp_config = requests.get(url_config, timeout=10)
+            resp_config = requests.get(url_config, headers=_remote_api_headers(), timeout=10)
             config_data: Dict[str, Any] = {}
             if resp_config.status_code == 200:
                 config_received = True
                 config_data = resp_config.json()
                 if _config_has_targets(config_data):
-                    config_path.parent.mkdir(parents=True, exist_ok=True)
-                    with open(config_path, "w", encoding="utf-8") as f:
-                        json.dump(config_data, f, ensure_ascii=False, indent=2)
+                    from utils.safe_persistence import backup_and_atomic_write_json
+
+                    backup_and_atomic_write_json(
+                        config_path,
+                        config_data,
+                        reason="desktop-remote-monitor-config-sync",
+                    )
             elif resp_config.status_code == 404:
                 pass
             else:
@@ -724,13 +764,17 @@ class MonitorWindow(MonitorNewsMixin, MonitorSelectionMixin, MonitorTradeMixin, 
                 return
 
             url_exit = f"{self.remote_server_url.rstrip('/')}/api/config/exit_params"
-            resp_exit = requests.get(url_exit, timeout=10)
+            resp_exit = requests.get(url_exit, headers=_remote_api_headers(), timeout=10)
             if resp_exit.status_code == 200:
                 exit_data = resp_exit.json()
                 exit_path = ROOT / "reports" / "weekly_exit_param_optimization.json"
-                exit_path.parent.mkdir(parents=True, exist_ok=True)
-                with open(exit_path, "w", encoding="utf-8") as f:
-                    json.dump(exit_data, f, ensure_ascii=False, indent=2)
+                from utils.safe_persistence import backup_and_atomic_write_json
+
+                backup_and_atomic_write_json(
+                    exit_path,
+                    exit_data,
+                    reason="desktop-remote-exit-params-sync",
+                )
             elif resp_exit.status_code == 404:
                 pass
             else:
@@ -740,7 +784,7 @@ class MonitorWindow(MonitorNewsMixin, MonitorSelectionMixin, MonitorTradeMixin, 
             # 1. 同步 .env 中的 INVEST_A_SHARE_SECTOR_EXIT_POLICIES
             try:
                 url_env = f"{self.remote_server_url.rstrip('/')}/api/config/env_policies"
-                resp_env = requests.get(url_env, timeout=10)
+                resp_env = requests.get(url_env, headers=_remote_api_headers(), timeout=10)
                 if resp_env.status_code == 200:
                     policies_val = resp_env.json().get("policies", "")
                     if policies_val:
@@ -760,8 +804,13 @@ class MonitorWindow(MonitorNewsMixin, MonitorSelectionMixin, MonitorTradeMixin, 
                                 break
                         if not found:
                             lines.append(new_line)
-                        with open(env_path, "w", encoding="utf-8") as f:
-                            f.write("\n".join(lines) + "\n")
+                        from utils.safe_persistence import backup_and_atomic_write_text
+
+                        backup_and_atomic_write_text(
+                            env_path,
+                            "\n".join(lines) + "\n",
+                            reason="desktop-remote-env-policies-sync",
+                        )
                         os.environ[key] = policies_val
             except Exception as env_err:
                 print(f"Failed to sync env policies: {env_err}")
@@ -769,30 +818,63 @@ class MonitorWindow(MonitorNewsMixin, MonitorSelectionMixin, MonitorTradeMixin, 
             # 2. 同步 data/sector_cache.json
             try:
                 url_sector = f"{self.remote_server_url.rstrip('/')}/api/config/sector_cache"
-                resp_sector = requests.get(url_sector, timeout=10)
+                resp_sector = requests.get(url_sector, headers=_remote_api_headers(), timeout=10)
                 if resp_sector.status_code == 200:
                     sector_cache_path = ROOT / "data" / "sector_cache.json"
-                    sector_cache_path.parent.mkdir(parents=True, exist_ok=True)
-                    with open(sector_cache_path, "w", encoding="utf-8") as f:
-                        json.dump(resp_sector.json(), f, ensure_ascii=False, indent=2)
+                    from utils.safe_persistence import backup_and_atomic_write_json
+
+                    backup_and_atomic_write_json(
+                        sector_cache_path,
+                        resp_sector.json(),
+                        reason="desktop-remote-sector-cache-sync",
+                    )
             except Exception as sector_err:
                 print(f"Failed to sync sector cache: {sector_err}")
 
             # 3. 同步真实双账户账本 db/accounts.db，再由账本回写 config/snapshot
             ledger_synced = False
+            ledger_error_msg = None
+
+            # Stop local background services first to release file lock on Windows
+            print("Stopping local services before database sync to avoid file lock...")
+            _stop_background_services()
+            time.sleep(1.0)  # Allow file handles to release
+
             try:
                 url_ledger = f"{self.remote_server_url.rstrip('/')}/api/config/account_ledger"
-                resp_ledger = requests.get(url_ledger, timeout=15)
+                resp_ledger = requests.get(url_ledger, headers=_remote_api_headers(), timeout=30)
                 if resp_ledger.status_code == 200:
                     db_path = _account_ledger_db_path()
                     db_path.parent.mkdir(parents=True, exist_ok=True)
-                    tmp_path = db_path.with_suffix(db_path.suffix + ".tmp")
-                    with open(tmp_path, "wb") as f:
-                        f.write(resp_ledger.content)
-                    tmp_path.replace(db_path)
-                    ledger_synced = True
+
+                    # Clear read-only attribute if present
+                    if db_path.exists():
+                        try:
+                            import stat
+                            mode = db_path.stat().st_mode
+                            if not (mode & stat.S_IWRITE):
+                                db_path.chmod(mode | stat.S_IWRITE)
+                        except Exception:
+                            pass
+
+                    try:
+                        from utils.safe_persistence import restore_sqlite_bytes
+
+                        restore_sqlite_bytes(
+                            db_path,
+                            resp_ledger.content,
+                            reason="desktop-remote-account-ledger-sync",
+                            required_tables=("accounts", "holdings", "trades", "daily_pnl"),
+                            nonempty_tables=("accounts", "holdings"),
+                        )
+                        ledger_synced = True
+                    except Exception as replace_err:
+                        ledger_error_msg = f"无法覆盖账本数据库文件，该文件已被其他进程锁定。\n详细错误: {replace_err}"
+                        raise
             except Exception as db_err:
                 print(f"Failed to sync account ledger: {db_err}")
+                if not ledger_error_msg:
+                    ledger_error_msg = str(db_err)
 
             try:
                 from db.account_ledger import AccountLedger
@@ -800,9 +882,13 @@ class MonitorWindow(MonitorNewsMixin, MonitorSelectionMixin, MonitorTradeMixin, 
                 ledger = AccountLedger()
                 if ledger_synced:
                     if config_received and not _config_has_targets(config_data) and not config_path.exists():
-                        config_path.parent.mkdir(parents=True, exist_ok=True)
-                        with open(config_path, "w", encoding="utf-8") as f:
-                            json.dump(config_data, f, ensure_ascii=False, indent=2)
+                            from utils.safe_persistence import backup_and_atomic_write_json
+
+                            backup_and_atomic_write_json(
+                                config_path,
+                                config_data,
+                                reason="desktop-ledger-empty-config-sync",
+                            )
                     ledger.sync_to_config_and_snapshot()
                 elif _config_has_targets(config_data):
                     ledger.ensure_initialized(config_data)
@@ -812,7 +898,25 @@ class MonitorWindow(MonitorNewsMixin, MonitorSelectionMixin, MonitorTradeMixin, 
             except Exception as le:
                 print(f"Failed to refresh ledger/config after sync: {le}")
 
-            messagebox.showinfo("成功", "所有配置文件及账本数据库同步成功！")
+            # Restart local backend services if they were running before
+            if local_backend_was_running:
+                print("Restarting local background services...")
+                try:
+                    subprocess.Popen(
+                        [sys.executable, "scripts/start_invest_backend.py", "--no-window", "--with-backend"],
+                        cwd=str(ROOT),
+                        stdin=subprocess.DEVNULL,
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                        creationflags=subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0
+                    )
+                except Exception as restart_err:
+                    print(f"Failed to restart background services: {restart_err}")
+
+            if ledger_error_msg:
+                messagebox.showwarning("部分成功", f"配置文件同步成功，但账本数据库同步失败！\n\n原因: {ledger_error_msg}")
+            else:
+                messagebox.showinfo("成功", "所有配置文件及账本数据库同步成功！")
             self.refresh()
         except Exception as e:
             messagebox.showerror("错误", f"同步过程中发生异常: {str(e)}")
@@ -1260,13 +1364,18 @@ class MonitorWindow(MonitorNewsMixin, MonitorSelectionMixin, MonitorTradeMixin, 
         return "break"
 
     def _maybe_alert(self, rows: List[Dict[str, Any]]) -> None:
-        symbols = {
-            str(row.get("symbol"))
-            for row in rows
-            if row.get("state") == "action_required" and row.get("symbol")
-        }
-        new_symbols = symbols - self.previous_action_symbols
-        self.previous_action_symbols = symbols
+        alert_ids: set[str] = set()
+        for row in rows:
+            symbol = str(row.get("symbol") or "")
+            if not symbol:
+                continue
+            if row.get("state") == "action_required":
+                alert_ids.add(f"action:{symbol}")
+            sentinel = row.get("price_sentinel") or {}
+            if sentinel.get("triggered"):
+                alert_ids.add(str(sentinel.get("alert_id") or f"sentinel:{symbol}:{sentinel.get('direction', '')}"))
+        new_symbols = alert_ids - self.previous_action_symbols
+        self.previous_action_symbols = alert_ids
         if new_symbols and self.shake_enabled:
             self._shake()
             self._beep()

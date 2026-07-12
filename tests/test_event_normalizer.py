@@ -83,6 +83,7 @@ def test_normalize_calls_llm_and_attaches_raw_items(monkeypatch):
 
 
 def test_normalize_skips_when_no_api_key(monkeypatch):
+    monkeypatch.delenv("LLM_API_KEY", raising=False)
     monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
     items = [RawNewsItem(src_name="x", title="t", url="u", snippet="s")]
     assert normalize(items) == []

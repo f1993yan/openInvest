@@ -220,7 +220,7 @@ with pm.with_portfolio_tx() as p:
 
 **异常时**：with 块内 raise → 整个 tx 回滚，不写盘（commit-on-success）。
 
-### 5.2 fcntl 文件锁（跨进程）
+### 5.2 portalocker 文件锁（跨线程/进程）
 
 `core/memory_store.py:_file_lock`：
 
@@ -228,15 +228,14 @@ with pm.with_portfolio_tx() as p:
 @contextmanager
 def _file_lock(path: Path):
     lock_path = path.with_suffix(path.suffix + ".lock")
-    with open(lock_path, "w") as fp:
-        fcntl.flock(fp.fileno(), fcntl.LOCK_EX)
-        try:
-            yield
-        finally:
-            fcntl.flock(fp.fileno(), fcntl.LOCK_UN)
+    with portalocker.Lock(
+        str(lock_path), mode="a", timeout=30.0, check_interval=0.02
+    ):
+        yield
 ```
 
 → 同一文件 invest-web 进程 + scheduler 进程 + CLI 同时写，**不会丢更新**。
+Windows 下不能直接做一次 `portalocker.lock(..., LOCK_EX)` 后失败即退出；同进程线程竞争会报 `AlreadyLocked`。当前实现有界轮询等待，50 线程 RMW 压测无丢更新。
 
 ### 5.3 atomic write（防进程被 kill）
 
@@ -303,6 +302,25 @@ memory/
 | API 写入 + scheduler 扣款 TOCTOU | 单锁 RMW + transaction | `core/memory_store.py:transaction` |
 | schema 飘字段（user 改了 portfolio.md 写了非法字段）| Pydantic v2 强校验 + render_body 用模板 | `core/schemas.py` |
 | 多 connector 实现飘移 | 强制走 PortfolioManager 接口 | `core/portfolio_manager.py` |
+
+---
+
+## 8. A 股双账户账本与决策审计
+
+桌面盘中路径使用 `db/accounts.db`，与上面的 markdown portfolio 模型并存：
+
+| 表 | 作用 |
+|----|------|
+| `accounts` | real / committee 可用现金和初始权益 |
+| `holdings` | 两账户各自股数、成本和板块元数据 |
+| `trades` | 成交、`decision_id`、全局唯一 `idempotency_key` |
+| `decisions` | `analysis_id` 下 real / committee 两条独立评估、响应和固定期限 outcome |
+| `cash_settlements` | 港股通 T+2 待交收现金 |
+| `daily_pnl` | 两账户每日收盘权益和盈亏 |
+
+一轮分析先生成一个 `analysis_id`，再对 `(analysis_id, account, symbol)` 做 SHA-256 派生得到不同 `decision_id`。真实结果可以进入窗口；影子结果只用于 `committee` 自动执行。成交事务使用 `BEGIN IMMEDIATE` 串行化现金/股数检查，并由 partial unique index 保证同一 `idempotency_key` 在两个进程重试时也只落一笔。
+
+账本 schema 当前写入 `PRAGMA user_version=2`。上传恢复必须经过 `utils.safe_persistence.restore_sqlite_bytes()`；下载使用 SQLite online backup，把已提交 WAL 页合并进一致导出文件。
 
 ---
 

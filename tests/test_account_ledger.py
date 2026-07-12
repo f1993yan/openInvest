@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta
+from concurrent.futures import ThreadPoolExecutor
 import json
 
 import pytest
@@ -364,3 +365,115 @@ def test_sync_to_config_preserves_existing_actionable_snapshot_rows(tmp_path, mo
     assert by_symbol["000063"]["operation"]["verdict"] == "BUY"
     assert synced["counts"]["action_required"] == 2
     assert synced["actionable"] == [{"symbol": "600900"}, {"symbol": "000063"}]
+
+
+def test_trade_idempotency_replays_without_mutating_account_twice(tmp_path):
+    db = AccountLedger(str(tmp_path / "accounts.db"))
+    db.initialize_from_monitor_config(_config())
+
+    first = db.apply_user_trade(
+        symbol="000063",
+        direction="BUY",
+        units=100,
+        price=30,
+        idempotency_key="ui-click-000063-buy-100-v1",
+    )
+    replay = db.apply_user_trade(
+        symbol="000063",
+        direction="BUY",
+        units=100,
+        price=30,
+        idempotency_key="ui-click-000063-buy-100-v1",
+    )
+
+    assert replay.id == first.id
+    assert db.account_summary("real")["cash_cny"] == pytest.approx(7000)
+    assert {h["symbol"]: h for h in db.list_holdings("real")}["000063"]["units"] == 100
+    assert len(db.list_trades("real")) == 1
+
+
+def test_cross_connection_idempotency_is_transactional(tmp_path):
+    path = tmp_path / "accounts.db"
+    primary = AccountLedger(str(path))
+    primary.initialize_from_monitor_config(_config())
+    peer = AccountLedger(str(path))
+
+    def execute(ledger):
+        return ledger.apply_user_trade(
+            symbol="000063",
+            direction="BUY",
+            units=100,
+            price=30,
+            idempotency_key="cross-process-click-000063-buy",
+        )
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        trades = list(pool.map(execute, (primary, peer)))
+
+    assert trades[0].id == trades[1].id
+    assert len(primary.list_trades("real")) == 1
+    assert primary.account_summary("real")["cash_cny"] == pytest.approx(7000)
+
+
+def test_completed_shadow_decision_replays_original_trade(tmp_path):
+    db = AccountLedger(str(tmp_path / "accounts.db"))
+    db.initialize_from_monitor_config(_config())
+    result = {
+        "success": True,
+        "symbol": "000063",
+        "verdict": "BUY",
+        "confidence": 0.8,
+        "suggested_alloc_cny": 9000,
+    }
+    db.record_decision(result, account="committee", analysis_id=db.new_analysis_id("000063", "test"))
+
+    first = db.apply_committee_result(result, price=30)
+    replay = db.apply_committee_result(result, price=30)
+
+    assert first is not None and replay is not None
+    assert replay.id == first.id
+    assert len(db.list_trades("committee")) == 1
+    assert {h["symbol"]: h for h in db.list_holdings("committee")}["000063"]["units"] == 300
+
+
+def test_real_and_shadow_decisions_have_distinct_ids_and_outcomes(tmp_path):
+    db = AccountLedger(str(tmp_path / "accounts.db"))
+    db.initialize_from_monitor_config(_config())
+    analysis_id = db.new_analysis_id("000063", "test")
+    real = {"success": True, "symbol": "000063", "verdict": "BUY", "confidence": 0.7, "suggested_alloc_cny": 3000}
+    shadow = {"success": True, "symbol": "000063", "verdict": "HOLD", "confidence": 0.6, "suggested_alloc_cny": 0}
+
+    real_id = db.record_decision(real, account="real", analysis_id=analysis_id)
+    shadow_id = db.record_decision(shadow, account="committee", analysis_id=analysis_id)
+    assert real_id != shadow_id
+    assert db.record_decision_outcome(real_id, horizon_days=30, return_pct=5.2, benchmark_return_pct=2.0, hit=True)
+    assert db.record_decision_response(real_id, accepted=False, reason="user declined")
+    assert not db.record_decision_response(shadow_id, accepted=False, reason="must stay private")
+
+    real_rows = db.list_decisions(account="real")
+    shadow_rows = db.list_decisions(account="committee")
+    assert len(real_rows) == len(shadow_rows) == 1
+    assert real_rows[0]["status"] == "rejected"
+    assert real_rows[0]["outcomes"]["30d"]["excess_return_pct"] == pytest.approx(3.2)
+    assert shadow_rows[0]["status"] == "proposed"
+
+
+def test_schema_migration_adds_decision_columns(tmp_path):
+    import sqlite3
+
+    path = tmp_path / "legacy.db"
+    with sqlite3.connect(path) as conn:
+        conn.execute(
+            """CREATE TABLE trades (
+                id INTEGER PRIMARY KEY AUTOINCREMENT, ts TEXT NOT NULL,
+                trade_date TEXT NOT NULL, account TEXT NOT NULL, symbol TEXT NOT NULL,
+                direction TEXT NOT NULL, units REAL NOT NULL, price REAL NOT NULL,
+                cash_delta REAL NOT NULL, source TEXT NOT NULL, verdict TEXT,
+                confidence REAL, note TEXT
+            )"""
+        )
+
+    db = AccountLedger(str(path))
+    columns = {row[1] for row in db.conn.execute("PRAGMA table_info(trades)")}
+    assert {"decision_id", "idempotency_key"} <= columns
+    assert db.conn.execute("PRAGMA user_version").fetchone()[0] >= 2

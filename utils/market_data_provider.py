@@ -2,7 +2,9 @@
 from __future__ import annotations
 
 import logging
+import os
 import time
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 import pandas as pd
 import requests
@@ -10,6 +12,24 @@ import requests
 log = logging.getLogger(__name__)
 
 _PRICE_CACHE: Dict[str, Dict[str, Any]] = {}
+_QUOTE_CACHE_MAX_AGE_SECONDS = int(os.getenv("INVEST_INTRADAY_QUOTE_MAX_AGE_SECONDS", "180"))
+
+
+def _cached_quote(item: Dict[str, Any]) -> Dict[str, Any]:
+    cached = dict(item)
+    fetched_at = cached.get("fetched_at")
+    stale = True
+    if fetched_at:
+        try:
+            ts = datetime.fromisoformat(str(fetched_at).replace("Z", "+00:00"))
+            if ts.tzinfo is None:
+                ts = ts.replace(tzinfo=timezone.utc)
+            stale = (datetime.now(timezone.utc) - ts.astimezone(timezone.utc)).total_seconds() > _QUOTE_CACHE_MAX_AGE_SECONDS
+        except ValueError:
+            stale = True
+    cached["is_stale"] = bool(cached.get("is_stale")) or stale
+    cached["cache_reused"] = True
+    return cached
 
 def is_trading_time() -> bool:
     """判断当前是否在交易时段内（交易日 9:30-15:00）"""
@@ -45,7 +65,7 @@ def fetch_prices(symbols: List[str]) -> Dict[str, Dict[str, Any]]:
         for s in symbols:
             s_upper = s.upper()
             if s_upper in _PRICE_CACHE:
-                cached_results[s] = _PRICE_CACHE[s_upper]
+                cached_results[s] = _cached_quote(_PRICE_CACHE[s_upper])
             else:
                 all_cached = False
                 break
@@ -86,7 +106,7 @@ def fetch_prices(symbols: List[str]) -> Dict[str, Dict[str, Any]]:
         for s in symbols:
             s_upper = s.upper()
             if s_upper in _PRICE_CACHE:
-                fallback_results[s] = _PRICE_CACHE[s_upper]
+                fallback_results[s] = _cached_quote(_PRICE_CACHE[s_upper])
         return fallback_results
 
     results = {}
@@ -127,6 +147,9 @@ def fetch_prices(symbols: List[str]) -> Dict[str, Dict[str, Any]]:
                 "price": price,
                 "prev_close": prev_close,
                 "change_pct": round(change_pct, 2),
+                "fetched_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                "quote_source": "tencent",
+                "is_stale": False,
             }
             results[symbol] = item
             _PRICE_CACHE[symbol.upper()] = item
@@ -138,7 +161,7 @@ def fetch_prices(symbols: List[str]) -> Dict[str, Dict[str, Any]]:
         if s not in results:
             s_upper = s.upper()
             if s_upper in _PRICE_CACHE:
-                results[s] = _PRICE_CACHE[s_upper]
+                results[s] = _cached_quote(_PRICE_CACHE[s_upper])
 
     return results
 
@@ -175,7 +198,7 @@ def _fetch_prices_sina_fallback(symbols: List[str]) -> Dict[str, Dict[str, Any]]
         for s in symbols:
             s_upper = s.upper()
             if s_upper in _PRICE_CACHE:
-                fallback_results[s] = _PRICE_CACHE[s_upper]
+                fallback_results[s] = _cached_quote(_PRICE_CACHE[s_upper])
         return fallback_results
 
     results = {}
@@ -221,6 +244,9 @@ def _fetch_prices_sina_fallback(symbols: List[str]) -> Dict[str, Dict[str, Any]]
                 "price": price,
                 "prev_close": prev_close,
                 "change_pct": round(change_pct, 2),
+                "fetched_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                "quote_source": "sina",
+                "is_stale": False,
             }
             results[symbol] = item
             _PRICE_CACHE[symbol.upper()] = item
@@ -231,7 +257,7 @@ def _fetch_prices_sina_fallback(symbols: List[str]) -> Dict[str, Dict[str, Any]]
         if s not in results:
             s_upper = s.upper()
             if s_upper in _PRICE_CACHE:
-                results[s] = _PRICE_CACHE[s_upper]
+                results[s] = _cached_quote(_PRICE_CACHE[s_upper])
 
     return results
 

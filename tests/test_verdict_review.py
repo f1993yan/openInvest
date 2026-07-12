@@ -51,6 +51,32 @@ def test_window_return_direct_native(monkeypatch):
     assert ret == pytest.approx(0.10, abs=1e-6)
 
 
+def test_close_anchor_never_uses_a_future_bar_for_past_side():
+    series = _df([("2026-04-02", 101.0), ("2026-04-03", 102.0)])
+    assert vr._close_on_or_after(series, datetime.strptime("2026-04-01", "%Y-%m-%d").date()) is None
+
+
+def test_atr_cache_is_scoped_to_decision_date(monkeypatch):
+    dates = pd.date_range("2026-01-01", periods=45, freq="D")
+    series = pd.DataFrame({"Close": range(100, 145)}, index=dates)
+
+    class FakeStore:
+        def get_history_df(self, symbol, days=100000):
+            return series.copy()
+
+    import utils.market_metrics as market_metrics
+
+    monkeypatch.setattr(market_metrics, "compute_metrics", lambda df: {"atr_pct": float(len(df))})
+    monkeypatch.setattr(vr, "_REGIME_STORE", FakeStore())
+    vr._ATR_CACHE.clear()
+
+    early = vr._atr_pct_cached("000001", "2026-01-20")
+    later = vr._atr_pct_cached("000001", "2026-01-30")
+    assert early == 20.0
+    assert later == 30.0
+    assert len(vr._ATR_CACHE) == 2
+
+
 # ---------- Bug B: 黄金 CNY/克 ----------
 
 def test_window_return_gold_uses_cny_per_gram(monkeypatch):

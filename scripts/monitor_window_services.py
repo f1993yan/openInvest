@@ -25,6 +25,12 @@ MARKET_DB_PATH = ROOT / "db" / "market_data.db"
 log = logging.getLogger(__name__)
 
 
+def _remote_api_headers() -> Dict[str, str]:
+    """Return optional Bearer auth without changing unauthenticated installs."""
+    token = str(os.getenv("INVEST_REMOTE_API_TOKEN") or os.getenv("INVEST_API_TOKEN") or "").strip()
+    return {"Authorization": f"Bearer {token}"} if token else {}
+
+
 def _safe_num(value: Any, default: float = 0.0) -> float:
     try:
         if value is None:
@@ -327,12 +333,21 @@ def _execute_user_trade_from_row(row: Dict[str, Any], lots: float) -> Dict[str, 
 
     ledger = AccountLedger()
     ledger.ensure_initialized(load_config())
+    operation = row.get("operation") or {}
+    decision_id = str(row.get("decision_id") or operation.get("decision_id") or "").strip() or None
+    idempotency_key = (
+        f"user:{decision_id}:{direction}:{units}"
+        if decision_id
+        else f"user-manual:{symbol}:{direction}:{units}:{datetime.now().isoformat(timespec='microseconds')}"
+    )
     trade = ledger.apply_user_trade(
         symbol=symbol,
         direction=direction,
         units=units,
         price=price,
         note="monitor_window_user_confirmed",
+        decision_id=decision_id,
+        idempotency_key=idempotency_key,
     )
     name = price_info.get("name") or row.get("name") or symbol
     return {
@@ -367,6 +382,10 @@ def _execute_user_trade_manual(symbol: str, direction: str, lots: int, lot_size:
         units=int(lots) * lot_size,
         price=price,
         note="monitor_window_manual_trade",
+        idempotency_key=(
+            f"user-manual:{symbol}:{direction}:{int(lots) * lot_size}:"
+            f"{datetime.now().isoformat(timespec='microseconds')}"
+        ),
     )
     name = price_info.get("name") or symbol
     return f"已按最新价记账: {name} {trade.direction} {trade.units:.0f}股 @ {trade.price:.2f}"
@@ -1169,9 +1188,12 @@ def _demo_selection_payload() -> Dict[str, Any]:
 def _run_latest_committee_for_row(row: Dict[str, Any]) -> Dict[str, Any]:
     from jobs.market_monitor import (
         _sync_config_account_fields,
+        apply_limit_up_guard,
+        apply_repeated_trade_guard,
         build_holdings_list,
         call_committee,
         fetch_sina_prices,
+        load_entry_exit_alert_state,
         load_config,
     )
 
@@ -1180,13 +1202,20 @@ def _run_latest_committee_for_row(row: Dict[str, Any]) -> Dict[str, Any]:
         return {"success": False, "symbol": symbol, "error": "缺少标的代码"}
 
     config = load_config()
+    shadow_stocks: List[Dict[str, Any]] = []
+    shadow_cash = 0.0
+    shadow_t2_pending = 0.0
     try:
-        from db.account_ledger import AccountLedger, REAL_ACCOUNT
+        from db.account_ledger import AccountLedger, COMMITTEE_ACCOUNT, REAL_ACCOUNT
 
         ledger = AccountLedger()
         ledger.ensure_initialized(config)
         account_stocks = ledger.stocks_for_committee_input(config, account=REAL_ACCOUNT)
         config = _sync_config_account_fields(config, account_stocks)
+        shadow_stocks = ledger.stocks_for_committee_input(config, account=COMMITTEE_ACCOUNT)
+        shadow_summary = ledger.account_summary(COMMITTEE_ACCOUNT)
+        shadow_cash = _safe_num(shadow_summary.get("cash_cny"))
+        shadow_t2_pending = _safe_num(shadow_summary.get("t2_pending_cash_cny"))
     except Exception:
         ledger = None
 
@@ -1222,7 +1251,11 @@ def _run_latest_committee_for_row(row: Dict[str, Any]) -> Dict[str, Any]:
         _safe_num((row.get("price") or {}).get("current")),
     )
     other_holdings = build_holdings_list(holdings, symbol)
-    return call_committee(
+    shadow_stock = next(
+        (s for s in shadow_stocks if str(s.get("symbol") or "").upper() == symbol),
+        None,
+    )
+    result = call_committee(
         symbol=symbol,
         name=str(stock.get("name") or row.get("name") or symbol),
         market=str(stock.get("market") or row.get("market") or "a"),
@@ -1238,13 +1271,62 @@ def _run_latest_committee_for_row(row: Dict[str, Any]) -> Dict[str, Any]:
         industry=str(stock.get("industry") or row.get("industry") or ""),
         fundamentals=stock.get("fundamentals", {}),
         optimizer_review_enabled=True,
+        shadow_position_pct=_safe_num((shadow_stock or {}).get("position_pct")),
+        shadow_cost=_safe_num((shadow_stock or {}).get("cost")),
+        shadow_cash=shadow_cash,
+        shadow_holdings=build_holdings_list(shadow_stocks, symbol),
+        shadow_available_cash=shadow_cash,
+        shadow_t2_pending=shadow_t2_pending,
     ) or {"success": False, "symbol": symbol, "error": "委员会返回空结果"}
+
+    if not result.get("success"):
+        return result
+    result.setdefault("symbol", symbol)
+    result.setdefault("name", stock.get("name") or row.get("name") or symbol)
+    result.setdefault("market", stock.get("market") or row.get("market") or "a")
+    result.setdefault("sector", stock.get("sector") or row.get("sector") or "")
+    result.setdefault("industry", stock.get("industry") or row.get("industry") or "")
+    entry_exit_state = load_entry_exit_alert_state()
+    result = apply_repeated_trade_guard(
+        result,
+        stock=stock,
+        current_price=current_price,
+        ledger=ledger,
+        entry_exit_state=entry_exit_state,
+        account="real",
+    )
+    result = apply_limit_up_guard(result, price_info=price_info)
+
+    if ledger is None:
+        return result
+    analysis_id = ledger.new_analysis_id(symbol, "desktop")
+    ledger.record_decision(result, account="real", analysis_id=analysis_id)
+
+    shadow_result = result.get("shadow_result")
+    if isinstance(shadow_result, dict) and shadow_result.get("success"):
+        shadow_result.setdefault("symbol", symbol)
+        shadow_result.setdefault("name", stock.get("name") or row.get("name") or symbol)
+        shadow_result.setdefault("market", stock.get("market") or row.get("market") or "a")
+        shadow_result = apply_repeated_trade_guard(
+            shadow_result,
+            stock=shadow_stock or stock,
+            current_price=current_price,
+            ledger=ledger,
+            entry_exit_state={},
+            account="committee",
+        )
+        shadow_result = apply_limit_up_guard(shadow_result, price_info=price_info)
+        ledger.record_decision(shadow_result, account="committee", analysis_id=analysis_id)
+        ledger.apply_committee_result(shadow_result, price=current_price)
+        result["shadow_result"] = shadow_result
+    return result
 
 
 
 
 __all__ = [
     "_safe_num",
+    "_remote_api_headers",
     "_stop_background_services",
     "_fmt_price",
     "_fmt_money",

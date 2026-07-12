@@ -48,6 +48,8 @@ experiments/dspy_trainset_v3.json
 # Temporary development/compilation files
 .codegraph/
 .reasonix/
+reasonix.toml
+.pytest_cache/
 bash.exe.stackdump
 window_dump.xml
 app/.kotlin/

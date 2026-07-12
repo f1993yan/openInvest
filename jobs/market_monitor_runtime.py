@@ -338,6 +338,20 @@ def run_monitor_round():
     log.info(f"拉取 {len(all_symbols)} 只标的最新行情...")
     prices = fetch_sina_prices(all_symbols)
     log.info(f"获取到 {len(prices)} 只标的价格")
+    price_sentinel: Dict[str, Dict[str, Any]] = {}
+    try:
+        from jobs.market_price_sentinel import IntradayPriceSentinel
+
+        sentinel = IntradayPriceSentinel()
+        try:
+            price_sentinel = sentinel.evaluate_round(prices, all_stocks, now=round_dt)
+        finally:
+            sentinel.close()
+        triggered = [symbol for symbol, item in price_sentinel.items() if item.get("triggered")]
+        if triggered:
+            log.warning(f"经验分位数价格哨兵触发 {len(triggered)} 只标的；交由本轮 Python 委员会复核")
+    except Exception as e:
+        log.warning(f"盘中价格哨兵不可用，本轮继续常规委员会: {e}")
 
     # 1.5 拉取国内新闻
     news_items = []
@@ -377,6 +391,17 @@ def run_monitor_round():
                     if title:
                         lines.append(f"- [{item.src_name}] {title}")
                 news_text = "\n".join(lines)
+        sentinel_status = price_sentinel.get(sym) or {}
+        if sentinel_status.get("committee_review_required"):
+            direction_label = "向上" if sentinel_status.get("direction") == "up" else "向下"
+            sentinel_brief = (
+                f"[盘中经验分位数哨兵] {direction_label}异常："
+                f"10分钟收益 {sentinel_status.get('current_return_pct', 0):+.2f}%，"
+                f"板块残差 {sentinel_status.get('residual_return_pct', 0):+.2f}%，"
+                f"样本 n={sentinel_status.get('sample_count', 0)}，"
+                f"仅要求委员会复核，不构成机械下单条件。"
+            )
+            news_text = f"{news_text}\n{sentinel_brief}".strip()
 
         # Get shadow stock details
         shadow_stock = next((s for s in shadow_stocks if s["symbol"] == sym), None)
@@ -384,6 +409,11 @@ def run_monitor_round():
         shadow_cost = shadow_stock.get("cost", 0) if shadow_stock else 0.0
         shadow_other_holdings = build_holdings_list(shadow_stocks, sym) if shadow_stocks else []
 
+        analysis_id = (
+            ledger.new_analysis_id(sym, "monitor")
+            if ledger is not None
+            else f"monitor:{sym}:{round_dt.isoformat(timespec='microseconds')}"
+        )
         result = call_committee(
             symbol=sym,
             name=stock["name"],
@@ -408,6 +438,8 @@ def run_monitor_round():
             shadow_available_cash=shadow_available_cash,
             shadow_t2_pending=shadow_t2_pending,
         )
+        if isinstance(result, dict):
+            result["price_sentinel"] = sentinel_status
         if result and result.get("success"):
             result.setdefault("symbol", sym)
             result.setdefault("name", stock["name"])
@@ -423,10 +455,21 @@ def run_monitor_round():
                 current_price=price_info["price"],
                 ledger=ledger,
                 entry_exit_state=entry_exit_state_before_round,
+                account="real",
             )
             # 涨停追高护栏必须在下单前：改写 verdict→HOLD，使 apply_committee_result
             # 真正拦下影子买单（仅在 select_optimal_actionable_alerts 抑制提醒不够）。
             result = apply_limit_up_guard(result, price_info=price_info)
+            if ledger is not None:
+                try:
+                    ledger.record_decision(
+                        result,
+                        account="real",
+                        analysis_id=analysis_id,
+                        trade_date=round_dt.date().isoformat(),
+                    )
+                except Exception as e:
+                    log.warning(f"真实账户决策记录失败 {sym}: {e}")
 
             # Apply shadow result to ledger if available
             shadow_res = result.get("shadow_result")
@@ -441,12 +484,20 @@ def run_monitor_round():
                     stock=shadow_stock or stock,
                     current_price=price_info["price"],
                     ledger=ledger,
-                    entry_exit_state=entry_exit_state_before_round,
+                    entry_exit_state={},
+                    account="committee",
                 )
                 shadow_res = apply_limit_up_guard(shadow_res, price_info=price_info)
+                result["shadow_result"] = shadow_res
 
                 if ledger is not None:
                     try:
+                        ledger.record_decision(
+                            shadow_res,
+                            account="committee",
+                            analysis_id=analysis_id,
+                            trade_date=round_dt.date().isoformat(),
+                        )
                         trade = ledger.apply_committee_result(shadow_res, price=price_info["price"])
                         if trade:
                             log.info(

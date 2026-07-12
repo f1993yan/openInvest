@@ -398,6 +398,7 @@ def _beginner_summary_lines(
         or (row.get("technical") or {}).get("buy_signal_backtest")
         or {}
     )
+    price_sentinel = (source or {}).get("price_sentinel") or row.get("price_sentinel") or {}
     one_line = _extract_one_line(review)
     risk_flags = _extract_risk_flags(review)
     regime_text = (source or {}).get("regime") or technical.get("regime") or technical.get("quant_view")
@@ -463,6 +464,23 @@ def _beginner_summary_lines(
             lines.append(f"- 决策证据: {item}")
         for item in (decision_synthesis.get("conflicts") or [])[:2]:
             lines.append(f"- 口径冲突: {item}；最终按确定性优化器执行。")
+    if price_sentinel.get("available"):
+        if price_sentinel.get("extreme"):
+            direction = "向上" if price_sentinel.get("direction") == "up" else "向下"
+            lines.append(
+                f"- 风险重点: 盘中{direction}异常位于经验分布尾部；"
+                f"10分钟板块残差 {_safe_num(price_sentinel.get('residual_return_pct')):+.2f}%，"
+                f"样本 n={int(_safe_num(price_sentinel.get('sample_count')))}。"
+            )
+        else:
+            lines.append(
+                f"- 盘中哨兵: 当前仍在经验波动区间内（n={int(_safe_num(price_sentinel.get('sample_count')))}）。"
+            )
+    elif price_sentinel:
+        lines.append(
+            f"- 盘中哨兵: 尚未启用（{price_sentinel.get('reason') or '样本不足'}，"
+            f"n={int(_safe_num(price_sentinel.get('sample_count')))}）。"
+        )
     if discipline_review:
         trigger_label = {
             "position_stop": "持仓止损",

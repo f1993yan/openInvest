@@ -121,6 +121,20 @@ class EventStore:
     def vec_loaded(self) -> bool:
         return self._vec_loaded
 
+    def close(self) -> None:
+        """Release SQLite/WAL handles deterministically (required on Windows)."""
+        with self._lock:
+            conn = getattr(self, "conn", None)
+            if conn is None:
+                return
+            try:
+                conn.execute("PRAGMA wal_checkpoint(PASSIVE)")
+                conn.commit()
+            except Exception:
+                pass
+            conn.close()
+            self.conn = None
+
     def _init_db(self) -> None:
         with self._lock:
             cur = self.conn.cursor()

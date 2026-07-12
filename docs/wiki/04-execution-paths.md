@@ -155,7 +155,10 @@ start-invest-backend.bat
 - 每个标的一次 Direct 调用可以同时携带真实账户和影子账户上下文：`position_pct/cash/holdings` 属于 `real`，`shadow_position_pct/shadow_cash/shadow_holdings` 属于 `committee`。
 - 返回给主窗口、报告和 HTTP `/api/committee` 的是真实账户评估；`shadow_result` 只在 Python 内部给 `jobs.market_monitor_runtime` 执行影子账户，不展示给用户。
 - `jobs.market_monitor_runtime.run_monitor_round()` 是一轮盘中监控的唯一编排入口，负责行情、委员会、账本、新闻、告警和快照输出。
+- 每次 Direct 分析生成共享 `analysis_id`，再为 real/committee 派生不同 `decision_id`；真实结果和影子结果分别应用本账户的重复交易历史，不能用影子成交压掉真实账户建议。
+- `jobs.market_price_sentinel.IntradayPriceSentinel` 在行情拉取后记录新鲜 10 分钟样本；按标的优先、板块回退并按交易时段估计 99.5% 双尾残差阈值。样本不足 200 或行情陈旧时明确 unavailable；触发只把上下文注入当前 Direct 委员会并写快照，不调用旧 HTTP 端口、不自动成交。
 - `scripts/monitor_desktop_window.py` 只消费 `data/market_monitor/latest_window.json`，窗口跟随委员会/选股/新闻输出文件变化刷新，不再单独定义业务刷新频率。
+- 桌面端远程下载配置时，普通 JSON/.env 先走备份原子写；替换 `db/accounts.db` 前调用 `_stop_background_services()` 停止同项目的 `backend.server`、`uvicorn` 和监控任务以释放 Windows 文件锁，账本校验恢复后调用 `AccountLedger.sync_to_config_and_snapshot()`。只有同步前后端端口确实可用时才通过统一启动器静默恢复后端。
 - 桌面窗口里双击单标的会走 `scripts.monitor_window_services._run_latest_committee_for_row()` 直接跑最新委员会；成功后由 `scripts.monitor_window_analysis._dialog_row_from_committee_result()` 合成行状态，再通过 `scripts.monitor_desktop_window.MonitorWindow._apply_committee_row_update()` 回写内存行和 `latest_window.json`。
 - 当窗口退回配置兜底快照时，`scripts.monitor_window_services._config_stock_row()` 的技术指标只读缓存：先取最近委员会结果里的 `technical/market_metrics/metrics/entry_exit_points`，缺失时再由 `_compute_tech_from_local_history()` 只读 `db/market_data.db` 计算 `ma20/ma120/atr_pct` 并生成 `regime_brief`。该路径不调用 `utils.market_data_provider.get_history_data()` 或旧历史行情 provider，避免 UI 刷新触发联网、行情同步或 DB 写入。
 - Web/API 的 `POST/PUT/DELETE /api/holdings` 会在账本更新后追加后台任务：新增标的先预拉 2 年历史行情写入缓存，再刷新 `latest_window.json`；更新/删除则直接刷新快照。这是配置变化后的快照维护，不是桌面 UI 刷新路径。
@@ -172,6 +175,7 @@ start-invest-backend.bat
 | `jobs/market_monitor_alerts.py` | 为什么某只标的排在前面、为什么被现金/风险约束压掉 |
 | `jobs/market_monitor_guards.py` | 涨停和重复交易为什么被拦截 |
 | `jobs/market_monitor_snapshot.py` | 主窗口看到的字段从哪里来 |
+| `jobs/market_price_sentinel.py` | 10 分钟经验尾部为何触发/为何不可用、方向冷却 |
 | `scripts/monitor_window_*.py` | 主窗口 UI、悬浮详情、手动交易、选股/新闻卡片和配置兜底快照 |
 
 对新维护者最容易混淆的一点：
@@ -194,6 +198,7 @@ start-invest-backend.bat
 - 盘中监控会在读取账本/配置后调用 `load_sector_cache_mapping()` 和 `_with_sector_cache()`，对 A 股标的用 `data/sector_cache.json` 覆盖运行时 `sector`，原始配置板块保留在 `config_sector`。因此委员会上下文、`position_exit_plan`、告警板块约束和窗口展示使用同一个东方财富板块。
 - 行业映射是多源合并，不再因为实时源返回了部分标的就跳过缓存补缺；`sample_quality` 会标记 `ok/thin/sparse`，薄样本板块仍保留止盈止损参数，但会收缩 `sell_utility_adjustment_pct`，避免单票卖出样本把委员会带偏。
 - `AccountLedger(real)` 是持仓单一可信源；ledger 更新后同步 config/snapshot，config 只作为旧路径兼容和新标的首次播种来源。
+- `latest_window.json` 只保留 real 的 `analysis_id/decision_id`，并递归剔除 `shadow_result`/`shadow_*`。用户执行推荐手数时，以 real `decision_id + 方向 + 股数` 组成幂等键；重复点击/请求重放返回原成交。
 
 ---
 

@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -37,6 +38,8 @@ DEFAULT_OUT = ROOT / "docs" / "accuracy_summary.json"
 # 这里在「数据层」就把小样本 rate 置 null，避免任何人直接 curl 公开 JSON 拿到
 # GUI 本该屏蔽的小样本数字。hit/total 计数保留（GUI 仍展示 n）。
 MIN_SAMPLE_FOR_PUBLIC = 30
+HIT_HORIZON = "30d"
+HIT_HORIZON_DAYS = 30
 
 # expected_direction → 方向组映射（verdict 原文不出现在输出里）
 _DIRECTION_MAP: Dict[str, str] = {
@@ -60,19 +63,20 @@ def _parse_date(date_str: str) -> Optional[datetime]:
         return None
 
 
-def _row_is_hit(row: Dict[str, Any]) -> Optional[bool]:
-    """从 hits dict 中取最长窗口的 bool（30d > 7d > 1d）。
+def _row_is_hit(row: Dict[str, Any], hit_horizon: str = HIT_HORIZON) -> Optional[bool]:
+    """Return only the explicitly requested horizon; never mix maturities."""
+    val = (row.get("hits") or {}).get(hit_horizon)
+    return val if isinstance(val, bool) else None
 
-    hits 全空或全无 bool 值时返回 None（跳过该记录）。
-    这是方向准确性的代理指标——用最长有数据的窗口。
-    """
-    hits: Dict[str, Any] = row.get("hits") or {}
-    # 按优先级取最长窗口
-    for window in ("30d", "7d", "1d"):
-        val = hits.get(window)
-        if isinstance(val, bool):
-            return val
-    return None  # 无有效命中数据
+
+def _wilson_lower(hit: int, total: int, z: float = 1.96) -> Optional[float]:
+    if total <= 0:
+        return None
+    p = hit / total
+    denom = 1.0 + z * z / total
+    center = p + z * z / (2.0 * total)
+    margin = z * math.sqrt((p * (1.0 - p) + z * z / (4.0 * total)) / total)
+    return round(max(0.0, (center - margin) / denom), 4)
 
 
 def _load_rows(jsonl_path: Path) -> List[Dict[str, Any]]:
@@ -91,8 +95,11 @@ def _load_rows(jsonl_path: Path) -> List[Dict[str, Any]]:
     return rows
 
 
-def _aggregate(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
-    """对一批 rows 计算方向命中率聚合（脱敏：只看 expected_direction + hits）"""
+def _aggregate(
+    rows: List[Dict[str, Any]],
+    hit_horizon: str = HIT_HORIZON,
+) -> Dict[str, Any]:
+    """Aggregate one fixed horizon and its same-sample market base rate."""
     # by_direction：bullish / bearish / hold 各自的 hit / total
     by_dir: Dict[str, Dict[str, int]] = {
         "bullish": {"hit": 0, "total": 0},
@@ -101,16 +108,36 @@ def _aggregate(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
     }
     total_hit = 0
     total_count = 0
+    market_counts = {"up": 0, "down": 0, "flat": 0}
+    market_total = 0
+    actual_totals = {"up": 0, "down": 0, "flat": 0}
+    actual_correct = {"up": 0, "down": 0, "flat": 0}
 
     for row in rows:
         # hits 全空 → 跳过
-        is_hit = _row_is_hit(row)
+        is_hit = _row_is_hit(row, hit_horizon)
         if is_hit is None:
             continue
+
+        market_direction = str(
+            (row.get("directions") or {}).get(hit_horizon) or ""
+        ).lower()
+        if market_direction not in market_counts:
+            continue
+        market_counts[market_direction] += 1
+        market_total += 1
 
         # 方向分类（不输出 verdict 原文，只用 expected_direction 映射）
         raw_dir = str(row.get("expected_direction") or "").lower().strip()
         bucket = _DIRECTION_MAP.get(raw_dir, "hold")
+        predicted_market_direction = {
+            "bullish": "up",
+            "bearish": "down",
+            "hold": "flat",
+        }[bucket]
+        actual_totals[market_direction] += 1
+        if predicted_market_direction == market_direction:
+            actual_correct[market_direction] += 1
 
         by_dir[bucket]["total"] += 1
         if is_hit:
@@ -131,12 +158,33 @@ def _aggregate(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
             "rate": round(h / t, 4) if t > 0 else None,
         }
 
+    hit_rate = round(total_hit / total_count, 4) if total_count > 0 else None
+    actual_recalls = [
+        actual_correct[key] / actual_totals[key]
+        for key in ("up", "down", "flat")
+        if actual_totals[key] > 0
+    ]
+    balanced_accuracy = (
+        round(sum(actual_recalls) / len(actual_recalls), 4)
+        if actual_recalls else None
+    )
+    base_rate = {
+        key: (round(value / market_total, 4) if market_total > 0 else None)
+        for key, value in market_counts.items()
+    }
+    majority_rate = max((value for value in base_rate.values() if value is not None), default=None)
     return {
-        "direction_hit_rate": (
-            round(total_hit / total_count, 4) if total_count > 0 else None
+        "direction_hit_rate": hit_rate,
+        "direction_hit_rate_wilson_lower": _wilson_lower(total_hit, total_count),
+        "balanced_accuracy": balanced_accuracy,
+        "accuracy_edge_vs_majority": (
+            round(hit_rate - majority_rate, 4)
+            if hit_rate is not None and majority_rate is not None else None
         ),
         "sample_size": total_count,
+        "hit_horizon": hit_horizon,
         "by_direction": by_dir_out,
+        "base_rate": {"n": market_total, **base_rate},
     }
 
 
@@ -168,16 +216,40 @@ def _suppress_small_samples(window: Dict[str, Any]) -> Dict[str, Any]:
     """
     out = dict(window)
     if int(out.get("sample_size", 0) or 0) < MIN_SAMPLE_FOR_PUBLIC:
-        out["direction_hit_rate"] = None
+        for field in (
+            "direction_hit_rate",
+            "direction_hit_rate_wilson_lower",
+            "balanced_accuracy",
+            "accuracy_edge_vs_majority",
+        ):
+            out[field] = None
 
     by_dir = out.get("by_direction") or {}
     new_by_dir: Dict[str, Any] = {}
+    suppressed = 0
     for bucket, counts in by_dir.items():
         c = dict(counts)
         if int(c.get("total", 0) or 0) < MIN_SAMPLE_FOR_PUBLIC:
             c["rate"] = None
+            c["hit"] = None
+            suppressed += 1
         new_by_dir[bucket] = c
     out["by_direction"] = new_by_dir
+    if suppressed == 1:
+        for field in (
+            "direction_hit_rate",
+            "direction_hit_rate_wilson_lower",
+            "balanced_accuracy",
+            "accuracy_edge_vs_majority",
+        ):
+            out[field] = None
+
+    base_rate = dict(out.get("base_rate") or {})
+    if base_rate and int(base_rate.get("n", 0) or 0) < MIN_SAMPLE_FOR_PUBLIC:
+        out["base_rate"] = {
+            key: (value if key == "n" else None)
+            for key, value in base_rate.items()
+        }
     return out
 
 
@@ -187,8 +259,8 @@ def build_summary(jsonl_path: Path) -> Dict[str, Any]:
     now = datetime.now(timezone.utc)
 
     windows = {
-        "30d": _filter_by_window(rows, 30, now),
-        "90d": _filter_by_window(rows, 90, now),
+        "30d": _filter_by_window(rows, 30 + HIT_HORIZON_DAYS, now),
+        "90d": _filter_by_window(rows, 90 + HIT_HORIZON_DAYS, now),
         "all": rows,
     }
 
@@ -196,7 +268,7 @@ def build_summary(jsonl_path: Path) -> Dict[str, Any]:
         # 生成时间戳（UTC ISO）
         "generated_at": now.isoformat(timespec="seconds"),
         "windows": {
-            name: _suppress_small_samples(_aggregate(subset))
+            name: _suppress_small_samples(_aggregate(subset, HIT_HORIZON))
             for name, subset in windows.items()
         },
     }

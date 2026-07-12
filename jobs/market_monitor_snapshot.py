@@ -105,6 +105,19 @@ def _first_prefixed_line(text: str, prefixes: Tuple[str, ...]) -> str:
     return ""
 
 
+def _public_payload(value: Any) -> Any:
+    """Remove shadow-account material from files consumed by user interfaces."""
+    if isinstance(value, dict):
+        return {
+            key: _public_payload(item)
+            for key, item in value.items()
+            if key != "shadow_result" and not str(key).startswith("shadow_")
+        }
+    if isinstance(value, list):
+        return [_public_payload(item) for item in value]
+    return value
+
+
 def _operation_detail(
     result: Dict[str, Any],
     row: Dict[str, Any],
@@ -179,6 +192,8 @@ def _operation_detail(
         "llm_conflict": _has_llm_hold_conflict(result),
         "execution_blocked": bool(result.get("execution_blocked")),
         "wait_reasons": suppressed_reason_labels,
+        "analysis_id": str(result.get("analysis_id") or ""),
+        "decision_id": str(result.get("decision_id") or ""),
     }
 
 
@@ -291,6 +306,8 @@ def build_monitor_window_snapshot(
             "position_pct": round(pos_pct, 4),
             "target_position_pct": stock.get("target_position_pct", stock.get("target_pct")),
             "cost": _safe_num(stock.get("cost")),
+            "analysis_id": str(result.get("analysis_id") or ""),
+            "decision_id": str(result.get("decision_id") or ""),
             "entry_exit_points": ee,
             "position_exit_plan": position_exit_plan,
             "right_side_trend_gate": result.get("right_side_trend_gate", {}),
@@ -327,6 +344,7 @@ def build_monitor_window_snapshot(
                 "expected_return_pct": _safe_num(ee.get("expected_return_pct")),
                 "buy_signal_backtest": result.get("buy_signal_backtest", {}),
             },
+            "price_sentinel": _public_payload(result.get("price_sentinel") or {}),
             "operation": operation,
             "buy_signal_backtest": result.get("buy_signal_backtest", {}),
             "decision_synthesis": result.get("decision_synthesis", {}),
@@ -339,6 +357,15 @@ def build_monitor_window_snapshot(
     available_cash = max(_safe_num(cash), 0.0)
     pending_cash = max(_safe_num(t2_pending_cash), 0.0)
     total_cash = available_cash + pending_cash
+    price_sentinel_alerts = [
+        {
+            "symbol": row["symbol"],
+            "name": row["name"],
+            **dict(row.get("price_sentinel") or {}),
+        }
+        for row in rows
+        if (row.get("price_sentinel") or {}).get("triggered")
+    ]
     return {
         "version": 1,
         "generated_at": datetime.now().isoformat(timespec="seconds"),
@@ -356,11 +383,13 @@ def build_monitor_window_snapshot(
             "entry_exit_alerts": len(entry_exit_alerts),
             "suppressed": len(suppressed_alerts),
             "errors": sum(1 for row in rows if not row["success"]),
+            "price_sentinel_alerts": len(price_sentinel_alerts),
         },
         "rows": rows,
-        "actionable": actionable,
-        "entry_exit_alerts": entry_exit_alerts,
-        "suppressed_alerts": suppressed_alerts,
+        "actionable": _public_payload(actionable),
+        "entry_exit_alerts": _public_payload(entry_exit_alerts),
+        "suppressed_alerts": _public_payload(suppressed_alerts),
+        "price_sentinel_alerts": price_sentinel_alerts,
     }
 
 

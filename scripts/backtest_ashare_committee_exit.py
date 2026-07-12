@@ -339,6 +339,7 @@ def _objective_metrics(equity_curve: List[Dict[str, Any]], max_drawdown_pct: flo
             "daily_volatility_pct": 0.0,
             "downside_deviation_pct": 0.0,
             "annualized_expected_return_pct": 0.0,
+            "sortino_ratio": 0.0,
             "objective_score": 0.0,
         }
     mean = sum(daily_returns) / len(daily_returns)
@@ -347,12 +348,14 @@ def _objective_metrics(equity_curve: List[Dict[str, Any]], max_drawdown_pct: flo
     downside_variance = sum(x * x for x in downside) / max(len(downside), 1)
     annualized_expected = mean * 252.0
     annualized_downside = math.sqrt(downside_variance) * math.sqrt(252.0)
+    sortino = annualized_expected / annualized_downside if annualized_downside > 1e-12 else 0.0
     risk = max(abs(max_drawdown_pct) + annualized_downside, 0.01)
     return {
         "expected_daily_return_pct": round(mean, 6),
         "daily_volatility_pct": round(math.sqrt(variance), 6),
         "downside_deviation_pct": round(math.sqrt(downside_variance), 6),
         "annualized_expected_return_pct": round(annualized_expected, 4),
+        "sortino_ratio": round(sortino, 6),
         "objective_score": round(annualized_expected / risk, 6),
     }
 
@@ -528,17 +531,30 @@ def run_backtest(
     max_ops_per_symbol_per_day: int = 5,
     committee_sell_stop_band: float = 1.03,
     strategy_mode: str = "legacy",
+    missing_price_policy: str = "carry_forward",
 ) -> Dict[str, Any]:
+    if missing_price_policy not in {"carry_forward", "legacy_avg_cost"}:
+        raise ValueError("missing_price_policy must be carry_forward or legacy_avg_cost")
     dates = _calendar(histories, start, end)
     cash = float(initial_cash)
     positions: Dict[str, Position] = {}
     trades: List[Dict[str, Any]] = []
     equity_curve: List[Dict[str, Any]] = []
     symbol_daily_rows: List[Dict[str, Any]] = []
+    last_close_by_symbol: Dict[str, float] = {}
+    missing_held_symbol_days = 0
+    for symbol, history in histories.items():
+        prior = history[history.index < pd.to_datetime(start)]
+        if not prior.empty:
+            last_close_by_symbol[symbol] = _safe_float(prior["Close"].iloc[-1])
 
     for d in dates:
         date_str = d.strftime("%Y-%m-%d")
         rows = {s: df.loc[d] for s, df in histories.items() if d in df.index}
+        for symbol, row in rows.items():
+            close = _safe_float(row.get("Close"))
+            if close > 0:
+                last_close_by_symbol[symbol] = close
         ops_count: Dict[str, int] = {}
         signals: Dict[str, Dict[str, Any]] = {}
         if signal_cache is not None:
@@ -717,7 +733,15 @@ def run_backtest(
         symbol_market_values: Dict[str, float] = {}
         for symbol, pos in positions.items():
             row = rows.get(symbol)
-            price = _safe_float(row.get("Close")) if row is not None else pos.avg_cost
+            if row is not None:
+                price = _safe_float(row.get("Close"), last_close_by_symbol.get(symbol, pos.avg_cost))
+            else:
+                missing_held_symbol_days += 1
+                price = (
+                    pos.avg_cost
+                    if missing_price_policy == "legacy_avg_cost"
+                    else last_close_by_symbol.get(symbol, pos.avg_cost)
+                )
             value = pos.shares * price
             symbol_market_values[symbol] = value
             market_value += value
@@ -767,6 +791,9 @@ def run_backtest(
         peak = max(peak, value)
         max_dd = min(max_dd, value / peak - 1.0 if peak else 0.0)
     sell_pnls = [t.get("pnl", 0.0) for t in trades if t["side"] == "SELL"]
+    total_fees = sum(_safe_float(t.get("fee")) for t in trades)
+    traded_notional = sum(_safe_float(t.get("shares")) * _safe_float(t.get("price")) for t in trades)
+    average_equity = sum(values) / len(values) if values else initial_cash
     total_return_pct = (final_equity / initial_cash - 1.0) * 100.0
     max_drawdown_pct = max_dd * 100.0
     return_risk_ratio = total_return_pct / max(abs(max_drawdown_pct), 0.01)
@@ -782,6 +809,9 @@ def run_backtest(
         "trade_count": len(trades),
         "buy_count": sum(1 for t in trades if t["side"] == "BUY"),
         "realized_pnl": round(sum(sell_pnls), 2),
+        "total_fees_cny": round(total_fees, 2),
+        "traded_notional_cny": round(traded_notional, 2),
+        "turnover_pct": round(traded_notional / average_equity * 100.0, 4) if average_equity > 0 else 0.0,
         "win_rate": sell_stats["sell_win_rate"],
         **sell_stats,
         **sell_path_stats,
@@ -798,6 +828,8 @@ def run_backtest(
         "diagnostics": {
             "committee_sell_stop_band": round(max(1.0, committee_sell_stop_band), 4),
             "strategy_mode": strategy_mode,
+            "missing_price_policy": missing_price_policy,
+            "missing_held_symbol_days": missing_held_symbol_days,
         },
     }
 
@@ -993,6 +1025,7 @@ def optimize_exit_params(
     param_grid: List[ExitParams],
     committee_sell_stop_band: float = 1.03,
     strategy_mode: str = "legacy",
+    missing_price_policy: str = "carry_forward",
 ) -> Dict[str, Any]:
     best: Optional[Dict[str, Any]] = None
     all_results: List[Dict[str, Any]] = []
@@ -1009,6 +1042,7 @@ def optimize_exit_params(
             max_ops_per_symbol_per_day=max_ops_per_symbol_per_day,
             committee_sell_stop_band=committee_sell_stop_band,
             strategy_mode=strategy_mode,
+            missing_price_policy=missing_price_policy,
         )
         score = result["metrics"].get("policy_quality_score", result["metrics"].get("objective_score", result["metrics"]["return_risk_ratio"]))
         compact = {
@@ -1122,6 +1156,12 @@ def main() -> None:
     parser.add_argument("--max-ops", type=int, default=5)
     parser.add_argument("--committee-sell-stop-band", type=float, default=1.03)
     parser.add_argument(
+        "--missing-price-policy",
+        default="carry_forward",
+        choices=["carry_forward", "legacy_avg_cost"],
+        help="carry_forward=最近有效收盘价估值；legacy_avg_cost=旧版缺失日按成本价估值",
+    )
+    parser.add_argument(
         "--strategy-mode",
         default="legacy",
         choices=["legacy", "regime_vol_gate", "compare_regime_gate"],
@@ -1154,6 +1194,7 @@ def main() -> None:
         param_grid=param_grid,
         committee_sell_stop_band=args.committee_sell_stop_band,
         strategy_mode="legacy" if args.strategy_mode == "compare_regime_gate" else args.strategy_mode,
+        missing_price_policy=args.missing_price_policy,
     )
     if args.strategy_mode == "compare_regime_gate":
         gated = optimize_exit_params(
@@ -1168,6 +1209,7 @@ def main() -> None:
             param_grid=param_grid,
             committee_sell_stop_band=args.committee_sell_stop_band,
             strategy_mode="regime_vol_gate",
+            missing_price_policy=args.missing_price_policy,
         )
         result = {
             "method": "legacy_vs_regime_vol_gate",
@@ -1184,6 +1226,7 @@ def main() -> None:
         "max_ops_per_symbol_per_day": args.max_ops,
         "committee_sell_stop_band": args.committee_sell_stop_band,
         "strategy_mode": args.strategy_mode,
+        "missing_price_policy": args.missing_price_policy,
         "a_share_rules": {
             "lot_size": 100,
             "star_market_first_buy_lot": 200,

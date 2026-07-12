@@ -12,7 +12,9 @@ openInvest 的目标不是替你下单，而是把投资决策过程变得可追
 - 国内热门新闻发现：抓取国内新闻源和热榜，不限于股票新闻，提炼事件、A 股板块、主题和候选龙头股。
 - 风险新闻量化：对地缘冲突、制裁、供应链、政策、宏观冲击等明显危险信息，输出可解释的 A 股影响估计。
 - 双账户账本：`real` 只记录用户明确告知的真实成交，`committee` 按委员会建议做影子执行。
+- 决策审计：一次分析共享 `analysis_id`，真实/影子账户各有独立 `decision_id`；用户执行支持跨进程幂等，避免重试重复记账。
 - 盘中监控：拉取行情，跑持仓和自选标的委员会，过滤不可执行提醒，拦截涨停追买和重复同向影子交易。
+- 经验价格哨兵：积累真实 10 分钟样本后按标的/板块和时段估计 99.5% 双尾异常，只要求委员会复核并震动提醒，不直接交易。
 - 买卖点模型：计算回调买点、突破买点、止损、止盈、减仓、再入场、CVaR、ATR、收益风险比。
 - SMC 回测：支持 swing、BOS/CHOCH、FVG、流动性 sweep、ATR 止损、RR 止盈，A 股默认只做多。
 - PnL 快照：按日记录真实账户和委员会账户的收盘后盈亏，并生成基准对比图。
@@ -29,6 +31,7 @@ openInvest 的目标不是替你下单，而是把投资决策过程变得可追
 - **行情分发中间层**：`utils.market_data_provider` 提供统一的价格拉取（`fetch_prices`）、历史行情获取（`get_history_data`）以及标的代码检索（`search_symbols`）等接口。
 - **实时行情**：A 股及港股优先通过腾讯批量行情提取，失败后降级 Sina；非交易时段优先复用进程内缓存。
 - **历史行情路由**：A 股/港股会先归一化代码。A 股日线优先走东方财富 JSON，其次腾讯 K 线，最后才使用 AkShare/Sina；港股优先 AkShare，失败后走 `utils.cn_market_provider`；全球/美股/外汇等资产走 `utils.exchange_fee`（yfinance 源）。
+- **前复权一致性**：A 股缓存刷新会比较新旧重叠区间的对数价格比例，以 median/MAD 识别统一 qfq 基准平移；命中后整段替换两年历史，不把两套复权基准拼在一起。
 - **标的检索**：`utils.market_data_provider.search_symbols`（通过 `akshare` 检索）。
 - **宏观快照及数据**：`utils.market_data_provider.get_macro_snapshot` 统一聚合国内宏观数据（上证指数、北向资金、在岸人民币汇率、10年期国债收益率），支持传入 `as_of_date` 拦截历史数据以防止回测中发生数据穿越。
 - **新闻**：国内新闻聚合、热榜、RSS、DDGS/web search。
@@ -96,6 +99,10 @@ backend_err.log
 ```
 
 `jobs/market_monitor_config.example.json` 是盘中监控配置模板。真实的 `jobs/market_monitor_config.json` 可能包含现金、持仓、自选股和账户同步设置，必须留在本地。
+
+可选 HTTP 后端需要跨机器访问时，可在 `.env` 设置 `INVEST_API_TOKEN`。未设置时保持旧接口行为；设置后除 `/api/health` 外请求需带 `Authorization: Bearer <token>`。桌面远程服务器 token 不同时使用 `INVEST_REMOTE_API_TOKEN`。配置/账本覆盖前的备份默认写入已忽略的 `data/backups/`。
+
+桌面端执行“从服务器同步”时，会先下载并备份普通配置，再停止本项目的后端和后台任务以释放 Windows 下的 `accounts.db` 文件锁；账本通过校验并原子恢复后，由 `AccountLedger` 统一回写监控配置和窗口快照。同步前若检测到本机后端正在运行，完成后会通过 `scripts/start_invest_backend.py --no-window --with-backend` 静默恢复；账本失败时会明确提示“部分成功”，不会把配置同步成功误报成账本也成功。
 
 交易模式字段在本地配置中为：
 
@@ -189,6 +196,8 @@ uv run python -m jobs.pnl_snapshot
 - `POST /api/committee`：对单个标的运行投资委员会。
 - `GET /api/accounts`：查看真实账户和委员会账户。
 - `GET /api/accounts/trades`：查看账户交易流水。
+- `GET /api/accounts/real/decisions`：查看真实账户决策审计记录，不返回影子决策。
+- `POST /api/accounts/real/decisions/{decision_id}/response`：记录用户接受或拒绝某次建议。
 - `POST /api/accounts/real/trades`：记录用户明确执行的真实成交。
 - `POST /api/accounts/snapshot`：写入日度收盘 PnL 快照。
 - `GET /api/accounts/pnl`：查看账户 PnL 历史。
@@ -312,7 +321,7 @@ uv run python scripts/diagnose_ashare_sell_threshold.py --symbols "600183,002185
    ```
 3. **部署安装**（确保手机 USB 调试已开启且通过 `adb devices` 识别）：
    ```powershell
-   & "C:\Users\f1993\AppData\Local\Android\Sdk\platform-tools\adb.exe" install -r app\build\outputs\apk\debug\app-debug.apk
+   & "$env:LOCALAPPDATA\Android\Sdk\platform-tools\adb.exe" install -r app\build\outputs\apk\debug\app-debug.apk
    ```
 
 ### 业务时序流程 (Sequence Diagram)
@@ -386,6 +395,7 @@ sequenceDiagram
 - 默认生产 ledger 写入后会立刻同步 `jobs/market_monitor_config.json` 和 `data/market_monitor/latest_window.json`，让旧配置读取路径和主窗口快照跟账本保持一致。
 - 临时测试账本或工具脚本自定义 DB 路径时不会同步真实配置，避免测试数据污染本地持仓。
 - 盘中监控每个标的一次委员会调用会同时传入 `real` 和 `committee` 的账户上下文，分别得到两套独立评估；窗口和 HTTP `/api/committee` 只展示真实账户结果，影子账户结果只用于 `committee` 账本自动执行和后续胜率复盘。
+- 主窗口建议成交会携带真实账户 `decision_id`，并用 `decision_id + 方向 + 股数` 形成幂等键；同一次点击发生网络或进程重试时返回原成交，不会再次扣现金或改股数。手动交易面板仍可生成新的独立成交。
 
 ## 新闻机会发现
 
@@ -425,6 +435,15 @@ sequenceDiagram
 - SMC 回测避免 K 线前视偏差，但仍是对 SMC 概念的简化实现。
 - 盘中提醒依赖行情可用性和本地配置质量。
 - A 股真实执行还受手数、T+1、涨跌停、停牌和流动性约束，需要人工复核。
+- 盘中经验哨兵在同一标的/时段不足 200 个有效 10 分钟样本时会明确标记不可用，不使用固定 ATR 倍数伪造阈值。
+
+两个月数据完整性新旧对照：
+
+```powershell
+uv run python scripts/compare_upgrade_profitability.py --days 60
+```
+
+脚本对两边使用相同信号、生产止盈参数、10 万初始现金、万五手续费和 A 股交易约束，只比较“缺失持仓 K 线按成本价估值”与“最近有效收盘价前向估值”。首次运行会把规范化行情冻结到已忽略的 `reports/upgrade_backtest_market_snapshot.json`，后续默认复用并校验总表和逐标的 SHA-256；只有显式增加 `--refresh-snapshot` 才会换一版行情。API 鉴权、备份、决策 ID、隐私抑制和只复核不交易的价格哨兵按直接收益差 `0` 归因，避免把工程可靠性包装成策略 alpha。结果写入已忽略的 `reports/upgrade_old_new_two_month_comparison.json`。
 
 ## 文档
 

@@ -171,6 +171,7 @@ def run(
     unseen_items = [it for it in raw_items if not store.is_seen_url(it.url)]
     log.info(f"[event_watch] unseen={len(unseen_items)} / total={len(raw_items)}")
     if not unseen_items:
+        store.close()
         return {"status": "ok", "fetched": len(raw_items), "new_events": 0, "triggered": 0}
 
     normalized: List[NormalizedEvent] = normalize(unseen_items)
@@ -218,6 +219,7 @@ def run(
     log.info(f"[event_watch] triggerable={len(triggerable_events)}")
 
     if not triggerable_events:
+        store.close()
         return {
             "status": "ok",
             "fetched": len(raw_items),
@@ -250,7 +252,7 @@ def run(
         except Exception as e:
             log.warning(f"send_event_alert 失败: {type(e).__name__}: {e}")
 
-    return {
+    output = {
         "status": "ok",
         "fetched": len(raw_items),
         "new_events": len(normalized),
@@ -259,6 +261,8 @@ def run(
         "affected_symbols": affected_syms,
         "dry_run": dry_run,
     }
+    store.close()
+    return output
 
 
 def main() -> int:
@@ -270,7 +274,10 @@ def main() -> int:
 
     if args.recall:
         store = EventStore(embedding_dim=DEFAULT_DIM)
-        events = store.recall(args.recall)
+        try:
+            events = store.recall(args.recall)
+        finally:
+            store.close()
         import json
         print(json.dumps(events, ensure_ascii=False, indent=2, default=str))
         return 0

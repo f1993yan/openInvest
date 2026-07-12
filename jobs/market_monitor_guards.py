@@ -51,9 +51,10 @@ def _trade_in_recent_window(
     return ts >= cutoff
 
 
-def _recent_committee_trade(
+def _recent_account_trade(
     ledger: Any,
     *,
+    account: str,
     symbol: str,
     direction: Optional[str] = None,
     cooldown_minutes: int = AUTO_TRADE_REPEAT_COOLDOWN_MINUTES,
@@ -62,17 +63,18 @@ def _recent_committee_trade(
     if ledger is None:
         return None
     try:
-        trades = ledger.list_trades("committee", limit=200)
+        trades = ledger.list_trades(account, limit=200)
     except Exception as e:  # noqa: BLE001
-        log.warning(f"读取影子交易记录失败，跳过重复交易保护: {e}")
+        log.warning(f"读取 {account} 交易记录失败，跳过重复交易保护: {e}")
         return None
+    expected_source = "committee_auto" if account == "committee" else "user_explicit"
     for trade in trades:
         if str(trade.get("symbol", "")).upper() != symbol.upper():
             continue
         trade_direction = str(trade.get("direction", "")).upper()
         if direction and trade_direction != direction:
             continue
-        if str(trade.get("source", "")) != "committee_auto":
+        if str(trade.get("source", "")) != expected_source:
             continue
         if _trade_in_recent_window(
             trade,
@@ -83,6 +85,45 @@ def _recent_committee_trade(
     return None
 
 
+def _recent_same_direction_account_trade(
+    ledger: Any,
+    *,
+    account: str,
+    symbol: str,
+    direction: str,
+    cooldown_minutes: int = AUTO_TRADE_REPEAT_COOLDOWN_MINUTES,
+) -> Optional[Dict[str, Any]]:
+    if cooldown_minutes <= 0:
+        return None
+    return _recent_account_trade(
+        ledger,
+        account=account,
+        symbol=symbol,
+        direction=direction,
+        cooldown_minutes=cooldown_minutes,
+        trade_date=None,
+    )
+
+
+def _recent_committee_trade(
+    ledger: Any,
+    *,
+    symbol: str,
+    direction: Optional[str] = None,
+    cooldown_minutes: int = AUTO_TRADE_REPEAT_COOLDOWN_MINUTES,
+    trade_date: Optional[str] = None,
+) -> Optional[Dict[str, Any]]:
+    """Backward-compatible committee-account wrapper."""
+    return _recent_account_trade(
+        ledger,
+        account="committee",
+        symbol=symbol,
+        direction=direction,
+        cooldown_minutes=cooldown_minutes,
+        trade_date=trade_date,
+    )
+
+
 def _recent_same_direction_committee_trade(
     ledger: Any,
     *,
@@ -90,14 +131,13 @@ def _recent_same_direction_committee_trade(
     direction: str,
     cooldown_minutes: int = AUTO_TRADE_REPEAT_COOLDOWN_MINUTES,
 ) -> Optional[Dict[str, Any]]:
-    if cooldown_minutes <= 0:
-        return None
-    return _recent_committee_trade(
+    """Backward-compatible committee-account wrapper."""
+    return _recent_same_direction_account_trade(
         ledger,
+        account="committee",
         symbol=symbol,
         direction=direction,
         cooldown_minutes=cooldown_minutes,
-        trade_date=None,
     )
 
 
@@ -219,7 +259,10 @@ def apply_repeated_trade_guard(
     current_price: float,
     ledger: Any,
     entry_exit_state: Dict[str, Any],
+    account: str = "committee",
 ) -> Dict[str, Any]:
+    if account not in {"real", "committee"}:
+        raise ValueError("account must be real or committee")
     direction = _result_direction(result)
     if direction is None:
         return result
@@ -249,8 +292,9 @@ def apply_repeated_trade_guard(
     # 的重复赋值坑过——实际生效值与 memo 显示值不一致）。现在唯一来源是模块顶部
     # 的 AUTO_TRADE_REPEAT_COOLDOWN_MINUTES（env 可配，默认 240），实际过滤与
     # 下方 memo 写的 cooldown_minutes 必然同值。
-    recent_trade = _recent_same_direction_committee_trade(
+    recent_trade = _recent_same_direction_account_trade(
         ledger,
+        account=account,
         symbol=symbol,
         direction=direction,
         cooldown_minutes=AUTO_TRADE_REPEAT_COOLDOWN_MINUTES,
@@ -272,8 +316,9 @@ def apply_repeated_trade_guard(
             recent_trade=recent_trade,
         )
 
-    recent_symbol_trade = _recent_committee_trade(
+    recent_symbol_trade = _recent_account_trade(
         ledger,
+        account=account,
         symbol=symbol,
         direction=None,
         cooldown_minutes=AUTO_TRADE_REPEAT_COOLDOWN_MINUTES,

@@ -201,3 +201,31 @@ class MarketStore:
                 (symbol, date_str, close, source, high, low, volume),
             )
             self.conn.commit()
+
+    def replace_generic_history(self, symbol, rows, source="history_basis_refresh"):
+        """Atomically replace one symbol after an adjustment-basis change.
+
+        ``rows`` contains ``(date, close, high, low, volume)`` tuples.  A
+        transaction-wide delete/insert prevents readers from observing a
+        mixture of two forward-adjustment bases.
+        """
+        clean_rows = list(rows)
+        if not clean_rows:
+            raise ValueError("replacement history must not be empty")
+        with self._lock:
+            self.conn.execute("BEGIN IMMEDIATE")
+            try:
+                self.conn.execute("DELETE FROM daily_prices WHERE symbol = ?", (symbol,))
+                self.conn.executemany(
+                    """INSERT INTO daily_prices
+                       (symbol, date, close, source, high, low, volume)
+                       VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                    [
+                        (symbol, date_str, close, source, high, low, volume)
+                        for date_str, close, high, low, volume in clean_rows
+                    ],
+                )
+                self.conn.commit()
+            except Exception:
+                self.conn.rollback()
+                raise

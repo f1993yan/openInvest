@@ -31,12 +31,22 @@ def _make_row(
     hits: dict = {}
     if hit_30d is not None:
         hits["30d"] = hit_30d
+    predicted = {
+        "up": "up",
+        "bullish": "up",
+        "down": "down",
+        "bearish": "down",
+        "flat": "flat",
+        "neutral": "flat",
+    }.get(expected_direction, "flat")
+    opposite = {"up": "down", "down": "up", "flat": "up"}[predicted]
     return {
         "date": date,
         "asset": asset,           # 原始数据有此字段
         "verdict": "HOLD",        # 原始数据有此字段
         "expected_direction": expected_direction,
         "hits": hits,
+        "directions": {"30d": predicted if hit_30d else opposite} if hit_30d is not None else {},
     }
 
 
@@ -115,8 +125,8 @@ def test_aggregate_hit_rate():
 def test_aggregate_empty_hits_skipped():
     """hits 全空的记录（backtest 无数据）不计入统计"""
     rows = [
-        {"date": "2026-05-01", "expected_direction": "up", "hits": {}},      # 空 → 跳过
-        {"date": "2026-05-02", "expected_direction": "up", "hits": {"30d": True}},  # 计
+        {"date": "2026-05-01", "expected_direction": "up", "hits": {}, "directions": {}},      # 空 → 跳过
+        {"date": "2026-05-02", "expected_direction": "up", "hits": {"30d": True}, "directions": {"30d": "up"}},  # 计
     ]
     result = _aggregate(rows)
     assert result["sample_size"] == 1
@@ -192,7 +202,7 @@ def test_build_summary_writes_file(tmp_path):
     result = subprocess.run(
         [sys.executable, str(Path(__file__).parent.parent / "scripts" / "export_accuracy.py"),
          "--jsonl", str(jsonl), "--out", str(out)],
-        capture_output=True, text=True,
+        capture_output=True, text=True, encoding="utf-8", errors="replace",
     )
     assert result.returncode == 0
     assert out.exists()
@@ -227,7 +237,8 @@ def test_suppress_small_samples():
     assert res_small["by_direction"]["bullish"]["total"] == 15
     assert res_small["by_direction"]["bearish"]["total"] == 10
 
-    # 场景 2: sample_size >= 30, 但某方向 total < 30 -> 整体保留，小样本方向置为 None
+    # 场景 2: sample_size >= 30，但仅一个方向是小样本时，整体也隐藏；
+    # 否则可由整体命中数反推出该小桶的命中数。
     window_mixed = {
         "direction_hit_rate": 0.9,
         "sample_size": 35,
@@ -237,6 +248,37 @@ def test_suppress_small_samples():
         }
     }
     res_mixed = _suppress_small_samples(window_mixed)
-    assert res_mixed["direction_hit_rate"] == 0.9
+    assert res_mixed["direction_hit_rate"] is None
     assert res_mixed["by_direction"]["bullish"]["rate"] == 1.0
     assert res_mixed["by_direction"]["bearish"]["rate"] is None
+    assert res_mixed["by_direction"]["bearish"]["hit"] is None
+
+
+def test_fixed_horizon_does_not_fall_back_to_7d():
+    rows = [
+        {
+            "date": "2026-05-01",
+            "expected_direction": "up",
+            "hits": {"7d": True},
+            "directions": {"7d": "up"},
+        },
+        _make_row("2026-05-02", "up", True),
+    ]
+    result = _aggregate(rows)
+    assert result["hit_horizon"] == "30d"
+    assert result["sample_size"] == 1
+
+
+def test_base_rate_wilson_and_balanced_accuracy_use_same_sample():
+    rows = [
+        {"date": "2026-05-01", "expected_direction": "up", "hits": {"30d": True}, "directions": {"30d": "up"}},
+        {"date": "2026-05-02", "expected_direction": "up", "hits": {"30d": False}, "directions": {"30d": "down"}},
+        {"date": "2026-05-03", "expected_direction": "down", "hits": {"30d": True}, "directions": {"30d": "down"}},
+        {"date": "2026-05-04", "expected_direction": "flat", "hits": {"30d": True}, "directions": {"30d": "flat"}},
+    ]
+    result = _aggregate(rows)
+    assert result["direction_hit_rate"] == pytest.approx(0.75)
+    assert 0 < result["direction_hit_rate_wilson_lower"] < result["direction_hit_rate"]
+    assert result["balanced_accuracy"] == pytest.approx((1.0 + 0.5 + 1.0) / 3, abs=1e-4)
+    assert result["base_rate"] == {"n": 4, "up": 0.25, "down": 0.5, "flat": 0.25}
+    assert result["accuracy_edge_vs_majority"] == pytest.approx(0.25)

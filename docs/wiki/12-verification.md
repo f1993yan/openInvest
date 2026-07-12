@@ -236,6 +236,22 @@ python -m scripts.rl_optimize_prompts \
 - **paper trade simulator ≠ 真实交易**：没算滑点、税费、流动性约束
 - **未实盘验证**：所有结论来自模拟。真接入用户实盘后效果**可能不同**
 
+### 数据完整性升级的新旧对照
+
+运行：
+
+```bash
+python scripts/compare_upgrade_profitability.py --days 60
+```
+
+对照必须满足：同一 A 股池、同一日线、同一确定性信号、同一生产止盈参数、10 万初始现金、万五手续费、T+1/涨跌停/手数限制和单标的每日最多 5 次。唯一允许改变收益的是缺失持仓 K 线估值：旧版回退成本价，新版沿用最近有效收盘价且缺失日禁止成交。
+
+首次运行会生成已忽略的 `reports/upgrade_backtest_market_snapshot.json`，记录总表及逐标的 SHA-256、行数和首尾日期。后续运行默认复用该快照，载入、构造信号及两侧回测后均验证输入未变化；行情池确需更新时才显式传 `--refresh-snapshot`。比较绝对收益前应连续运行两次，并确认 `history_snapshot.snapshot_id` 和全部指标相同。
+
+报告必须同时给出总收益、最大回撤、return/risk、Sortino/下行偏差、换手、手续费、交易数，以及成对 5 日区块 bootstrap 的收益差 95% 区间。若样本中没有持仓缺失日，两边结果应严格相同；这是正确的零结果，不应把 API token、备份、decision id、隐私抑制或只复核不交易的价格哨兵包装成 alpha。
+
+固定 30 日命中率也必须等样本成熟，并同时报告同样本上涨/下跌/横盘基率、Wilson 下界、按真实类别召回率宏平均的 balanced accuracy，以及相对多数类基准的优势。禁止把 1d/7d/30d 混在一个“准确率”里。
+
 ---
 
 ## 维护规则
