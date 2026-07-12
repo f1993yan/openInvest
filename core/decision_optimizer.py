@@ -62,6 +62,9 @@ class OptimizedDecision:
     behavioral_low_confidence: bool = True
     behavioral_model: str = "none"
     behavioral_optimizer_weight: float = 0.0
+    behavioral_trailing_3m_return_pct: float = 0.0
+    behavioral_trailing_3m_hit_rate: float = 0.5
+    behavioral_trailing_3m_sample_size: int = 0
 
     def audit_text(self) -> str:
         side = "buy" if self.alloc_cny > 0 else "sell" if self.alloc_cny < 0 else "hold"
@@ -83,7 +86,10 @@ class OptimizedDecision:
             f"selected={str(self.behavioral_selected).lower()} "
             f"target_weight={self.behavioral_target_weight_pct:.2f}% "
             f"low_confidence={str(self.behavioral_low_confidence).lower()} "
-            f"optimizer_weight={self.behavioral_optimizer_weight:.3f}\n"
+            f"optimizer_weight={self.behavioral_optimizer_weight:.3f} "
+            f"trailing_3m_return={self.behavioral_trailing_3m_return_pct:+.2f}% "
+            f"trailing_3m_hit_rate={self.behavioral_trailing_3m_hit_rate:.2%} "
+            f"trailing_3m_n={self.behavioral_trailing_3m_sample_size}\n"
             f"conditional_cvar_95_loss={self.cvar_95_loss_pct:.2f}%\n"
             f"reason={self.reason}"
         )
@@ -585,4 +591,13 @@ def optimize_committee_decision(
         behavioral_low_confidence=bool(getattr(behavioral_assessment, "low_confidence", True)),
         behavioral_model=str(getattr(behavioral_assessment, "model_key", "none")),
         behavioral_optimizer_weight=anchor_lambda if use_behavioral else 0.0,
+        behavioral_trailing_3m_return_pct=_safe_float(
+            getattr(behavioral_assessment, "trailing_3m_factor_return_pct", 0.0), 0.0,
+        ),
+        behavioral_trailing_3m_hit_rate=_safe_float(
+            getattr(behavioral_assessment, "trailing_3m_hit_rate", 0.5), 0.5,
+        ),
+        behavioral_trailing_3m_sample_size=int(
+            _safe_float(getattr(behavioral_assessment, "trailing_3m_sample_size", 0), 0.0)
+        ),
     )

@@ -518,6 +518,60 @@ fun CommitteeAnalysisDialog(
                                     }
                                 }
 
+                                val behavioralMap = symbolDetails?.get("behavioral_factor") as? Map<*, *>
+                                val behavioral = resRow.behavioral_factor
+                                val factorScore = (behavioralMap?.get("score") as? Number)?.toDouble() ?: behavioral?.score
+                                val factorTarget = (behavioralMap?.get("target_weight_pct") as? Number)?.toDouble() ?: behavioral?.target_weight_pct
+                                val factorWeight = (behavioralMap?.get("optimizer_weight") as? Number)?.toDouble() ?: behavioral?.optimizer_weight
+                                val factorReturn = (behavioralMap?.get("trailing_3m_factor_return_pct") as? Number)?.toDouble() ?: behavioral?.trailing_3m_factor_return_pct
+                                val factorHit = (behavioralMap?.get("trailing_3m_hit_rate") as? Number)?.toDouble() ?: behavioral?.trailing_3m_hit_rate
+                                val factorN = (behavioralMap?.get("trailing_3m_sample_size") as? Number)?.toInt() ?: behavioral?.trailing_3m_sample_size
+                                val factorSelected = behavioralMap?.get("selected") as? Boolean ?: behavioral?.selected
+                                val factorLowConfidence = behavioralMap?.get("low_confidence") as? Boolean ?: behavioral?.low_confidence
+
+                                if (factorScore != null) {
+                                    Spacer(modifier = Modifier.height(10.dp))
+                                    HorizontalDivider(color = Color(0xFFEEF2F6))
+                                    Spacer(modifier = Modifier.height(10.dp))
+                                    Text("A股行为因子", fontSize = 11.sp, fontWeight = FontWeight.Bold, color = Color(0xFF667085))
+                                    Spacer(modifier = Modifier.height(6.dp))
+                                    Row(modifier = Modifier.fillMaxWidth()) {
+                                        Column(modifier = Modifier.weight(1f)) {
+                                            Text("因子分 / 状态", fontSize = 9.sp, color = Color(0xFF8896AB))
+                                            Text(
+                                                "${String.format("%.1f", factorScore)} · ${if (factorSelected == true) "前四" else "未入选"}",
+                                                fontSize = 11.sp,
+                                                fontWeight = FontWeight.SemiBold,
+                                                color = if (factorSelected == true) Color(0xFF067647) else Color(0xFF475467)
+                                            )
+                                        }
+                                        Column(modifier = Modifier.weight(1f)) {
+                                            Text("目标仓位 / 权重", fontSize = 9.sp, color = Color(0xFF8896AB))
+                                            Text(
+                                                "${String.format("%.1f", factorTarget ?: 0.0)}% · ${String.format("%.2f", factorWeight ?: 0.0)}",
+                                                fontSize = 11.sp,
+                                                fontWeight = FontWeight.SemiBold,
+                                                color = Color(0xFF18202B)
+                                            )
+                                        }
+                                        Column(modifier = Modifier.weight(1f)) {
+                                            Text("近3月收益 / 命中", fontSize = 9.sp, color = Color(0xFF8896AB))
+                                            Text(
+                                                "${String.format("%+.1f", factorReturn ?: 0.0)}% · ${String.format("%.0f", (factorHit ?: 0.0) * 100)}%",
+                                                fontSize = 11.sp,
+                                                fontWeight = FontWeight.SemiBold,
+                                                color = if ((factorReturn ?: 0.0) >= 0) Color(0xFF067647) else Color(0xFFB42318)
+                                            )
+                                        }
+                                    }
+                                    Text(
+                                        "三个月样本 n=${factorN ?: 0}${if (factorLowConfidence == true) " · 低置信度" else ""}",
+                                        fontSize = 9.sp,
+                                        color = if (factorLowConfidence == true) Color(0xFFB54708) else Color(0xFF667085),
+                                        modifier = Modifier.padding(top = 4.dp)
+                                    )
+                                }
+
                                 Spacer(modifier = Modifier.height(10.dp))
                                 HorizontalDivider(color = Color(0xFFEEF2F6))
                                 Spacer(modifier = Modifier.height(10.dp))
@@ -526,38 +580,40 @@ fun CommitteeAnalysisDialog(
                                 Text("进场条件 (买点)", fontSize = 11.sp, fontWeight = FontWeight.Bold, color = Color(0xFF667085))
                                 Spacer(modifier = Modifier.height(6.dp))
                                 val buy = resRow.buy_criteria
+                                val eePoints = symbolDetails?.get("entry_exit_points") as? Map<*, *>
                                 Row(modifier = Modifier.fillMaxWidth()) {
                                     Column(modifier = Modifier.weight(1f)) {
                                         Text("回踩买入价", fontSize = 9.sp, color = Color(0xFF8896AB))
-                                        val pullbackVal = buy?.pullback_price ?: 0.0
+                                        val pullbackVal = (eePoints?.get("buy_pullback_price") as? Number)?.toDouble() ?: buy?.pullback_price ?: 0.0
                                         Text(if (pullbackVal > 0) "¥${String.format("%.2f", pullbackVal)}" else "-", fontSize = 11.sp, fontWeight = FontWeight.SemiBold, color = Color(0xFF18202B))
                                     }
                                     Column(modifier = Modifier.weight(1f)) {
                                         Text("突破买入价", fontSize = 9.sp, color = Color(0xFF8896AB))
-                                        val breakoutVal = buy?.breakout_price ?: 0.0
+                                        val breakoutVal = (eePoints?.get("buy_breakout_price") as? Number)?.toDouble() ?: buy?.breakout_price ?: 0.0
                                         Text(if (breakoutVal > 0) "¥${String.format("%.2f", breakoutVal)}" else "-", fontSize = 11.sp, fontWeight = FontWeight.SemiBold, color = Color(0xFF18202B))
                                     }
                                     Column(modifier = Modifier.weight(1f)) {
                                         Text("二次探底买入价", fontSize = 9.sp, color = Color(0xFF8896AB))
-                                        val reentryVal = buy?.reentry_price ?: 0.0
+                                        val reentryVal = (eePoints?.get("reentry_price") as? Number)?.toDouble() ?: buy?.reentry_price ?: 0.0
                                         Text(if (reentryVal > 0) "¥${String.format("%.2f", reentryVal)}" else "-", fontSize = 11.sp, fontWeight = FontWeight.SemiBold, color = Color(0xFF18202B))
                                     }
                                 }
 
-                                val rrVal = buy?.reward_risk_ratio ?: 0.0
+                                val rrVal = (eePoints?.get("reward_risk_ratio") as? Number)?.toDouble() ?: buy?.reward_risk_ratio ?: 0.0
                                 if (rrVal > 0) {
                                     Spacer(modifier = Modifier.height(4.dp))
                                     Text("预计盈亏比: ${String.format("%.1f", rrVal)}", fontSize = 10.sp, color = Color(0xFF475467))
                                 }
 
-                                if (!buy?.reason.isNullOrBlank()) {
+                                val buyReason = eePoints?.get("reason") as? String ?: buy?.reason
+                                if (!buyReason.isNullOrBlank()) {
                                     Spacer(modifier = Modifier.height(4.dp))
-                                    val translatedReason = when (buy.reason) {
+                                    val translatedReason = when (buyReason) {
                                         "conditional_quantile_volatility_scaled_levels" -> "基于历史分布(分位数)与波动率(ATR)自适应计算"
                                         "missing_current_price" -> "缺少当前最新价"
                                         "atr_regime_fallback" -> "基于波动率自适应估算(回退模型)"
                                         "regime_quantile_atr_cvar" -> "基于量化模型(分位数与条件在险价值CVaR)估算"
-                                        else -> buy.reason
+                                        else -> buyReason
                                     }
                                     Text("进场理由: $translatedReason", fontSize = 10.sp, color = Color(0xFF475467))
                                 }
@@ -573,17 +629,17 @@ fun CommitteeAnalysisDialog(
                                 Row(modifier = Modifier.fillMaxWidth()) {
                                     Column(modifier = Modifier.weight(1f)) {
                                         Text("止损价", fontSize = 9.sp, color = Color(0xFF8896AB))
-                                        val stopLossVal = exit?.stop_loss_price ?: 0.0
+                                        val stopLossVal = (eePoints?.get("stop_loss_price") as? Number)?.toDouble() ?: exit?.stop_loss_price ?: 0.0
                                         Text(if (stopLossVal > 0) "¥${String.format("%.2f", stopLossVal)}" else "-", fontSize = 11.sp, fontWeight = FontWeight.SemiBold, color = Color(0xFFB42318))
                                     }
                                     Column(modifier = Modifier.weight(1f)) {
                                         Text("止盈价", fontSize = 9.sp, color = Color(0xFF8896AB))
-                                        val takeProfitVal = exit?.take_profit_price ?: 0.0
+                                        val takeProfitVal = (eePoints?.get("take_profit_price") as? Number)?.toDouble() ?: exit?.take_profit_price ?: 0.0
                                         Text(if (takeProfitVal > 0) "¥${String.format("%.2f", takeProfitVal)}" else "-", fontSize = 11.sp, fontWeight = FontWeight.SemiBold, color = Color(0xFF067647))
                                     }
                                     Column(modifier = Modifier.weight(1f)) {
                                         Text("减仓触发价", fontSize = 9.sp, color = Color(0xFF8896AB))
-                                        val trimVal = exit?.trim_price ?: 0.0
+                                        val trimVal = (eePoints?.get("trim_price") as? Number)?.toDouble() ?: exit?.trim_price ?: 0.0
                                         Text(if (trimVal > 0) "¥${String.format("%.2f", trimVal)}" else "-", fontSize = 11.sp, fontWeight = FontWeight.SemiBold, color = Color(0xFFB54708))
                                     }
                                 }

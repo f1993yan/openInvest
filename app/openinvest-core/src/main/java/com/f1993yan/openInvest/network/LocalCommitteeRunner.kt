@@ -134,7 +134,9 @@ object LocalCommitteeRunner {
                     "entry_exit_points" to map["entry_exit_points"],
                     "position_exit_policy" to map["position_exit_policy"],
                     "right_side_trend_gate" to map["right_side_trend_gate"],
-                    "optimizer_review" to map["optimizer_review"]
+                    "optimizer_review" to map["optimizer_review"],
+                    "decision_synthesis" to map["decision_synthesis"],
+                    "behavioral_factor" to map["behavioral_factor"]
                 )
 
                 val finishedResponse = CommitteeStatusResponse(

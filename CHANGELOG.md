@@ -12,6 +12,8 @@
 
 ### Improvements
 
+* **committee-display:** `decision_synthesis` 和手机格式化报告优先展示 A 股行为因子分数、是否进入前四、目标仓位、最近三个月因子收益/命中率/样本数和标的独立优化器权重，避免因子已参与优化但用户只能看到普通 30 日预期收益。
+* **android-factor-ui:** Android 委员会弹窗新增行为因子参数区，Kotlin 网络模型和本地委员会桥完整透传可选 `behavioral_factor`；旧客户端仍可忽略该对象。
 * **optimizer:** A 股行为因子的 20 日期望收益和目标仓位优先于旧的 regime/动量/RSI 技术回退；目标成员和目标权重每 5 个交易日刷新，并使用 5 个百分点免交易带抑制十分钟监控造成的换手。可靠的持仓止盈止损卖出证据仍可越过免交易带。
 * **daily-selection:** 日度选股历史窗口从 3 个月扩展到 2 年；有足够横截面和 252 日历史时，行为因子成为 A 股技术排序基座，新闻、板块资金、基本面、风险和一手资金约束继续作为独立证据。
 * **committee-api:** `CommitteeRequest` / `CommitteeResponse` 新增向后兼容的可选 `behavioral_factor` 字段；旧 App/HTTP 调用不传时可使用持仓横截面或单标的低置信度降级，非 A 股继续走原优化器。
@@ -29,11 +31,14 @@
 
 ### Bug Fixes
 
+* **android-levels:** 修复本地委员会分析完成后弹窗继续读取分析前 `HoldingRow`，导致本轮 `entry_exit_points` 已生成但回踩、突破、再入场、止损和止盈仍显示 `-` 的问题；弹窗现在优先读取本轮 `symbolSummary.entry_exit_points`。
+* **android-cache:** 修复手机委员会缓存解析器只接受 `result.by_asset`、无法解析 `run_committee_local` 单标的根 JSON 的问题。解析器改为纯 Kotlin/Gson，同时恢复买卖点、基本面、操作和行为因子字段，不再依赖 Android `org.json` 桩。
 * **windows:** 后端 UTF-8 初始化改为原地 `stdio.reconfigure()`，不再替换并关闭 pytest、IDE 或桌面宿主提供的输出流。
 * **event-store:** 修复事件任务正常返回后未关闭 SQLite 连接导致 Windows 临时数据库无法删除的问题。
 
 ### Docs
 
+* **android-debug:** 补充 APK 行为因子展示、买卖点刷新链路和真机调试数据保护红线；禁止在保存真实配置的手机上直接运行 `connectedDebugAndroidTest`，避免测试安装流程卸载主包并清除私有数据。
 * **behavioral-factor:** 新增 A 股行为因子专题文档，说明公式、三个月标的级权重、5 日生产调仓、接口兼容、状态文件、无未来数据约束，以及 20 日研究回测与 5 日生产配置不可直接等同的边界。
 * **wiki/readme:** 补充决策审计、幂等成交、经验分位数哨兵、复权拼接检测、固定期限准确率、可选 API token、安全恢复、Windows 远程同步停启顺序和可归因回测边界。
 

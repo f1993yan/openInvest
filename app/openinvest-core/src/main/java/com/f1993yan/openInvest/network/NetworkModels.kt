@@ -32,6 +32,7 @@ data class HoldingRow(
     val technical: Technical? = null,
     val operation: Operation? = null,
     val llm_review: LlmReview? = null,
+    val behavioral_factor: BehavioralFactor? = null,
     val error: String? = null,
     val success: Boolean = true,
     var _is_resolving: Boolean = false // Client side flag
@@ -105,6 +106,20 @@ data class LlmReview(
     val risk_note: String? = null,
     val execution_plan: String? = null,
     val raw_excerpt: String? = null
+)
+
+data class BehavioralFactor(
+    val model_key: String? = null,
+    val score: Double? = null,
+    val expected_return_pct: Double? = null,
+    val target_weight_pct: Double? = null,
+    val eligible: Boolean? = null,
+    val selected: Boolean? = null,
+    val low_confidence: Boolean? = null,
+    val optimizer_weight: Double? = null,
+    val trailing_3m_factor_return_pct: Double? = null,
+    val trailing_3m_hit_rate: Double? = null,
+    val trailing_3m_sample_size: Int? = null,
 )
 
 // Daily Stock Selection Models
@@ -201,4 +216,3 @@ data class CrawlerSettings(
     val target_refresh_enabled: Boolean,
     val news_refresh_enabled: Boolean
 )
-

@@ -155,7 +155,8 @@ def build_mobile_recommendation_text(
     cio_memo: str,
     is_from_cache: bool = False,
     decision_synthesis: Optional[Dict[str, Any]] = None,
-    buy_signal_backtest: Optional[Dict[str, Any]] = None
+    buy_signal_backtest: Optional[Dict[str, Any]] = None,
+    behavioral_factor: Optional[Dict[str, Any]] = None,
 ) -> str:
     current = _safe_num(current_price)
     confidence_val = _safe_num(confidence)
@@ -207,6 +208,20 @@ def build_mobile_recommendation_text(
         f"- 右侧趋势闸门: {'通过' if right_side_trend_gate.get('allow') else '未通过'} ({right_side_trend_gate.get('reason') or '未提供'}) 。",
         f"- 基本面: {fundamental_score:.0f} 分，属于{'偏强' if fundamental_score >= 70 else '一般' if fundamental_score >= 45 else '偏弱'}。"
     ]
+
+    if behavioral_factor:
+        factor_score = _safe_num(behavioral_factor.get("score"))
+        target_weight = _safe_num(behavioral_factor.get("target_weight_pct"))
+        optimizer_weight = _safe_num(behavioral_factor.get("optimizer_weight"))
+        trailing_return = _safe_num(behavioral_factor.get("trailing_3m_factor_return_pct"))
+        hit_rate = _safe_num(behavioral_factor.get("trailing_3m_hit_rate"))
+        sample_size = int(_safe_num(behavioral_factor.get("trailing_3m_sample_size")))
+        selected_text = "入选前四" if behavioral_factor.get("selected") else "未进入前四"
+        confidence_text = "低置信度" if behavioral_factor.get("low_confidence") else "有效"
+        lines.extend([
+            f"- A股行为因子: {factor_score:.1f}分，{selected_text}，目标仓位 {target_weight:.1f}%（{confidence_text}）。",
+            f"- 因子历史: 近3月 {trailing_return:+.1f}%，命中 {hit_rate * 100:.0f}% (n={sample_size})，优化权重 {optimizer_weight:.2f}。",
+        ])
 
     if decision_synthesis:
         for item in (decision_synthesis.get("evidence") or [])[:3]:
@@ -764,7 +779,8 @@ def run_committee_local(
             cio_memo=cio_memo,
             is_from_cache=False,
             decision_synthesis=decision_synthesis.as_dict(),
-            buy_signal_backtest=buy_signal_backtest.as_dict()
+            buy_signal_backtest=buy_signal_backtest.as_dict(),
+            behavioral_factor=behavioral_assessment.as_dict() if behavioral_assessment is not None else {},
         )
 
         response = {
@@ -795,6 +811,7 @@ def run_committee_local(
             "optimizer_review": optimizer_review,
             "decision_synthesis": decision_synthesis.as_dict(),
             "buy_signal_backtest": buy_signal_backtest.as_dict(),
+            "behavioral_factor": behavioral_assessment.as_dict() if behavioral_assessment is not None else {},
             "elapsed_sec": round(elapsed, 1)
         }
         return json.dumps(response, ensure_ascii=False)

@@ -106,6 +106,9 @@ def run_committee_local(
 - App 本地 wrapper 可使用 `resolved_snapshot` 作为展示兜底：当最新委员会结果缺少技术指标时，优先复用监控快照或最近缓存中的 `technical/entry_exit_points`。该兜底只补展示字段，不代表重新运行委员会，也不应触发行情同步。
 - `trading_mode` 是新增尾部可选参数，旧版 App 不传时仍按 `active_profit` 执行。该参数只进入手机本地 Python 的委员会上下文与提醒优化口径，不改变 `verdict`、`suggested_alloc_cny` 等既有字段语义。
 - `behavioral_factor` 是 A 股生产基座新增的可选审计对象。旧 App 不需要新增必填入参，也可以忽略响应中的该对象；`verdict`、`confidence`、`suggested_alloc_cny`、`entry_exit_points` 和 `position_exit_policy` 的既有类型与含义不变。`optimizer_weight` 表示标的级因子可信权重，不是建议买入比例；`target_weight_pct` 才是因子目标仓位。
+- 手机本地 `run_committee_local` 返回单标的根 JSON，部分远程任务返回 `result.by_asset.<symbol>`。Android 缓存解析器必须同时支持两种响应形状，并恢复 `entry_exit_points`、`behavioral_factor`、基本面和操作字段，不能假设本地缓存一定有 `by_asset` 包装层。
+- 委员会详情弹窗的价格线优先读取本轮 `symbolSummary.entry_exit_points`，只有本轮字段缺失时才回退 `HoldingRow.buy_criteria/exit_points`，避免 Python 已完成计算但 UI 仍显示分析前旧行数据。
+- Android 行为因子区展示 `score/selected/target_weight_pct/trailing_3m_factor_return_pct/trailing_3m_hit_rate/trailing_3m_sample_size/optimizer_weight`。字段均为可选项，缺失时应局部降级，不得隐藏已有入场/出场点或改变 verdict。
 - 桌面/告警快照可能额外包含 `alert_source="position_exit_discipline_review"`、`committee_verdict` 和 `discipline_review`。这些字段只解释“持仓纪律线触发后，历史胜率折减的卖出期望是否压过继续持有证据”，不改变 `run_committee_local` 的参数签名，也不新增 verdict 枚举；旧版 App 可以安全忽略。
 - `discipline_review` 可能额外包含 `sector_panic_guard`。该字段只说明“同板块共振杀跌且个股未显著弱于板块时，是否暂缓机械止损”，包含板块中位跌幅、下跌占比、个股相对板块 Z 值和追加的继续持有证据；客户端应按可选解释字段处理。
 - 监控快照的候选/抑制原因可能出现 `sell_waiting_for_current_exit_trigger`、`recent_opposite_real_trade_without_new_entry_exit_trigger` 或 `recent_opposite_real_trade_without_price_progress`。它们表示“没有当前卖出纪律触发”或“刚发生反向成交，重新买回/卖出还没有穿越对应价格线”，只用于解释提醒层为什么暂不升级为可执行操作。
@@ -178,3 +181,4 @@ def evaluate_alerts_local(
 2. **返回 JSON 结构的健壮性**：
    - App 侧在解析返回结果时，应使用安全的 `get` 访问字段（并配备合理的默认回退值），以防 Python 基座返回的字典中缺失某些字段导致崩溃。
    - 保持 "success" 键为布尔值，用作是否成功调用的首要判断依据。
+3. **真机数据保护**：保存真实 API Key、远程地址和本地快照的手机只允许通过 `assembleDebug` + `adb install -r` 覆盖安装。`connectedDebugAndroidTest` 可能由 Gradle/UTP 卸载目标包，只能在模拟器或专用测试机运行。

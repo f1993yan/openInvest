@@ -74,3 +74,35 @@ def test_decision_synthesis_uses_guarded_final_action_over_optimizer_raw_action(
     assert synthesis.final_action == "HOLD"
     assert synthesis.action_label == "观察/持有"
     assert any("优化器原始动作" in item for item in synthesis.conflicts)
+
+
+def test_decision_synthesis_surfaces_a_share_behavioral_parameters_first():
+    class _Opt:
+        verdict = "ACCUMULATE"
+        alloc_cny = 5000
+        confidence = 0.78
+        expected_return_pct = 3.2
+        p_directional = 0.61
+        behavioral_model = "a_share_behavioral_v1"
+        behavioral_factor_score = 82.4
+        behavioral_target_weight_pct = 24.6
+        behavioral_selected = True
+        behavioral_low_confidence = False
+        behavioral_optimizer_weight = 0.81
+        behavioral_trailing_3m_return_pct = 6.2
+        behavioral_trailing_3m_hit_rate = 0.57
+        behavioral_trailing_3m_sample_size = 63
+
+    synthesis = synthesize_decision(
+        symbol="600900",
+        optimizer=_Opt(),
+        parsed={"verdict": "ACCUMULATE", "confidence": 0.78, "alloc_cny": 5000},
+        entry_exit_points={"reward_risk_ratio": 1.9},
+        right_side_gate={"allow": True},
+        current_price=28.0,
+    )
+
+    assert synthesis.primary_reason.startswith("A股行为因子 82.4分")
+    assert "入选前四" in synthesis.evidence[0]
+    assert "近3月因子收益 +6.2%" in synthesis.evidence[1]
+    assert "优化权重 0.81" in synthesis.evidence[1]

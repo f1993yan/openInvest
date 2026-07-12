@@ -298,6 +298,7 @@ fun MainScreen(modifier: Modifier = Modifier, onSaveUrl: (String) -> Unit) {
                                 operation = parsedFields.operation,
                                 fundamental = parsedFields.fundamental,
                                 llm_review = parsedFields.llmReview,
+                                behavioral_factor = parsedFields.behavioralFactor,
                                 success = true
                             )
                         }
@@ -357,6 +358,7 @@ fun MainScreen(modifier: Modifier = Modifier, onSaveUrl: (String) -> Unit) {
                                 buy_criteria = cachedRow.buy_criteria,
                                 operation = cachedRow.operation,
                                 fundamental = cachedRow.fundamental,
+                                behavioral_factor = cachedRow.behavioral_factor,
                                 error = cachedRow.error,
                                 success = cachedRow.success
                             )
@@ -557,6 +559,7 @@ fun MainScreen(modifier: Modifier = Modifier, onSaveUrl: (String) -> Unit) {
                                     val fModel = symbolSummary?.get("fundamental_model") as? String ?: ""
                                     val fCoverage = (symbolSummary?.get("fundamental_coverage") as? Number)?.toDouble() ?: 0.0
                                     val fAnchor = (symbolSummary?.get("fundamental_anchor_multiplier") as? Number)?.toDouble() ?: 1.0
+                                    val behavioralMap = symbolSummary?.get("behavioral_factor") as? Map<*, *>
 
                                     val exitPoints = ExitPoints(
                                         stop_loss_price = (eePoints?.get("stop_loss_price") as? Number)?.toDouble(),
@@ -581,6 +584,21 @@ fun MainScreen(modifier: Modifier = Modifier, onSaveUrl: (String) -> Unit) {
                                         coverage = fCoverage,
                                         anchor_multiplier = fAnchor
                                     )
+                                    val behavioralFactor = behavioralMap?.let { b ->
+                                        BehavioralFactor(
+                                            model_key = b["model_key"] as? String,
+                                            score = (b["score"] as? Number)?.toDouble(),
+                                            expected_return_pct = (b["expected_return_pct"] as? Number)?.toDouble(),
+                                            target_weight_pct = (b["target_weight_pct"] as? Number)?.toDouble(),
+                                            eligible = b["eligible"] as? Boolean,
+                                            selected = b["selected"] as? Boolean,
+                                            low_confidence = b["low_confidence"] as? Boolean,
+                                            optimizer_weight = (b["optimizer_weight"] as? Number)?.toDouble(),
+                                            trailing_3m_factor_return_pct = (b["trailing_3m_factor_return_pct"] as? Number)?.toDouble(),
+                                            trailing_3m_hit_rate = (b["trailing_3m_hit_rate"] as? Number)?.toDouble(),
+                                            trailing_3m_sample_size = (b["trailing_3m_sample_size"] as? Number)?.toInt()
+                                        )
+                                    }
 
                                     updateSnapshotRow(row.symbol) { r ->
                                         r.copy(
@@ -588,7 +606,8 @@ fun MainScreen(modifier: Modifier = Modifier, onSaveUrl: (String) -> Unit) {
                                             exit_points = exitPoints,
                                             buy_criteria = buyCriteria,
                                             operation = operation,
-                                            fundamental = fundamental
+                                            fundamental = fundamental,
+                                            behavioral_factor = behavioralFactor
                                         )
                                     }
                                 },
@@ -1686,87 +1705,5 @@ fun MainScreen(modifier: Modifier = Modifier, onSaveUrl: (String) -> Unit) {
         )
     }
 }
-
-class ParsedCommitteeFields(
-    val exitPoints: com.f1993yan.openInvest.network.ExitPoints?,
-    val buyCriteria: com.f1993yan.openInvest.network.BuyCriteria?,
-    val operation: com.f1993yan.openInvest.network.Operation?,
-    val fundamental: com.f1993yan.openInvest.network.Fundamental?,
-    val llmReview: com.f1993yan.openInvest.network.LlmReview?
-)
-
-fun parseCachedResult(symbol: String, rawJson: String): ParsedCommitteeFields? {
-    try {
-        val root = org.json.JSONObject(rawJson)
-        val result = root.optJSONObject("result")
-        val byAsset = result?.optJSONObject("by_asset") ?: root.optJSONObject("by_asset") ?: return null
-        val cleanSym = symbol.uppercase()
-        val symbolObj = byAsset.optJSONObject(cleanSym) ?: byAsset.optJSONObject(cleanSym.split(".")[0]) ?: return null
-
-        val eePoints = symbolObj.optJSONObject("entry_exit_points")
-        val exitPoints = com.f1993yan.openInvest.network.ExitPoints(
-            stop_loss_price = eePoints?.optDouble("stop_loss_price")?.takeIf { !it.isNaN() && it > 0.0 },
-            take_profit_price = eePoints?.optDouble("take_profit_price")?.takeIf { !it.isNaN() && it > 0.0 },
-            trim_price = eePoints?.optDouble("trim_price")?.takeIf { !it.isNaN() && it > 0.0 }
-        )
-
-        val buyCriteria = com.f1993yan.openInvest.network.BuyCriteria(
-            pullback_price = eePoints?.optDouble("buy_pullback_price")?.takeIf { !it.isNaN() && it > 0.0 },
-            breakout_price = eePoints?.optDouble("buy_breakout_price")?.takeIf { !it.isNaN() && it > 0.0 },
-            reentry_price = eePoints?.optDouble("reentry_price")?.takeIf { !it.isNaN() && it > 0.0 },
-            reward_risk_ratio = eePoints?.optDouble("reward_risk_ratio")?.takeIf { !it.isNaN() && it > 0.0 },
-            reason = eePoints?.optString("reason")?.takeIf { it.isNotEmpty() }
-        )
-
-        val verdict = symbolObj.optString("verdict", "HOLD")
-        val suggestedAlloc = symbolObj.optDouble("suggested_alloc_cny", 0.0)
-
-        val triggersList = mutableListOf<com.f1993yan.openInvest.network.TriggerItem>()
-        val triggersArr = symbolObj.optJSONArray("triggers")
-        if (triggersArr != null) {
-            for (i in 0 until triggersArr.length()) {
-                val t = triggersArr.getJSONObject(i)
-                triggersList.add(
-                    com.f1993yan.openInvest.network.TriggerItem(
-                        side = t.optString("side"),
-                        kind = t.optString("kind"),
-                        level = t.optDouble("level"),
-                        price = t.optDouble("price")
-                    )
-                )
-            }
-        }
-
-        val operation = com.f1993yan.openInvest.network.Operation(
-            verdict = verdict,
-            suggested_alloc_cny = suggestedAlloc,
-            status = "monitoring",
-            triggers = triggersList
-        )
-
-        val fundamental = com.f1993yan.openInvest.network.Fundamental(
-            model = symbolObj.optString("fundamental_model"),
-            score = symbolObj.optDouble("fundamental_score", 50.0),
-            coverage = symbolObj.optDouble("fundamental_coverage", 0.0),
-            anchor_multiplier = symbolObj.optDouble("fundamental_anchor_multiplier", 1.0)
-        )
-
-        val reviewObj = symbolObj.optJSONObject("llm_review")
-        val llmReview = com.f1993yan.openInvest.network.LlmReview(
-            conclusion = reviewObj?.optString("conclusion"),
-            one_line = reviewObj?.optString("one_line"),
-            risk_note = reviewObj?.optString("risk_note"),
-            execution_plan = reviewObj?.optString("execution_plan"),
-            raw_excerpt = reviewObj?.optString("raw_excerpt")
-        )
-
-        return ParsedCommitteeFields(exitPoints, buyCriteria, operation, fundamental, llmReview)
-    } catch (e: Exception) {
-        android.util.Log.e("MainActivity", "Failed to parse cached committee result", e)
-    }
-    return null
-}
-
-
 
 // --- Settings Dialog ---

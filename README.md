@@ -322,6 +322,8 @@ uv run python scripts/diagnose_ashare_sell_threshold.py --symbols "600183,002185
 - **移动端本地 AI 投委会辩论**：点击气泡或详情中的“查看分析详情”，对未追踪的股票会自动通过网络接口解析 symbol，并在手机本地的 Chaquopy Python 环境下调用 LLM（Gemini/DeepSeek）异步执行多角色辩论与优化仓位策略。
 - **后台悬浮信号岛**：自动刷新服务在 App 退到后台后可显示系统悬浮窗，分析中展示进度，出现买卖信号时以紧凑卡片提醒；需要 Android 悬浮窗权限，可在设置中关闭。
 - **交易模式同步**：App 设置中的 `主动盈利 / 现金回收 / 主动避险` 会传入手机本地 `run_committee_local`，影响委员会提示语和提醒优化口径；旧版调用不传该参数时默认 `active_profit`。
+- **行为因子可见**：A 股委员会详情展示因子分数、前四状态、目标仓位、近三个月因子收益/命中率/样本数和标的独立优化器权重；这些字段来自可选 `behavioral_factor`，不是买入比例。
+- **买卖点实时回写**：委员会分析完成后，弹窗优先读取本轮 `entry_exit_points` 展示回踩、突破、再入场、止损和止盈；本地缓存同时兼容单标的根 JSON 与 `result.by_asset`。
 - **账户划转动画**：支持 A 股/港股 T+2 待交收资金一键确认可用，并伴随流畅的划转与可用金额递增计数动画，自动更新本地持仓配置及同步云端。
 - **选股推荐底栏**：以白底阴影精美卡片（`Card`）和薄边框形式融入整体视觉设计，并使用红/橙/灰状态点标识推荐个股的分值高低（$\ge 80$ 分为红，$\ge 60$ 分为橙）。
 
@@ -336,6 +338,7 @@ uv run python scripts/diagnose_ashare_sell_threshold.py --symbols "600183,002185
    ```powershell
    & "$env:LOCALAPPDATA\Android\Sdk\platform-tools\adb.exe" install -r app\build\outputs\apk\debug\app-debug.apk
    ```
+   保存真实设置的手机只使用 `assembleDebug` 和 `adb install -r`。不要在该设备运行 `connectedDebugAndroidTest`；Android Gradle 测试安装器可能先卸载目标包，测试 APK 又被系统确认拦截时会清除 App 私有设置和缓存。设备测试应使用模拟器或专用测试机。
 
 ### 业务时序流程 (Sequence Diagram)
 在“周末新闻与机会”中，用户点击龙头股票名，启动本地 Chaquopy 异步分析与多角色投委会辩论的完整时序图如下：

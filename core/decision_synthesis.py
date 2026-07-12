@@ -84,6 +84,24 @@ def synthesize_decision(
     llm_flags = _extract_flags(optimizer_review)
     expected_return = getattr(optimizer, "expected_return_pct", None)
     p_directional = getattr(optimizer, "p_directional", None)
+    behavioral_model = str(getattr(optimizer, "behavioral_model", "none") or "none")
+    behavioral_low_confidence = bool(getattr(optimizer, "behavioral_low_confidence", True))
+    if behavioral_model != "none":
+        factor_score = _safe_float(getattr(optimizer, "behavioral_factor_score", 0.0))
+        target_weight = _safe_float(getattr(optimizer, "behavioral_target_weight_pct", 0.0))
+        selected = bool(getattr(optimizer, "behavioral_selected", False))
+        factor_weight = _safe_float(getattr(optimizer, "behavioral_optimizer_weight", 0.0))
+        trailing_return = _safe_float(getattr(optimizer, "behavioral_trailing_3m_return_pct", 0.0))
+        trailing_hit = _safe_float(getattr(optimizer, "behavioral_trailing_3m_hit_rate", 0.5))
+        trailing_n = int(_safe_float(getattr(optimizer, "behavioral_trailing_3m_sample_size", 0)))
+        status = "入选前四" if selected else "未进入前四"
+        evidence.append(f"A股行为因子 {factor_score:.1f}分，{status}，目标仓位 {target_weight:.1f}%")
+        evidence.append(
+            f"近3月因子收益 {trailing_return:+.1f}%，命中 {trailing_hit * 100:.0f}%"
+            f"(n={trailing_n})，优化权重 {factor_weight:.2f}"
+        )
+        if behavioral_low_confidence:
+            risk_warnings.append("A股行为因子横截面或历史样本不足，本轮使用低置信度兼容结果")
     rr = _safe_float(entry_exit_points.get("reward_risk_ratio"))
     if expected_return is not None:
         evidence.append(f"优化器30日预期收益 {float(expected_return):+.1f}%")

@@ -61,6 +61,8 @@ optimizer_weight = 0.55 + 0.45 * reliability * p_positive
 - `trailing_3m_sample_size`
 - `components.trailing_3m_p_positive`
 
+委员会面向用户的综合结论会把行为因子放在普通技术证据之前，显示“因子分数、前四状态、目标仓位”和“近三个月因子收益、命中率、样本数、优化器权重”。Android 弹窗使用同一组字段单独展示。`optimizer_weight` 是优化器服从因子目标的强度，`target_weight_pct` 才是仓位，两者不得在 UI 中互换。
+
 ## 4. 收益校准与调仓
 
 行为分数不是直接的收益百分比。系统在可用历史中每 20 个交易日抽取一次点时样本，寻找和当前分数最接近的最多 40 条后续 20 日收益，并用 20 条横截面总体先验等价样本收缩：
@@ -90,6 +92,8 @@ jobs.market_monitor_runtime.run_monitor_round
 日度选股由 `core.daily_stock_selector.build_daily_selection()` 复用同一因子。历史窗口为两年；有效因子在综合分中占 40%，新闻、板块资金、基本面、路径风险、技术时点和现金可买约束仍保留。
 
 HTTP/App 接口只新增可选 `behavioral_factor` 字段，原有字段没有删除或改名。旧客户端可以忽略它。Direct 单标的调用如果无法形成至少四只股票的有效横截面，会标记 `low_confidence=true` 并使用兼容回退，不会把单票百分位伪装成前四。
+
+手机本地委员会返回单标的根 JSON，远程任务可能使用 `result.by_asset` 包装。APK 的纯 Kotlin/Gson 解析器同时接受两种结构，并把本轮 `entry_exit_points` 直接交给弹窗，保证行为因子接入不会导致回踩、突破、止损或止盈价格线在展示层丢失。
 
 ## 6. 无未来数据规则
 

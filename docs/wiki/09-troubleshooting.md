@@ -310,6 +310,26 @@ uv run pytest tests/test_xxx.py::test_yyy -v --tb=long
 
 ## 9. 应急联系 / 找历史
 
+### Android Debug APK 覆盖安装后设置丢失
+
+**症状**：真机调试后服务器地址、LLM Key、`resolved_snapshot.json` 或委员会缓存消失。
+
+**原因**：在保存真实配置的手机上运行了 `connectedDebugAndroidTest`。Gradle/UTP 可能先卸载目标主包再安装测试 APK；若系统拦截测试 APK并等待用户确认，主包已经卸载，私有数据也会被清除。
+
+**安全流程**：
+
+```powershell
+$env:JAVA_HOME="<Android Studio>/jbr"
+cd app
+.\gradlew.bat :app:testDebugUnitTest :app:assembleDebug
+adb install -r app\build\outputs\apk\debug\app-debug.apk
+```
+
+- 普通 Kotlin/Gson 解析逻辑放在 JVM 单测中验证。
+- instrumentation/Compose 设备测试只在模拟器或专用测试机运行。
+- 真机安装前确认使用 `adb install -r`，不要运行会管理安装会话的 `connectedDebugAndroidTest`。
+- 若数据已经清除，重新填写服务器地址和 LLM Key，再从远程同步配置/账本；远程数据不会因为 App 卸载而被删除。
+
 - 历史决议：`memory/daily/<date>/<symbol>.md`
 - LLM 调用 telemetry：`memory/llm_usage.jsonl`
 - Tool 调用审计：`memory/.committee/<task_id>/tool_calls.jsonl`
