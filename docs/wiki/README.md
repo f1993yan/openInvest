@@ -28,6 +28,7 @@
 5. [12-verification.md](12-verification.md) —— 实测数据 / "科学证据" / negative results
 6. [13-param-tuning-feasibility.md](13-param-tuning-feasibility.md) —— 参数调优可行性诊断 + [补充文档](13-param-tuning-feasibility-addendum.md)
 7. [adr/](adr/) —— 架构决策记录（为什么不上 Claude Agent SDK 等）
+8. [16-A 股行为因子](16-ashare-behavioral-factor.md) —— 生产横截面因子、标的级权重与回测边界
 
 ### 🎨 我是设计师 / 前端，想改 GUI
 1. [10-design-system.md](10-design-system.md) —— Token 三层 + 排版 + IA
@@ -53,6 +54,7 @@
 | 12 | [Verification 实测验证](12-verification.md) | 7 个核心主张的实测数据 + negative results + 复现命令 |
 | 13 | [参数调优可行性诊断](13-param-tuning-feasibility.md) | 50+ 硬编码常数清单 + 耦合分析 + Optuna 回顾 + sweep 策略 |
 | 15 | [App-Python 接口规范](15-app-python-interface-spec.md) | Android App 与 Python 算法基座的对外接口与字段规范 |
+| 16 | [A 股行为因子](16-ashare-behavioral-factor.md) | 生产因子公式、三个月标的级权重、5 日调仓和验证边界 |
 
 ## 架构决策记录 (ADR)
 

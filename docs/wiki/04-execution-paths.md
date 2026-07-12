@@ -152,6 +152,10 @@ start-invest-backend.bat
 核心原则：
 
 - `jobs.market_monitor_quotes.call_committee()` 直接调用 `backend.server.run_committee_direct()`，不通过 `http://127.0.0.1:8766`。
+- `jobs.market_monitor_quotes.build_behavioral_factor_context()` 在每轮委员会前只构建一次 A 股横截面。它读取两年日线，调用 `core.ashare_behavioral_factor.assess_behavioral_universe()`，并把每只标的评估作为可选 `behavioral_factor` 传给 Direct 委员会。
+- 因子前四成员与逆波动目标仓位存放在 `data/behavioral_factor_state.json`，每 5 个交易日更新。分数和最近三个月标的级证据可随新收盘数据重算，但五日内不切换目标成员；`data/` 被 git 忽略。
+- A 股优化器优先使用行为因子的经验 20 日收益和目标仓位。标的级优化器权重由最近 63 个交易日的因子方向超额收益决定，范围 `0.55~1.0`；港股等非 A 股保持原 `_estimate_expected_return_pct()` 路径。
+- 行为因子的 5 个百分点免交易带只抑制因子目标附近的反复调仓。`sell_reliability >= 0.50` 且持仓卖出效用调整至少 1 个百分点时，止盈止损风险卖出可以越过免交易带；它不把入场/出场点和持仓纪律线混为一套。
 - 每个标的一次 Direct 调用可以同时携带真实账户和影子账户上下文：`position_pct/cash/holdings` 属于 `real`，`shadow_position_pct/shadow_cash/shadow_holdings` 属于 `committee`。
 - 返回给主窗口、报告和 HTTP `/api/committee` 的是真实账户评估；`shadow_result` 只在 Python 内部给 `jobs.market_monitor_runtime` 执行影子账户，不展示给用户。
 - `jobs.market_monitor_runtime.run_monitor_round()` 是一轮盘中监控的唯一编排入口，负责行情、委员会、账本、新闻、告警和快照输出。

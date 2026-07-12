@@ -144,6 +144,31 @@ POST /api/gold/buy    POST /api/gold/sell    POST /api/gold/set    POST /api/gol
 
 ## 4. 委员会
 
+### Direct/兼容后端的 A 股行为因子字段
+
+`backend.server.CommitteeRequest` 和 `CommitteeResponse` 增加了可选对象 `behavioral_factor`。这是向后兼容扩展：旧 HTTP/App 调用可以不传，旧客户端也可以忽略响应中的该字段。
+
+监控生产路径会在同一轮 A 股横截面计算完成后传入类似结构：
+
+```json
+{
+  "model_key": "a_share_behavioral_v1",
+  "score": 82.4,
+  "expected_return_pct": 3.1,
+  "target_weight_pct": 24.6,
+  "eligible": true,
+  "selected": true,
+  "low_confidence": false,
+  "optimizer_weight": 0.81,
+  "trailing_3m_factor_return_pct": 6.2,
+  "trailing_3m_hit_rate": 0.57,
+  "trailing_3m_sample_size": 63,
+  "components": {}
+}
+```
+
+字段语义：`target_weight_pct` 是组合目标仓位，`optimizer_weight` 是该标的历史因子收益决定的优化器约束强度，两者不能互换。直接单标的调用若无法形成有效横截面会返回 `low_confidence=true`；非 A 股通常返回空对象并继续原优化器路径。
+
 ### 触发 + 状态
 
 | Method | Path | 用途 |

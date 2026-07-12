@@ -22,7 +22,7 @@ APScheduler 自动发现的定时任务。每个 `.py` 配套一个 `.yml` 描�
 | 模块 | 职责 |
 |------|------|
 | `market_monitor_common.py` | 路径、日志、交易时间常量、通用数值函数 |
-| `market_monitor_quotes.py` | 新浪行情、直接 Python 调用委员会 |
+| `market_monitor_quotes.py` | 腾讯/新浪行情、A 股行为因子横截面和 5 日目标状态、直接 Python 调用委员会 |
 | `market_monitor_notify.py` | Windows 弹框开关和摘要弹出时间规则 |
 | `market_monitor_entry_exit.py` | 买卖点连续触发状态、A 股持仓止盈止损计划 |
 | `market_monitor_guards.py` | 涨停买入保护、重复交易冷却、反向交易价格线护栏 |
@@ -33,6 +33,8 @@ APScheduler 自动发现的定时任务。每个 `.py` 配套一个 `.yml` 描�
 关键边界：
 
 - `call_committee()` 直接调用 `backend.server.run_committee_direct()`，不依赖 8766 HTTP。
+- `build_behavioral_factor_context()` 对本轮持仓与关注 A 股一次性读取两年历史，生成前四目标、逆波动仓位和每标的独立优化器权重；目标状态写入已忽略的 `data/behavioral_factor_state.json`，每 5 个交易日更新。
+- 每标的权重回看最近 63 个交易日，以五日持有块计算“入选后的横截面超额收益 / 未入选后规避的反向超额收益”，再由 `n/(n+20)` 样本可靠度与后验正收益概率确定。该权重是优化器目标仓位惩罚强度，不是建议买入比例。
 - `entry_exit_points` 是入场/出场技术参考，会随行情刷新。
 - `position_exit_plan` 是持仓后的成本锚定纪律计划，盘中只检查触发，收盘后才允许追踪止损上移。
 - `weekly_exit_param_optimization.py` 默认回看最近 62 天；写入的 `policy_quality_score` 使用 Wilson 下界胜率、保守卖出期望、profit factor 和回撤惩罚，校准已有持仓卖出/减仓提醒。
