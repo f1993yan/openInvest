@@ -1575,6 +1575,36 @@ async def get_stock_fundamental(symbol: str, market: str = "a"):
         return {"success": False, "error": str(e)}
 
 
+@app.get("/api/stock/behavioral")
+async def get_behavioral_assessment_api(symbol: str):
+    """获取指定A股的最新行为因子评估，供手机本地委员会使用"""
+    symbol = symbol.strip().upper()
+    try:
+        from pathlib import Path
+        import json
+        
+        project_root = Path(__file__).resolve().parent.parent
+        assessments_file = project_root / "data" / "behavioral_factor_assessments.json"
+        
+        if assessments_file.exists():
+            data = json.loads(assessments_file.read_text(encoding="utf-8"))
+            assessments = data.get("assessments") or {}
+            if symbol in assessments:
+                return {"success": True, "symbol": symbol, "assessment": assessments[symbol]}
+                
+        # Fallback to dynamic calculation of single symbol if not cached
+        from utils.market_data_provider import get_history_data
+        from core.ashare_behavioral_factor import assess_single_behavioral_history
+        df_2y = get_history_data(symbol, "2y")
+        if df_2y.empty:
+            return {"success": False, "error": f"No history found for symbol {symbol}"}
+            
+        assessment = assess_single_behavioral_history(symbol, df_2y)
+        return {"success": True, "symbol": symbol, "assessment": assessment.as_dict() if assessment else None}
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
 @app.get("/api/stock/macro")
 async def get_macro_snapshot_api():
     """获取宏观行情数据快照，供手机端本地分析"""

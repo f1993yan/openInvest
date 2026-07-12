@@ -429,6 +429,24 @@ def run_committee_local(
         fundamental_brief += f"\nDATA_SOURCE: remote metrics={len(auto_fundamentals)}"
         market_data += f"\n\n--- FUNDAMENTAL MODEL ---\n{fundamental_brief}"
 
+        # 3.5 拉取 A 股行为因子评估
+        behavioral_assessment = None
+        if market.lower() == "a" and len(symbol) == 6:
+            try:
+                import requests
+                url = f"http://{server_ip}:{server_port}/api/stock/behavioral?symbol={symbol}"
+                resp = requests.get(url, timeout=10)
+                if resp.status_code == 200:
+                    res = resp.json()
+                    if res.get("success") and res.get("assessment"):
+                        from core.ashare_behavioral_factor import AShareBehavioralAssessment
+                        behavioral_assessment = AShareBehavioralAssessment.from_mapping(res["assessment"])
+            except Exception as e:
+                log.warning(f"Phone fetch behavioral assessment error: {e}")
+
+        if behavioral_assessment is not None:
+            market_data += behavioral_assessment.audit_text()
+
         # 4. 获取宏观视图（含新闻）
         macro_data_str = get_macro_data()
         if news_brief:
@@ -597,6 +615,7 @@ def run_committee_local(
             conditional_return_stats=conditional_return_stats,
             fundamental_assessment=fundamental_assessment,
             position_exit_policy=position_exit_policy,
+            behavioral_assessment=behavioral_assessment,
         )
         entry_exit_plan = compute_entry_exit_points(
             symbol=symbol,

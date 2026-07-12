@@ -1,0 +1,6 @@
+name: behavioral_factor_calculation
+description: Calculate A-share behavioral factors weekly on Sundays
+schedule: "0 22 * * sun"
+timezone: Asia/Shanghai
+entry: jobs.behavioral_factor_calculation:run
+enabled: true

@@ -691,6 +691,17 @@ def get_macro_snapshot(as_of_date: Optional[str] = None) -> dict:
         # 北向资金接口可能不稳定，静默降级
         out["north_flow"] = None
 
+    import math
+    def _sanitize(d: dict) -> dict:
+        res = {}
+        for k, v in d.items():
+            if isinstance(v, float) and (math.isnan(v) or math.isinf(v)):
+                res[k] = None
+            else:
+                res[k] = v
+        return res
+
+    out = _sanitize(out)
     _MACRO_CACHE = {**out, "_ts": now}
     return out
 
