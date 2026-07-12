@@ -223,3 +223,101 @@ def test_exit_policy_sell_evidence_is_ignored_without_position():
     )
 
     assert decision.exit_policy_adjustment_pct == 0.0
+
+
+def test_a_share_behavioral_factor_replaces_old_technical_expected_return():
+    factor = SimpleNamespace(
+        low_confidence=False,
+        expected_return_pct=7.25,
+        target_weight_pct=30.0,
+        score=88.0,
+        selected=True,
+        model_key="a_share_behavioral_v1",
+        sample_size=40,
+        optimizer_weight=0.91,
+    )
+    decision = optimize_committee_decision(
+        parsed={"verdict": "SELL", "confidence": 0.9, "alloc_cny": -10_000},
+        metrics=_metrics(return_30d=-0.50, rsi14=80, price_quantile_2y=0.95),
+        symbol="600900",
+        regime_brief="REGIME: crash",
+        current_price=10.0,
+        total_assets=100_000,
+        available_cash=40_000,
+        position_pct=0.0,
+        min_lot_size=100,
+        market="a",
+        behavioral_assessment=factor,
+    )
+
+    assert decision.expected_return_pct == 7.25
+    assert decision.target_position_pct == 30.0
+    assert decision.behavioral_selected is True
+    assert abs(decision.behavioral_optimizer_weight - 0.91) < 1e-9
+    assert decision.verdict in {"BUY", "ACCUMULATE"}
+
+
+def test_non_a_share_keeps_existing_baseline_when_factor_is_supplied():
+    factor = SimpleNamespace(
+        low_confidence=False,
+        expected_return_pct=12.0,
+        target_weight_pct=35.0,
+        score=99.0,
+        selected=True,
+        model_key="a_share_behavioral_v1",
+        sample_size=40,
+    )
+    common = dict(
+        parsed={"verdict": "HOLD", "confidence": 0.5, "alloc_cny": 0},
+        metrics=_metrics(return_30d=0.02),
+        symbol="00700",
+        regime_brief="REGIME: range_bound",
+        current_price=500.0,
+        total_assets=200_000,
+        available_cash=100_000,
+        position_pct=0.0,
+        min_lot_size=100,
+        market="hk",
+    )
+    baseline = optimize_committee_decision(**common)
+    with_factor = optimize_committee_decision(**common, behavioral_assessment=factor)
+
+    assert with_factor.expected_return_pct == baseline.expected_return_pct
+    assert with_factor.target_position_pct == baseline.target_position_pct
+
+
+def test_behavioral_no_trade_band_holds_but_reliable_risk_sell_bypasses():
+    factor = SimpleNamespace(
+        low_confidence=False,
+        expected_return_pct=-4.0,
+        target_weight_pct=20.0,
+        score=70.0,
+        selected=True,
+        model_key="a_share_behavioral_v1",
+        sample_size=40,
+    )
+    common = dict(
+        parsed={"verdict": "SELL", "confidence": 0.8, "alloc_cny": -5_000},
+        metrics=_metrics(return_30d=-0.10),
+        symbol="600900",
+        regime_brief="REGIME: downtrend",
+        current_price=10.0,
+        total_assets=100_000,
+        available_cash=10_000,
+        position_pct=22.0,
+        min_lot_size=100,
+        market="a",
+        behavioral_assessment=factor,
+    )
+    held = optimize_committee_decision(**common)
+    risk_sell = optimize_committee_decision(
+        **common,
+        position_exit_policy=SimpleNamespace(
+            sell_utility_adjustment_pct=4.0,
+            sell_reliability=0.8,
+            sell_evidence_score=0.7,
+        ),
+    )
+
+    assert held.verdict == "HOLD"
+    assert risk_sell.verdict in {"TRIM", "SELL"}

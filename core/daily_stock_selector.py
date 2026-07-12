@@ -20,6 +20,7 @@ import math
 import pandas as pd
 
 from core.buy_signal_miner import BuySignalBacktestSummary, mine_historical_buy_signals
+from core.ashare_behavioral_factor import assess_behavioral_universe
 from services.news_sources import RawNewsItem
 
 
@@ -164,6 +165,10 @@ class StockSelection:
     fundamental_score: float = 50.0
     fundamental_model: str = ""
     money_flow_score: float = 0.0
+    behavioral_factor_score: float = 0.0
+    behavioral_target_weight_pct: float = 0.0
+    behavioral_selected: bool = False
+    behavioral_low_confidence: bool = True
 
 
 @dataclass(frozen=True)
@@ -197,6 +202,10 @@ def build_daily_selection(
     sector_heat = {row.sector: row.heat_score for row in sector_rows}
     flow_by_sector = {row["sector"]: row for row in flow_rows}
     flow_by_symbol: Dict[str, Dict[str, Any]] = {}
+    behavioral_assessments = assess_behavioral_universe(
+        history_by_symbol,
+        as_of=trade_date,
+    )
     for flow in flow_rows:
         for leader in flow.get("leaders") or []:
             symbol = str(leader.get("symbol") or "").strip()
@@ -292,19 +301,43 @@ def build_daily_selection(
             0.0,
             100.0,
         )
-        score = _bounded(
-            news_score * 0.34
-            + tape.tape_score * 0.20
-            + trend.alignment_score * 0.14
-            + fundamental_score * 0.14
-            + money_flow_score * 0.16
-            + model_edge_score * 0.12
-            - risk_penalty * 0.30
-            - risk_defense.risk_penalty * 0.12,
-            0.0,
-            100.0,
-        )
+        behavioral = behavioral_assessments.get(symbol)
+        if behavioral is not None and not behavioral.low_confidence:
+            # The validated A-share factor is the deterministic ranking base.
+            # News, sector flow and fundamentals remain independent evidence;
+            # short-term tape has only a small timing role.
+            score = _bounded(
+                behavioral.score * 0.40
+                + news_score * 0.18
+                + fundamental_score * 0.14
+                + money_flow_score * 0.14
+                + model_edge_score * 0.08
+                + tape.tape_score * 0.06
+                - risk_penalty * 0.25
+                - risk_defense.risk_penalty * 0.10,
+                0.0,
+                100.0,
+            )
+        else:
+            score = _bounded(
+                news_score * 0.34
+                + tape.tape_score * 0.20
+                + trend.alignment_score * 0.14
+                + fundamental_score * 0.14
+                + money_flow_score * 0.16
+                + model_edge_score * 0.12
+                - risk_penalty * 0.30
+                - risk_defense.risk_penalty * 0.12,
+                0.0,
+                100.0,
+            )
         reasons = list(bucket["reasons"])
+        if behavioral is not None:
+            reasons.append(
+                f"A股行为因子{behavioral.score:.1f}分，"
+                f"{'入选目标组合' if behavioral.selected else '未进入前四'}，"
+                f"20日经验收益{behavioral.expected_return_pct:+.2f}%"
+            )
         reasons.append(tape.interpretation)
         reasons.append(trend.interpretation)
         if fundamental.get("reason"):
@@ -344,6 +377,10 @@ def build_daily_selection(
                 fundamental_score=round(fundamental_score, 2),
                 fundamental_model=str(fundamental.get("model") or ""),
                 money_flow_score=round(money_flow_score, 2),
+                behavioral_factor_score=round(behavioral.score, 2) if behavioral else 0.0,
+                behavioral_target_weight_pct=round(behavioral.target_weight_pct, 2) if behavioral else 0.0,
+                behavioral_selected=bool(behavioral and behavioral.selected),
+                behavioral_low_confidence=bool(behavioral is None or behavioral.low_confidence),
             )
         )
 

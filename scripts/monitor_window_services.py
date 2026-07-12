@@ -1255,6 +1255,11 @@ def _run_latest_committee_for_row(row: Dict[str, Any]) -> Dict[str, Any]:
         (s for s in shadow_stocks if str(s.get("symbol") or "").upper() == symbol),
         None,
     )
+    try:
+        from jobs.market_monitor_quotes import build_behavioral_factor_context
+        behavioral_factor = build_behavioral_factor_context(stocks).get(symbol.upper())
+    except Exception:
+        behavioral_factor = None
     result = call_committee(
         symbol=symbol,
         name=str(stock.get("name") or row.get("name") or symbol),
@@ -1277,6 +1282,7 @@ def _run_latest_committee_for_row(row: Dict[str, Any]) -> Dict[str, Any]:
         shadow_holdings=build_holdings_list(shadow_stocks, symbol),
         shadow_available_cash=shadow_cash,
         shadow_t2_pending=shadow_t2_pending,
+        behavioral_factor=behavioral_factor,
     ) or {"success": False, "symbol": symbol, "error": "委员会返回空结果"}
 
     if not result.get("success"):

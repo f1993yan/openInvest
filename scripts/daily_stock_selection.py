@@ -168,7 +168,9 @@ def _load_candidate_history(items: Iterable[RawNewsItem]) -> Dict[str, Any]:
 
     def fetch_history(symbol):
         try:
-            df = get_history_data(symbol, "3mo")
+            # The production behavioral factor needs 252 sessions for its
+            # long-momentum leg and additional history for calibration.
+            df = get_history_data(symbol, "2y")
             return symbol, df
         except Exception:
             return symbol, None

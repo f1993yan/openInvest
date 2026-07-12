@@ -56,6 +56,12 @@ class OptimizedDecision:
     exit_policy_adjustment_pct: float = 0.0
     exit_policy_reliability: float = 0.0
     exit_policy_evidence_score: float = 0.0
+    behavioral_factor_score: float = 0.0
+    behavioral_target_weight_pct: float = 0.0
+    behavioral_selected: bool = False
+    behavioral_low_confidence: bool = True
+    behavioral_model: str = "none"
+    behavioral_optimizer_weight: float = 0.0
 
     def audit_text(self) -> str:
         side = "buy" if self.alloc_cny > 0 else "sell" if self.alloc_cny < 0 else "hold"
@@ -73,6 +79,11 @@ class OptimizedDecision:
             f"exit_policy_adjustment_30d={self.exit_policy_adjustment_pct:+.2f}% "
             f"exit_policy_reliability={self.exit_policy_reliability:.2f} "
             f"exit_policy_evidence={self.exit_policy_evidence_score:+.2f}\n"
+            f"behavioral_model={self.behavioral_model} score={self.behavioral_factor_score:.2f} "
+            f"selected={str(self.behavioral_selected).lower()} "
+            f"target_weight={self.behavioral_target_weight_pct:.2f}% "
+            f"low_confidence={str(self.behavioral_low_confidence).lower()} "
+            f"optimizer_weight={self.behavioral_optimizer_weight:.3f}\n"
             f"conditional_cvar_95_loss={self.cvar_95_loss_pct:.2f}%\n"
             f"reason={self.reason}"
         )
@@ -308,6 +319,7 @@ def optimize_committee_decision(
     bl_anchor_target_pct: Optional[float] = None,
     fundamental_assessment: Optional[Any] = None,
     position_exit_policy: Optional[Any] = None,
+    behavioral_assessment: Optional[Any] = None,
 ) -> OptimizedDecision:
     """Choose the executable action with maximum expected utility vs HOLD.
 
@@ -320,7 +332,19 @@ def optimize_committee_decision(
     lot_size = max(int(min_lot_size or 0), 1)
     hand_cost = price * lot_size if price > 0 else 0.0
     holding_value = max(total * _safe_float(position_pct, 0.0) / 100.0, 0.0)
-    raw_target = bl_anchor_target_pct if bl_anchor_target_pct is not None else target_position_pct
+    use_behavioral = (
+        (market or "a").lower() == "a"
+        and behavioral_assessment is not None
+        and not getattr(behavioral_assessment, "low_confidence", True)
+    )
+    behavioral_target = _safe_float(
+        getattr(behavioral_assessment, "target_weight_pct", 0.0), 0.0,
+    ) if use_behavioral else None
+    raw_target = (
+        behavioral_target
+        if behavioral_target is not None
+        else bl_anchor_target_pct if bl_anchor_target_pct is not None else target_position_pct
+    )
     bl_target = _safe_float(raw_target, _safe_float(position_pct, 0.0))
     fundamental_anchor_multiplier = 1.0
     fundamental_score = 50.0
@@ -340,7 +364,11 @@ def optimize_committee_decision(
                 -1.5,
                 1.5,
             )
-            bl_target *= fundamental_anchor_multiplier
+            # A valid A-share behavioral target already includes inverse-risk
+            # sizing and a 35% single-name cap. Fundamentals may adjust the
+            # expected return, but must not expand that portfolio target.
+            if not use_behavioral:
+                bl_target *= fundamental_anchor_multiplier
     target_pct = _clamp(bl_target / 100.0, 0.0, 1.0)
     regime = _regime_label(regime_brief)
 
@@ -361,12 +389,23 @@ def optimize_committee_decision(
             exit_policy_evidence_score=0.0,
         )
 
-    mu_pct = _estimate_expected_return_pct(
-        parsed=parsed, metrics=metrics, regime=regime,
-        regime_probability=regime_probability,
-        conditional_return_stats=conditional_return_stats,
-        fundamental_assessment=fundamental_assessment,
-    )
+    if use_behavioral:
+        # For A shares the validated cross-sectional factor replaces the old
+        # momentum/RSI/regime fallback. Fundamentals remain a bounded overlay;
+        # stop/take-profit evidence is applied separately below.
+        mu_pct = _clamp(
+            _safe_float(getattr(behavioral_assessment, "expected_return_pct", 0.0))
+            + fundamental_return_adj,
+            -15.0,
+            15.0,
+        )
+    else:
+        mu_pct = _estimate_expected_return_pct(
+            parsed=parsed, metrics=metrics, regime=regime,
+            regime_probability=regime_probability,
+            conditional_return_stats=conditional_return_stats,
+            fundamental_assessment=fundamental_assessment,
+        )
     exit_policy_adj, exit_policy_reliability, exit_policy_evidence = _exit_policy_adjustment_pct(
         position_exit_policy=position_exit_policy,
         holding_value=holding_value,
@@ -420,7 +459,23 @@ def optimize_committee_decision(
     # Black-Litterman anchor: target_position_pct is the strategic posterior
     # weight. It is a soft penalty, so strong regime-conditioned edge can still
     # justify moving away from the anchor.
-    anchor_lambda = 0.25
+    if use_behavioral:
+        configured_weight = _safe_float(
+            getattr(behavioral_assessment, "optimizer_weight", 0.0), 0.0,
+        )
+        if configured_weight > 0:
+            anchor_lambda = _clamp(configured_weight, 0.55, 1.0)
+        else:
+            # Compatibility for older callers that have not supplied the
+            # per-symbol trailing-three-month factor assessment yet.
+            factor_sample_size = max(
+                0.0,
+                _safe_float(getattr(behavioral_assessment, "sample_size", 0.0), 0.0),
+            )
+            factor_reliability = factor_sample_size / (factor_sample_size + 20.0)
+            anchor_lambda = 0.55 + 0.45 * factor_reliability
+    else:
+        anchor_lambda = 0.25
     kelly_lambda = {
         "conservative": 0.35,
         "moderate": 0.20,
@@ -469,6 +524,19 @@ def optimize_committee_decision(
     if edge <= min_edge:
         best_verdict, best_lots, best_delta, edge = "HOLD", 0, 0.0, 0.0
 
+    # The production portfolio refreshes its factor target every five sessions.
+    # target is stable between refreshes; this five-percentage-point no-trade
+    # band prevents ten-minute committee runs from churning around that target.
+    # Reliable position-risk sell evidence is deliberately allowed through.
+    if use_behavioral and abs(_safe_float(position_pct) - target_pct * 100.0) <= 5.0:
+        risk_sell_bypass = (
+            best_verdict in {"TRIM", "SELL"}
+            and exit_policy_reliability >= 0.50
+            and exit_policy_adj >= 1.0
+        )
+        if not risk_sell_bypass:
+            best_verdict, best_lots, best_delta, edge = "HOLD", 0, 0.0, 0.0
+
     alloc = int(round(best_delta))
     if best_verdict in {"BUY", "ACCUMULATE"} and alloc <= 0:
         best_verdict, best_lots, alloc, edge = "HOLD", 0, 0, 0.0
@@ -511,4 +579,10 @@ def optimize_committee_decision(
         exit_policy_adjustment_pct=exit_policy_adj,
         exit_policy_reliability=exit_policy_reliability,
         exit_policy_evidence_score=exit_policy_evidence,
+        behavioral_factor_score=_safe_float(getattr(behavioral_assessment, "score", 0.0), 0.0),
+        behavioral_target_weight_pct=_safe_float(getattr(behavioral_assessment, "target_weight_pct", 0.0), 0.0),
+        behavioral_selected=bool(getattr(behavioral_assessment, "selected", False)),
+        behavioral_low_confidence=bool(getattr(behavioral_assessment, "low_confidence", True)),
+        behavioral_model=str(getattr(behavioral_assessment, "model_key", "none")),
+        behavioral_optimizer_weight=anchor_lambda if use_behavioral else 0.0,
     )

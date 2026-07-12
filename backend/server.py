@@ -126,6 +126,10 @@ class CommitteeRequest(BaseModel):
     news_brief: str = Field("", description="当前新闻摘要，注入到宏观/CIO决策中")
     fundamentals: Dict[str, Any] = Field(default_factory=dict, description="基本面指标字典，如 roe/roic/revenue_growth/pe_ttm/pb 等")
     optimizer_review_enabled: bool = Field(True, description="是否让 LLM 对确定性优化器输出做审计评估")
+    behavioral_factor: Dict[str, Any] = Field(
+        default_factory=dict,
+        description="可选的A股行为因子横截面评估；不传时服务端使用单标的低置信度降级评估",
+    )
     # === 影子账户（Committee）字段 ===
     shadow_position_pct: float = Field(0.0, description="影子账户该股仓位百分比")
     shadow_cost: float = Field(0.0, description="影子账户成本均价")
@@ -163,6 +167,7 @@ class CommitteeResponse(BaseModel):
     optimizer_review: str = ""
     decision_synthesis: Dict[str, Any] = Field(default_factory=dict)
     buy_signal_backtest: Dict[str, Any] = Field(default_factory=dict)
+    behavioral_factor: Dict[str, Any] = Field(default_factory=dict)
     error: str = ""
     elapsed_sec: float = 0.0
     # === 影子账户结果 ===
@@ -571,6 +576,31 @@ def run_committee_direct(req: CommitteeRequest) -> CommitteeResponse:
         df_2y = get_history_data(req.symbol, "2y")
         metrics = compute_metrics(df_2y) if not df_2y.empty else {}
         regime_brief = format_regime_brief(metrics, symbol=req.symbol)
+        from core.ashare_behavioral_factor import (
+            AShareBehavioralAssessment,
+            assess_behavioral_universe,
+            assess_single_behavioral_history,
+        )
+        behavioral_assessment = None
+        if (req.market or "a").lower() == "a":
+            behavioral_assessment = AShareBehavioralAssessment.from_mapping(req.behavioral_factor)
+            if behavioral_assessment is None:
+                universe_histories = {req.symbol: df_2y}
+                for holding in req.holdings:
+                    holding_symbol = str(holding.symbol or "").strip().upper()
+                    if holding_symbol == req.symbol.upper() or not (holding_symbol.isdigit() and len(holding_symbol) == 6):
+                        continue
+                    try:
+                        holding_history = get_history_data(holding_symbol, "2y")
+                        if holding_history is not None and not holding_history.empty:
+                            universe_histories[holding_symbol] = holding_history
+                    except Exception:
+                        continue
+                if len(universe_histories) >= 4:
+                    behavioral_assessment = assess_behavioral_universe(universe_histories).get(req.symbol.upper())
+                if behavioral_assessment is None:
+                    behavioral_assessment = assess_single_behavioral_history(req.symbol, df_2y)
+            market_data += behavioral_assessment.audit_text()
         from core.buy_signal_miner import mine_historical_buy_signals
         buy_signal_backtest = mine_historical_buy_signals(req.symbol, df_2y)
 
@@ -677,6 +707,7 @@ def run_committee_direct(req: CommitteeRequest) -> CommitteeResponse:
                 news_brief=req.news_brief,
                 fundamentals=req.fundamentals,
                 optimizer_review_enabled=req.optimizer_review_enabled,
+                behavioral_factor=req.behavioral_factor,
             )
             p_summary = _build_portfolio_summary(temp_req)
 
@@ -749,6 +780,7 @@ def run_committee_direct(req: CommitteeRequest) -> CommitteeResponse:
                 conditional_return_stats=conditional_return_stats,
                 fundamental_assessment=fundamental_assessment,
                 position_exit_policy=p_exit_policy,
+                behavioral_assessment=behavioral_assessment,
             )
 
             entry_exit_plan = compute_entry_exit_points(
@@ -874,6 +906,7 @@ def run_committee_direct(req: CommitteeRequest) -> CommitteeResponse:
                 "optimizer_review": optimizer_review,
                 "decision_synthesis": decision_synthesis,
                 "buy_signal_backtest": buy_signal_backtest,
+                "behavioral_factor": behavioral_assessment,
             }
 
         # 6. 跑真实账户（Real）的评估
@@ -927,6 +960,10 @@ def run_committee_direct(req: CommitteeRequest) -> CommitteeResponse:
                     "optimizer_review": shadow_res["optimizer_review"],
                     "decision_synthesis": shadow_res["decision_synthesis"].as_dict(),
                     "buy_signal_backtest": shadow_res["buy_signal_backtest"].as_dict(),
+                    "behavioral_factor": (
+                        shadow_res["behavioral_factor"].as_dict()
+                        if shadow_res.get("behavioral_factor") is not None else {}
+                    ),
                 }
             else:
                 log.warning(f"影子账户委员会评估失败: {shadow_res.get('error')}")
@@ -981,6 +1018,10 @@ def run_committee_direct(req: CommitteeRequest) -> CommitteeResponse:
             optimizer_review=real_res["optimizer_review"],
             decision_synthesis=real_res["decision_synthesis"].as_dict(),
             buy_signal_backtest=real_res["buy_signal_backtest"].as_dict(),
+            behavioral_factor=(
+                real_res["behavioral_factor"].as_dict()
+                if real_res.get("behavioral_factor") is not None else {}
+            ),
             elapsed_sec=round(elapsed, 1),
             shadow_result=shadow_result_dict,
         )

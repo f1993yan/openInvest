@@ -37,7 +37,7 @@ from jobs.market_monitor_notify import (
     send_windows_toast,
     should_send_monitor_summary_popup,
 )
-from jobs.market_monitor_quotes import call_committee, fetch_sina_prices
+from jobs.market_monitor_quotes import build_behavioral_factor_context, call_committee, fetch_sina_prices
 from jobs.market_monitor_snapshot import build_monitor_window_snapshot, write_monitor_window_snapshot, write_report
 from jobs.trading_mode import DEFAULT_TRADING_MODE, normalize_trading_mode
 
@@ -333,6 +333,12 @@ def run_monitor_round():
     all_stocks = holdings + watchlist
     all_symbols = [s["symbol"] for s in all_stocks]
     entry_exit_state_before_round = load_entry_exit_alert_state()
+    try:
+        behavioral_factors = build_behavioral_factor_context(all_stocks)
+        log.info(f"A股行为因子横截面已更新: {len(behavioral_factors)} 只")
+    except Exception as e:
+        behavioral_factors = {}
+        log.warning(f"A股行为因子横截面不可用，委员会将使用兼容降级模型: {e}")
 
     # 1. 拉取行情
     log.info(f"拉取 {len(all_symbols)} 只标的最新行情...")
@@ -437,6 +443,7 @@ def run_monitor_round():
             shadow_holdings=shadow_other_holdings,
             shadow_available_cash=shadow_available_cash,
             shadow_t2_pending=shadow_t2_pending,
+            behavioral_factor=behavioral_factors.get(str(sym).upper()),
         )
         if isinstance(result, dict):
             result["price_sentinel"] = sentinel_status
