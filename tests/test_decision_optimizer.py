@@ -168,14 +168,14 @@ def test_fundamental_assessment_soft_adjusts_black_litterman_anchor():
     assert "fundamental_model=growth_innovation" in decision.audit_text()
 
 
-def test_exit_policy_sell_evidence_can_shift_existing_position_to_trim():
+def test_exit_policy_sell_evidence_is_ignored_for_existing_position():
     policy = SimpleNamespace(
         sell_utility_adjustment_pct=8.0,
         sell_reliability=0.80,
         sell_evidence_score=0.65,
     )
 
-    decision = optimize_committee_decision(
+    common = dict(
         parsed={"verdict": "HOLD", "confidence": 0.55, "alloc_cny": 0},
         metrics=_metrics(
             atr_pct=2.0,
@@ -192,13 +192,14 @@ def test_exit_policy_sell_evidence_can_shift_existing_position_to_trim():
         position_pct=25.0,
         target_position_pct=25.0,
         min_lot_size=100,
-        position_exit_policy=policy,
     )
+    baseline = optimize_committee_decision(**common)
+    decision = optimize_committee_decision(**common, position_exit_policy=policy)
 
-    assert decision.verdict in {"TRIM", "SELL"}
-    assert decision.alloc_cny < 0
-    assert decision.exit_policy_adjustment_pct > 0
-    assert "exit_policy_adjustment_30d=" in decision.audit_text()
+    assert decision.verdict == baseline.verdict
+    assert decision.alloc_cny == baseline.alloc_cny
+    assert decision.expected_return_pct == baseline.expected_return_pct
+    assert decision.exit_policy_adjustment_pct == 0.0
 
 
 def test_exit_policy_sell_evidence_is_ignored_without_position():
@@ -286,7 +287,43 @@ def test_non_a_share_keeps_existing_baseline_when_factor_is_supplied():
     assert with_factor.target_position_pct == baseline.target_position_pct
 
 
-def test_behavioral_no_trade_band_holds_but_reliable_risk_sell_bypasses():
+def test_production_a_share_fails_closed_without_valid_behavioral_factor():
+    common = dict(
+        parsed={"verdict": "BUY", "confidence": 0.9, "alloc_cny": 20_000},
+        metrics=_metrics(return_30d=0.20),
+        symbol="600900",
+        regime_brief="REGIME: uptrend",
+        current_price=10.0,
+        total_assets=100_000,
+        available_cash=50_000,
+        position_pct=12.0,
+        min_lot_size=100,
+        market="a",
+        require_a_share_behavioral=True,
+    )
+
+    missing = optimize_committee_decision(**common)
+    low_confidence = optimize_committee_decision(
+        **common,
+        behavioral_assessment=SimpleNamespace(
+            low_confidence=True,
+            score=70.0,
+            target_weight_pct=20.0,
+            selected=True,
+            model_key="a_share_behavioral_v1",
+        ),
+    )
+
+    assert missing.verdict == "WAIT"
+    assert missing.alloc_cny == 0
+    assert missing.target_position_pct == 12.0
+    assert missing.reason == "a_share_behavioral_factor_unavailable"
+    assert low_confidence.verdict == "WAIT"
+    assert low_confidence.alloc_cny == 0
+    assert low_confidence.reason == "a_share_behavioral_factor_unavailable"
+
+
+def test_behavioral_no_trade_band_ignores_retired_exit_policy():
     factor = SimpleNamespace(
         low_confidence=False,
         expected_return_pct=-4.0,
@@ -320,4 +357,6 @@ def test_behavioral_no_trade_band_holds_but_reliable_risk_sell_bypasses():
     )
 
     assert held.verdict == "HOLD"
-    assert risk_sell.verdict in {"TRIM", "SELL"}
+    assert risk_sell.verdict == held.verdict
+    assert risk_sell.alloc_cny == held.alloc_cny
+    assert risk_sell.exit_policy_adjustment_pct == 0.0

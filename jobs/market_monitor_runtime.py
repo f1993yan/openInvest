@@ -117,8 +117,7 @@ def apply_sector_cache_to_stocks(
     """Return runtime stock rows whose sector matches weekly Eastmoney mapping.
 
     This keeps config/ledger files untouched while making committee context,
-    position_exit_plan policy lookup, alert distribution, and monitor-window
-    display use the same sector key as weekly_exit_param_optimization.py.
+    alert distribution, and monitor-window display use the same sector key.
     """
     out: List[Dict[str, Any]] = []
     for stock in stocks:

@@ -45,12 +45,16 @@ def _env_float(key: str, default: float) -> float:
 
 
 def production_exit_params() -> ExitParams:
+    """Return frozen research-only exit assumptions.
+
+    Production no longer reads or applies cost-anchored exit parameters.
+    """
     return ExitParams(
-        max_loss_pct=_env_float("INVEST_A_SHARE_POSITION_MAX_LOSS_PCT", 8.0),
-        stop_atr_mult=_env_float("INVEST_A_SHARE_POSITION_STOP_ATR_MULT", 2.0),
-        take_profit_r1=_env_float("INVEST_A_SHARE_POSITION_TAKE_PROFIT_R1", 1.5),
-        take_profit_r2=_env_float("INVEST_A_SHARE_POSITION_TAKE_PROFIT_R2", 2.5),
-        trailing_atr_mult=_env_float("INVEST_A_SHARE_POSITION_TRAIL_ATR_MULT", 2.8),
+        max_loss_pct=8.0,
+        stop_atr_mult=2.0,
+        take_profit_r1=1.5,
+        take_profit_r2=2.5,
+        trailing_atr_mult=2.8,
         min_score_to_buy=_env_float("INVEST_A_SHARE_MIN_SCORE_TO_BUY", 60.0),
     )
 

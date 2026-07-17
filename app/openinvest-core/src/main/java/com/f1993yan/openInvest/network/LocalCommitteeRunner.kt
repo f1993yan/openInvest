@@ -10,6 +10,14 @@ object LocalCommitteeRunner {
     private const val TAG = "LocalCommitteeRunner"
     private val gson = Gson()
 
+    private fun normalizeTradingMode(value: String?): String {
+        val text = value?.trim()?.lowercase().orEmpty()
+        return when (text) {
+            "cash_recovery", "cash", "现金回收", "主动避险", "risk_off", "bear", "defensive" -> "cash_recovery"
+            else -> "active_profit"
+        }
+    }
+
     /**
      * Executes the investment committee debate locally on the phone's Chaquopy runtime.
      * It replicates the server's API but runs it in-process.
@@ -45,7 +53,7 @@ object LocalCommitteeRunner {
         val apiKey = prefs.getString("llm_api_key", "") ?: ""
         val model = prefs.getString("llm_model", "gemini-2.5-pro") ?: "gemini-2.5-pro"
         val llmBaseUrl = prefs.getString("llm_base_url", "") ?: ""
-        val tradingMode = prefs.getString("trading_mode", "active_profit") ?: "active_profit"
+        val tradingMode = normalizeTradingMode(prefs.getString("trading_mode", "active_profit"))
 
         // Extract server IP and port from backend URL to pass to python for macro/history queries
         val backendUrl = NetworkClient.getBaseUrl()
@@ -60,12 +68,6 @@ object LocalCommitteeRunner {
         Thread {
             try {
                 val py = Python.getInstance()
-                val exitPolicies = prefs.getString("invest_a_share_sector_exit_policies", "") ?: ""
-                try {
-                    py.getModule("os")?.get("environ")?.put("INVEST_A_SHARE_SECTOR_EXIT_POLICIES", exitPolicies)
-                } catch (e: Exception) {
-                    Log.w(TAG, "Failed to set INVEST_A_SHARE_SECTOR_EXIT_POLICIES in python environment", e)
-                }
                 val pyModule = py.getModule("utils.phone_committee")
 
                 Log.d(TAG, "Calling run_committee_local for $symbol ($name) with base_url: $llmBaseUrl and trading_mode: $tradingMode")
@@ -176,13 +178,6 @@ object LocalCommitteeRunner {
         Thread {
             try {
                 val py = Python.getInstance()
-                val prefs = context.getSharedPreferences("open_invest_prefs", Context.MODE_PRIVATE)
-                val exitPolicies = prefs.getString("invest_a_share_sector_exit_policies", "") ?: ""
-                try {
-                    py.getModule("os")?.get("environ")?.put("INVEST_A_SHARE_SECTOR_EXIT_POLICIES", exitPolicies)
-                } catch (e: Exception) {
-                    Log.w(TAG, "Failed to set INVEST_A_SHARE_SECTOR_EXIT_POLICIES in python environment", e)
-                }
                 val pyModule = py.getModule("utils.phone_committee")
 
                 val pyResult = pyModule.callAttr(

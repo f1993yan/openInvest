@@ -470,8 +470,6 @@ def _dialog_row_from_committee_result(row: Dict[str, Any], result: Dict[str, Any
             "reason": ee.get("reason", ""),
         }
         out["entry_exit_points"] = ee
-    if result.get("position_exit_policy"):
-        out["position_exit_plan"] = result.get("position_exit_policy")
     if result.get("right_side_trend_gate"):
         out["right_side_trend_gate"] = result.get("right_side_trend_gate")
     if result.get("fundamental_score") is not None:

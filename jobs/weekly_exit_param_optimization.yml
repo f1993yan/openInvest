@@ -1,6 +1,0 @@
-﻿name: weekly_exit_param_optimization
-description: 每周用最近一个月A股数据离散优化持仓止盈止损参数，并写回本地 .env
-schedule: "0 20 * * sun"
-timezone: Asia/Shanghai
-entry: jobs.weekly_exit_param_optimization:run
-enabled: true

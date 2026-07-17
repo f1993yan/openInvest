@@ -91,7 +91,11 @@ def _suppressed_details_by_symbol(suppressed_alerts: List[Dict[str, Any]]) -> Di
         symbol = str(item.get("symbol") or "").upper()
         if not symbol:
             continue
-        if item.get("discipline_review") and symbol not in out:
+        if (
+            item.get("discipline_review")
+            and str(item.get("alert_source") or "") != "position_exit_discipline_review"
+            and symbol not in out
+        ):
             out[symbol] = item
     return out
 
@@ -126,6 +130,8 @@ def _operation_detail(
 ) -> Dict[str, Any]:
     symbol = str(result.get("symbol") or row.get("symbol") or "").upper()
     action_row = actionable.get(symbol)
+    if action_row and str(action_row.get("alert_source") or "") == "position_exit_discipline_review":
+        action_row = None
     suppressed_detail = None
     if suppressed_reasons and isinstance(suppressed_reasons, dict):
         suppressed_detail = suppressed_reasons
@@ -135,16 +141,24 @@ def _operation_detail(
     verdict = str((action_row or result).get("verdict") or "UNKNOWN").upper()
     committee_verdict = str(
         (action_row or {}).get("committee_verdict")
-        or (action_row or {}).get("discipline_review", {}).get("committee_verdict")
         or result.get("verdict")
         or "UNKNOWN"
     ).upper()
     alloc_source = action_row if action_row else result
     alloc = _safe_num(alloc_source.get("suggested_alloc_cny"))
     triggers = row.get("triggers") or []
-    if action_row:
+    behavioral = result.get("behavioral_factor") or {}
+    factor_unavailable = (
+        str(result.get("market") or "a").lower() in {"a", "cn", "ashare"}
+        and verdict in {"WAIT", "UNCLEAR"}
+        and bool(behavioral.get("low_confidence", True))
+    )
+    if factor_unavailable:
+        status = "factor_unavailable"
+        reason = str(behavioral.get("reason") or "behavioral_cross_section_or_history_unavailable")
+    elif action_row:
         status = "action_required"
-        reason = "selected_by_position_exit_discipline" if action_row.get("discipline_review") else "selected_by_cash_risk_optimizer"
+        reason = "selected_by_cash_risk_optimizer"
     elif row.get("confirmed"):
         status = "trigger_confirmed"
         reason = "entry_exit_price_confirmed_two_rounds"
@@ -166,11 +180,6 @@ def _operation_detail(
     else:
         status = "error"
         reason = str(result.get("error") or "analysis_failed")
-    discipline_review = {}
-    if action_row:
-        discipline_review = action_row.get("discipline_review") or {}
-    elif suppressed_detail:
-        discipline_review = suppressed_detail.get("discipline_review") or {}
     return {
         "status": status,
         "reason": reason,
@@ -187,7 +196,7 @@ def _operation_detail(
         "alert_score": None if not action_row else round(_safe_num(action_row.get("alert_score")), 2),
         "triggers": triggers,
         "alert_source": "" if not action_row else str(action_row.get("alert_source") or ""),
-        "discipline_review": discipline_review,
+        "discipline_review": {},
         "confirmed": bool(row.get("confirmed")),
         "llm_conflict": _has_llm_hold_conflict(result),
         "execution_blocked": bool(result.get("execution_blocked")),
@@ -243,9 +252,6 @@ def build_monitor_window_snapshot(
         price_info = price_by_symbol.get(symbol, {})
         row = watch_by_symbol.get(symbol, {})
         ee = result.get("entry_exit_points") or row.get("entry_exit_points") or {}
-        position_exit_plan = row.get("position_exit_plan") or (
-            (result.get("position_exit_plan") or {}) if isinstance(result, dict) else {}
-        )
         units = _safe_num(stock.get("units"))
         pos_pct = _safe_num(stock.get("position_pct"))
         cost = _safe_num(stock.get("cost"))
@@ -255,31 +261,13 @@ def build_monitor_window_snapshot(
             pos_pct = (units * cost) / total_assets * 100.0
 
         is_holding = pos_pct > 0 or units > 0
-        if is_holding and position_exit_plan:
-            exit_points = {
-                "stop_loss_price": _safe_num(
-                    position_exit_plan.get("effective_stop_price"),
-                    _safe_num(position_exit_plan.get("hard_stop_price")),
-                ),
-                "take_profit_price": _safe_num(position_exit_plan.get("take_profit_1_price")),
-                "take_profit_2_price": _safe_num(position_exit_plan.get("take_profit_2_price")),
-                "trim_price": _safe_num(position_exit_plan.get("trim_price")),
-                "trailing_stop_price": _safe_num(position_exit_plan.get("trailing_stop_price")),
-                "hard_stop_price": _safe_num(position_exit_plan.get("hard_stop_price")),
-                "plan_type": position_exit_plan.get("plan_type", "a_share_position_exit"),
-                "locked_intraday": bool(position_exit_plan.get("locked_intraday", True)),
-                "created_at": position_exit_plan.get("created_at", ""),
-                "last_updated_after_close": position_exit_plan.get("last_updated_after_close", ""),
-                "reason": position_exit_plan.get("reason", ""),
-            }
-        else:
-            exit_points = {
-                "stop_loss_price": _safe_num(ee.get("stop_loss_price")),
-                "take_profit_price": _safe_num(ee.get("take_profit_price")),
-                "trim_price": _safe_num(ee.get("trim_price")),
-                "plan_type": "pre_trade_estimate",
-                "locked_intraday": False,
-            }
+        exit_points = {
+            "stop_loss_price": _safe_num(ee.get("stop_loss_price")),
+            "take_profit_price": _safe_num(ee.get("take_profit_price")),
+            "trim_price": _safe_num(ee.get("trim_price")),
+            "plan_type": "pre_trade_estimate",
+            "locked_intraday": False,
+        }
         suppressed_context: Any = suppressed_by_symbol.get(symbol, [])
         if symbol in suppressed_details:
             suppressed_context = {
@@ -309,8 +297,9 @@ def build_monitor_window_snapshot(
             "analysis_id": str(result.get("analysis_id") or ""),
             "decision_id": str(result.get("decision_id") or ""),
             "entry_exit_points": ee,
-            "position_exit_plan": position_exit_plan,
+            "position_exit_plan": {},
             "right_side_trend_gate": result.get("right_side_trend_gate", {}),
+            "behavioral_factor": result.get("behavioral_factor", {}),
             "price": {
                 "current": _safe_num(price_info.get("price"), _safe_num(ee.get("current_price"))),
                 "prev_close": _safe_num(price_info.get("prev_close")),

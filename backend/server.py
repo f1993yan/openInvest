@@ -211,6 +211,92 @@ CACHE_DIR = _PROJECT_ROOT / "data" / "committee_cache"
 MONITOR_CONFIG_PATH = _PROJECT_ROOT / "jobs" / "market_monitor_config.json"
 
 
+def _behavioral_universe_rows(
+    symbol: str,
+    *,
+    name: str = "",
+    holdings: Optional[List[Any]] = None,
+) -> List[Dict[str, Any]]:
+    """Collect target, account holdings, and configured watchlist for factor repair."""
+    rows: List[Dict[str, Any]] = [{"symbol": symbol, "name": name or symbol, "market": "a"}]
+
+    def append_row(item: Any) -> None:
+        if isinstance(item, dict):
+            value = item
+        else:
+            value = {
+                "symbol": getattr(item, "symbol", ""),
+                "name": getattr(item, "name", ""),
+                "market": getattr(item, "market", "a"),
+            }
+        candidate = str(value.get("symbol") or "").strip().upper()
+        digits = "".join(char for char in candidate if char.isdigit())
+        if len(digits) == 6:
+            candidate = digits
+        market = str(value.get("market") or "a").strip().lower()
+        if candidate.isdigit() and len(candidate) == 6 and market in {"a", "cn", "ashare", "sh", "sz"}:
+            rows.append({**value, "symbol": candidate, "market": "a"})
+
+    for holding in holdings or []:
+        append_row(holding)
+    try:
+        if MONITOR_CONFIG_PATH.exists():
+            config = json.loads(MONITOR_CONFIG_PATH.read_text(encoding="utf-8"))
+            for key in ("holdings", "watchlist"):
+                for item in config.get(key) or []:
+                    append_row(item)
+    except Exception as exc:  # noqa: BLE001
+        log.warning(f"行为因子补全读取监控配置失败: {type(exc).__name__}: {exc}")
+
+    deduped: Dict[str, Dict[str, Any]] = {}
+    for row in rows:
+        candidate = str(row.get("symbol") or "").upper()
+        deduped[candidate] = {**deduped.get(candidate, {}), **row}
+    return list(deduped.values())
+
+
+def _resolve_a_share_behavioral_assessment(
+    symbol: str,
+    *,
+    name: str = "",
+    provided: Optional[Dict[str, Any]] = None,
+    holdings: Optional[List[Any]] = None,
+    target_history: Any = None,
+) -> Any:
+    """Repair a missing factor from the full local A-share cross-section."""
+    from core.ashare_behavioral_factor import (
+        AShareBehavioralAssessment,
+        assess_single_behavioral_history,
+    )
+
+    assessment = AShareBehavioralAssessment.from_mapping(provided or {})
+    if assessment is not None and not assessment.low_confidence:
+        return assessment
+    try:
+        from jobs.market_monitor_quotes import build_behavioral_factor_context
+
+        context = build_behavioral_factor_context(
+            _behavioral_universe_rows(symbol, name=name, holdings=holdings),
+        )
+        repaired = AShareBehavioralAssessment.from_mapping(context.get(symbol.upper()) or {})
+        if repaired is not None and not repaired.low_confidence:
+            return repaired
+        if repaired is not None:
+            assessment = repaired
+    except Exception as exc:  # noqa: BLE001
+        log.warning(f"A股行为因子横截面补全失败 {symbol}: {type(exc).__name__}: {exc}")
+
+    if assessment is not None:
+        return assessment
+    if target_history is not None and not getattr(target_history, "empty", True):
+        return assess_single_behavioral_history(symbol, target_history)
+    return AShareBehavioralAssessment(
+        symbol=symbol.upper(),
+        low_confidence=True,
+        reason="behavioral_cross_section_or_history_unavailable",
+    )
+
+
 def _save_committee_cache(**kwargs):
     """二进制缓存委员会分析结果"""
     try:
@@ -576,30 +662,15 @@ def run_committee_direct(req: CommitteeRequest) -> CommitteeResponse:
         df_2y = get_history_data(req.symbol, "2y")
         metrics = compute_metrics(df_2y) if not df_2y.empty else {}
         regime_brief = format_regime_brief(metrics, symbol=req.symbol)
-        from core.ashare_behavioral_factor import (
-            AShareBehavioralAssessment,
-            assess_behavioral_universe,
-            assess_single_behavioral_history,
-        )
         behavioral_assessment = None
         if (req.market or "a").lower() == "a":
-            behavioral_assessment = AShareBehavioralAssessment.from_mapping(req.behavioral_factor)
-            if behavioral_assessment is None:
-                universe_histories = {req.symbol: df_2y}
-                for holding in req.holdings:
-                    holding_symbol = str(holding.symbol or "").strip().upper()
-                    if holding_symbol == req.symbol.upper() or not (holding_symbol.isdigit() and len(holding_symbol) == 6):
-                        continue
-                    try:
-                        holding_history = get_history_data(holding_symbol, "2y")
-                        if holding_history is not None and not holding_history.empty:
-                            universe_histories[holding_symbol] = holding_history
-                    except Exception:
-                        continue
-                if len(universe_histories) >= 4:
-                    behavioral_assessment = assess_behavioral_universe(universe_histories).get(req.symbol.upper())
-                if behavioral_assessment is None:
-                    behavioral_assessment = assess_single_behavioral_history(req.symbol, df_2y)
+            behavioral_assessment = _resolve_a_share_behavioral_assessment(
+                req.symbol,
+                name=req.name,
+                provided=req.behavioral_factor,
+                holdings=req.holdings,
+                target_history=df_2y,
+            )
             market_data += behavioral_assessment.audit_text()
         from core.buy_signal_miner import mine_historical_buy_signals
         buy_signal_backtest = mine_historical_buy_signals(req.symbol, df_2y)
@@ -711,17 +782,7 @@ def run_committee_direct(req: CommitteeRequest) -> CommitteeResponse:
             )
             p_summary = _build_portfolio_summary(temp_req)
 
-            from core.position_exit_policy import load_position_exit_policy
-            p_exit_policy = load_position_exit_policy(sector=req.sector)
-            p_exit_policy_text = p_exit_policy.audit_text(
-                symbol=req.symbol,
-                market=req.market,
-                is_holding=position_pct_val > 0,
-                cost=cost_val,
-                current_price=current_price or 0.0,
-            )
             p_summary += f"\n\n### 基本面数学模型锚点\n{fundamental_brief}"
-            p_summary += f"\n\n### 已持仓A股止盈止损纪律（不要当作入场点）\n{p_exit_policy_text}"
 
             from core.committee import run_wealth_context_view
             w_context = run_wealth_context_view(None, cash_val)
@@ -779,8 +840,9 @@ def run_committee_direct(req: CommitteeRequest) -> CommitteeResponse:
                 regime_probability=regime_probability,
                 conditional_return_stats=conditional_return_stats,
                 fundamental_assessment=fundamental_assessment,
-                position_exit_policy=p_exit_policy,
+                position_exit_policy=None,
                 behavioral_assessment=behavioral_assessment,
+                require_a_share_behavioral=True,
             )
 
             entry_exit_plan = compute_entry_exit_points(
@@ -819,7 +881,7 @@ def run_committee_direct(req: CommitteeRequest) -> CommitteeResponse:
                         optimizer_audit=opt_audit_text,
                         entry_exit_audit=entry_exit_audit_text,
                         right_side_gate_audit=right_side_gate_text,
-                        position_exit_policy_audit=p_exit_policy_text,
+                        position_exit_policy_audit="",
                         regime_brief=regime_brief,
                         fundamental_brief=fundamental_brief,
                     )
@@ -872,10 +934,9 @@ def run_committee_direct(req: CommitteeRequest) -> CommitteeResponse:
                     parsed["verdict"] = opt.verdict
                     parsed["confidence"] = opt.confidence
                     parsed["alloc_cny"] = opt.alloc_cny
-                c_memo += opt_audit_text
+            c_memo += opt_audit_text
             c_memo += entry_exit_audit_text
             c_memo += right_side_gate_text
-            c_memo += p_exit_policy_text
             if optimizer_review:
                 c_memo += f"\n\n[OPTIMIZER_LLM_REVIEW]\n{optimizer_review}"
             decision_synthesis = synthesize_decision(
@@ -885,7 +946,7 @@ def run_committee_direct(req: CommitteeRequest) -> CommitteeResponse:
                 parsed=parsed,
                 entry_exit_points=entry_exit_plan.as_dict(),
                 right_side_gate=right_side_gate.as_dict(),
-                position_exit_policy=p_exit_policy.as_dict(),
+                position_exit_policy={},
                 optimizer_review=optimizer_review,
                 current_price=current_price,
                 is_holding=position_pct_val > 0,
@@ -901,7 +962,7 @@ def run_committee_direct(req: CommitteeRequest) -> CommitteeResponse:
                 "cio_memo": c_memo,
                 "report": report,
                 "entry_exit_plan": entry_exit_plan,
-                "position_exit_policy": p_exit_policy,
+                "position_exit_policy": {},
                 "right_side_gate": right_side_gate,
                 "optimizer_review": optimizer_review,
                 "decision_synthesis": decision_synthesis,
@@ -955,7 +1016,7 @@ def run_committee_direct(req: CommitteeRequest) -> CommitteeResponse:
                     "quant_view": shadow_report.quant_view or "",
                     "risk_view": shadow_report.risk_view or "",
                     "entry_exit_points": shadow_res["entry_exit_plan"].as_dict(),
-                    "position_exit_policy": shadow_res["position_exit_policy"].as_dict(),
+                    "position_exit_policy": {},
                     "right_side_trend_gate": shadow_res["right_side_gate"].as_dict(),
                     "optimizer_review": shadow_res["optimizer_review"],
                     "decision_synthesis": shadow_res["decision_synthesis"].as_dict(),
@@ -982,7 +1043,7 @@ def run_committee_direct(req: CommitteeRequest) -> CommitteeResponse:
             fundamental_model=fundamental_assessment.model_key,
             fundamental_score=fundamental_assessment.score,
             entry_exit_points=real_res["entry_exit_plan"].as_dict(),
-            position_exit_policy=real_res["position_exit_policy"].as_dict(),
+            position_exit_policy={},
             right_side_trend_gate=real_res["right_side_gate"].as_dict(),
             optimizer_review=real_res["optimizer_review"][:500],
             cio_note=real_res["cio_memo"][:500],
@@ -1013,7 +1074,7 @@ def run_committee_direct(req: CommitteeRequest) -> CommitteeResponse:
             fundamental_coverage=fundamental_assessment.coverage,
             fundamental_anchor_multiplier=fundamental_assessment.anchor_multiplier,
             entry_exit_points=real_res["entry_exit_plan"].as_dict(),
-            position_exit_policy=real_res["position_exit_policy"].as_dict(),
+            position_exit_policy={},
             right_side_trend_gate=real_res["right_side_gate"].as_dict(),
             optimizer_review=real_res["optimizer_review"],
             decision_synthesis=real_res["decision_synthesis"].as_dict(),
@@ -1344,37 +1405,15 @@ async def delete_holding_api(background_tasks: BackgroundTasks, symbol: str):
 
 @app.post("/api/config/exit_params")
 async def import_exit_params(params: Dict[str, Any] = Body(...), force: bool = Query(False)):
-    """导入/覆盖每周止盈参数配置文件 (weekly_exit_param_optimization.json)"""
-    try:
-        exit_path = _PROJECT_ROOT / "reports" / "weekly_exit_param_optimization.json"
-        if not force and not params:
-            raise HTTPException(status_code=400, detail="Refusing empty exit parameters; retry with force=true")
-        from utils.safe_persistence import backup_and_atomic_write_json
-
-        backup = backup_and_atomic_write_json(exit_path, params, reason="api-exit-params-import")
-        return {
-            "ok": True,
-            "message": "Weekly exit parameter optimization file imported successfully",
-            "backup_id": backup["backup_id"],
-        }
-    except Exception as e:
-        if isinstance(e, HTTPException):
-            raise e
-        raise HTTPException(status_code=500, detail=f"Failed to save exit parameters: {str(e)}")
+    """Deprecated compatibility endpoint; position discipline is retired."""
+    _ = (params, force)
+    return {"ok": True, "message": "Position exit parameters are retired and were ignored"}
 
 
 @app.get("/api/config/exit_params")
 async def get_exit_params():
-    """获取每周止盈参数配置文件内容"""
-    try:
-        exit_path = _PROJECT_ROOT / "reports" / "weekly_exit_param_optimization.json"
-        if exit_path.exists():
-            return json.loads(exit_path.read_text(encoding="utf-8"))
-        raise HTTPException(status_code=404, detail="Exit parameters file not found")
-    except Exception as e:
-        if isinstance(e, HTTPException):
-            raise e
-        raise HTTPException(status_code=500, detail=f"Failed to read exit parameters: {str(e)}")
+    """Deprecated compatibility endpoint; always return an empty object."""
+    return {}
 
 
 @app.post("/api/config/sector_cache")
@@ -1414,72 +1453,15 @@ async def get_sector_cache():
 
 @app.post("/api/config/env_policies")
 async def import_env_policies(body: Dict[str, Any] = Body(...), force: bool = Query(False)):
-    """更新 .env 中的 INVEST_A_SHARE_SECTOR_EXIT_POLICIES 参数"""
-    try:
-        policies = body.get("policies", "")
-        # If it's a dict/list, dump it to string first
-        if isinstance(policies, (dict, list)):
-            policies_str = json.dumps(policies, ensure_ascii=False)
-        else:
-            policies_str = str(policies)
-        if not force and not policies_str.strip():
-            raise HTTPException(status_code=400, detail="Refusing empty policies; retry with force=true")
-            
-        # Helper to update env file
-        env_path = _PROJECT_ROOT / ".env"
-        content = ""
-        if env_path.exists():
-            content = env_path.read_text(encoding="utf-8")
-        lines = content.splitlines()
-        found = False
-        key = "INVEST_A_SHARE_SECTOR_EXIT_POLICIES"
-        new_line = f"{key}={policies_str}"
-        for i, line in enumerate(lines):
-            if line.strip().startswith(f"{key}="):
-                lines[i] = new_line
-                found = True
-                break
-        if not found:
-            lines.append(new_line)
-        from utils.safe_persistence import backup_and_atomic_write_text
-
-        backup = backup_and_atomic_write_text(
-            env_path,
-            "\n".join(lines) + "\n",
-            reason="api-env-policies-import",
-        )
-        
-        # Also update os.environ immediately
-        _os.environ[key] = policies_str
-        return {
-            "ok": True,
-            "message": "INVEST_A_SHARE_SECTOR_EXIT_POLICIES updated successfully",
-            "backup_id": backup["backup_id"],
-        }
-    except Exception as e:
-        if isinstance(e, HTTPException):
-            raise e
-        raise HTTPException(status_code=500, detail=f"Failed to save env policies: {str(e)}")
+    """Deprecated compatibility endpoint; sector exit policies are retired."""
+    _ = (body, force)
+    return {"ok": True, "message": "Sector exit policies are retired and were ignored"}
 
 
 @app.get("/api/config/env_policies")
 async def get_env_policies():
-    """获取 .env 中的 INVEST_A_SHARE_SECTOR_EXIT_POLICIES 参数"""
-    try:
-        key = "INVEST_A_SHARE_SECTOR_EXIT_POLICIES"
-        env_path = _PROJECT_ROOT / ".env"
-        val = ""
-        if env_path.exists():
-            content = env_path.read_text(encoding="utf-8")
-            for line in content.splitlines():
-                if line.strip().startswith(f"{key}="):
-                    parts = line.strip().split("=", 1)
-                    if len(parts) == 2:
-                        val = parts[1]
-                        break
-        return {"policies": val}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to read env policies: {str(e)}")
+    """Deprecated compatibility endpoint; always return an empty policy."""
+    return {"policies": ""}
 
 
 @app.post("/api/config/account_ledger")
@@ -1580,27 +1562,18 @@ async def get_behavioral_assessment_api(symbol: str):
     """获取指定A股的最新行为因子评估，供手机本地委员会使用"""
     symbol = symbol.strip().upper()
     try:
-        from pathlib import Path
-        import json
-        
-        project_root = Path(__file__).resolve().parent.parent
-        assessments_file = project_root / "data" / "behavioral_factor_assessments.json"
-        
-        if assessments_file.exists():
-            data = json.loads(assessments_file.read_text(encoding="utf-8"))
-            assessments = data.get("assessments") or {}
-            if symbol in assessments:
-                return {"success": True, "symbol": symbol, "assessment": assessments[symbol]}
-                
-        # Fallback to dynamic calculation of single symbol if not cached
         from utils.market_data_provider import get_history_data
-        from core.ashare_behavioral_factor import assess_single_behavioral_history
         df_2y = get_history_data(symbol, "2y")
-        if df_2y.empty:
-            return {"success": False, "error": f"No history found for symbol {symbol}"}
-            
-        assessment = assess_single_behavioral_history(symbol, df_2y)
-        return {"success": True, "symbol": symbol, "assessment": assessment.as_dict() if assessment else None}
+        assessment = _resolve_a_share_behavioral_assessment(
+            symbol,
+            target_history=df_2y,
+        )
+        return {
+            "success": True,
+            "symbol": symbol,
+            "assessment": assessment.as_dict(),
+            "decidable": not assessment.low_confidence,
+        }
     except Exception as e:
         return {"success": False, "error": str(e)}
 

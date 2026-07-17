@@ -50,7 +50,7 @@ def run_committee_local(
     max_debate_rounds: int = 4,         # 多 Agent 最大辩论轮数
     server_port: str = "8765",          # 远程服务器端口
     change_pct: float = 0.0,            # 今日涨跌幅百分比 (如 5.3 代表 +5.3%)
-    trading_mode: str = "active_profit" # 可选交易模式: active_profit/cash_recovery/risk_off
+    trading_mode: str = "active_profit" # 可选交易模式: active_profit/cash_recovery
 ) -> str:                               # 返回结果 JSON 字符串
 ```
 
@@ -84,11 +84,7 @@ def run_committee_local(
     "exit_target": 25.00,
     "exit_stop": 19.10
   },
-  "position_exit_policy": {             // 持仓减仓与止损线计算
-    "stop_loss_price": 19.10,
-    "take_profit_price": 25.00,
-    "trailing_stop_active": false
-  },
+  "position_exit_policy": {},           // 兼容旧字段；生产链路已停用持仓纪律影响
   "right_side_trend_gate": {            // 右侧趋势确认状态
     "gate_passed": true,
     "rationale": "..."
@@ -105,13 +101,15 @@ def run_committee_local(
 - Python 侧和监控快照可能额外返回 `technical.ma20`、`technical.ma120`、`technical.atr_pct`，或在 `entry_exit_points` 中返回 `atr_pct`。这些字段用于 App/桌面卡片展示均线、波动率和风险线，不改变 `verdict`、`suggested_alloc_cny`、`entry_exit_points` 的既有语义；旧版客户端可以忽略。
 - App 本地 wrapper 可使用 `resolved_snapshot` 作为展示兜底：当最新委员会结果缺少技术指标时，优先复用监控快照或最近缓存中的 `technical/entry_exit_points`。该兜底只补展示字段，不代表重新运行委员会，也不应触发行情同步。
 - `trading_mode` 是新增尾部可选参数，旧版 App 不传时仍按 `active_profit` 执行。该参数只进入手机本地 Python 的委员会上下文与提醒优化口径，不改变 `verdict`、`suggested_alloc_cny` 等既有字段语义。
-- `behavioral_factor` 是 A 股生产基座新增的可选审计对象。旧 App 不需要新增必填入参，也可以忽略响应中的该对象；`verdict`、`confidence`、`suggested_alloc_cny`、`entry_exit_points` 和 `position_exit_policy` 的既有类型与含义不变。`optimizer_weight` 表示标的级因子可信权重，不是建议买入比例；`target_weight_pct` 才是因子目标仓位。
+- `trading_mode` 当前规范值只有 `active_profit` 和 `cash_recovery`；历史 `risk_off`、`bear`、`defensive` 与“主动避险”输入会兼容归一化为 `cash_recovery`。
+- `behavioral_factor` 是 A 股生产基座新增的可选审计对象。旧 App 不需要新增必填入参，也可以忽略响应中的该对象；`verdict`、`confidence`、`suggested_alloc_cny` 和 `entry_exit_points` 的既有类型与含义不变。`position_exit_policy` 仅保留为空对象兼容旧客户端，不再影响生产决策。`optimizer_weight` 表示标的级因子可信权重，不是建议买入比例；`target_weight_pct` 才是因子目标仓位。
+- A 股行为因子缺失或低置信度时，服务端会先使用监控配置中的持仓/关注标的补建横截面；仍失败时 `verdict=WAIT`、`suggested_alloc_cny=0`，监控快照写 `state=factor_unavailable`。客户端应显示“无法判断”并禁用交易，不得解释成 `HOLD`。
+- 旧 `/api/config/exit_params` 与 `/api/config/env_policies` 仅保留兼容响应：POST 忽略内容，GET 返回空对象/空策略，不再写报告或 `.env`。
 - 手机本地 `run_committee_local` 返回单标的根 JSON，部分远程任务返回 `result.by_asset.<symbol>`。Android 缓存解析器必须同时支持两种响应形状，并恢复 `entry_exit_points`、`behavioral_factor`、基本面和操作字段，不能假设本地缓存一定有 `by_asset` 包装层。
 - 委员会详情弹窗的价格线优先读取本轮 `symbolSummary.entry_exit_points`，只有本轮字段缺失时才回退 `HoldingRow.buy_criteria/exit_points`，避免 Python 已完成计算但 UI 仍显示分析前旧行数据。
 - Android 行为因子区展示 `score/selected/target_weight_pct/trailing_3m_factor_return_pct/trailing_3m_hit_rate/trailing_3m_sample_size/optimizer_weight`。字段均为可选项，缺失时应局部降级，不得隐藏已有入场/出场点或改变 verdict。
-- 桌面/告警快照可能额外包含 `alert_source="position_exit_discipline_review"`、`committee_verdict` 和 `discipline_review`。这些字段只解释“持仓纪律线触发后，历史胜率折减的卖出期望是否压过继续持有证据”，不改变 `run_committee_local` 的参数签名，也不新增 verdict 枚举；旧版 App 可以安全忽略。
-- `discipline_review` 可能额外包含 `sector_panic_guard`。该字段只说明“同板块共振杀跌且个股未显著弱于板块时，是否暂缓机械止损”，包含板块中位跌幅、下跌占比、个股相对板块 Z 值和追加的继续持有证据；客户端应按可选解释字段处理。
-- 监控快照的候选/抑制原因可能出现 `sell_waiting_for_current_exit_trigger`、`recent_opposite_real_trade_without_new_entry_exit_trigger` 或 `recent_opposite_real_trade_without_price_progress`。它们表示“没有当前卖出纪律触发”或“刚发生反向成交，重新买回/卖出还没有穿越对应价格线”，只用于解释提醒层为什么暂不升级为可执行操作。
+- 新生产快照不再生成 `alert_source="position_exit_discipline_review"` 或有效 `discipline_review`。旧缓存里如果还存在这些字段，客户端应忽略；服务端快照层也会把它们降级为空对象。
+- 监控快照的候选/抑制原因可能出现 `low_sell_score`、`recent_opposite_real_trade_without_new_entry_exit_trigger` 或 `recent_opposite_real_trade_without_price_progress`。前者表示卖出评分未达到当前模式阈值；后两者仅用于卖出后的重新买回，表示尚未出现新的回调、再入场或突破触发。持仓卖出不再要求旧纪律价格线。
 - 远端配置上传 `POST /api/config/monitor_config` 会先落盘配置并立即返回；账本重建和旧快照清理在服务端后台执行，避免大配置上传时客户端等待超时。Android 网络层应保留较长读超时用于 SSE，同时配置独立写超时用于上传配置 payload。
 
 #### 2.1.3 失败返回 JSON 结构 (`success: false`)
@@ -146,13 +144,13 @@ def evaluate_alerts_local(
 ```json
 {
   "success": true,
-  "confirmed_alerts": [                 // 触发了买卖或止损纪律的真实告警列表
+  "confirmed_alerts": [                 // 触发了买卖技术线的真实告警列表
     {
       "symbol": "601138",
-      "type": "stop_loss",              // 告警类型: stop_loss (止损), take_profit (止盈), entry_trigger (技术入场), exit_trigger (技术出场)
+      "type": "entry_trigger",          // 告警类型: entry_trigger (技术入场), exit_trigger (技术出场)
       "price": 19.05,                   // 触发告警时的市场价格
       "trigger_line": 19.10,            // 设定的触发线
-      "message": "工业富联(601138) 已跌破锁定止损线 19.10，触发纪律卖出告警。"
+      "message": "工业富联(601138) 触及技术入场/出场参考线。"
     }
   ],
   "watch_rows": [                       // 更新了最新现价和距离百分比后的监控详情行

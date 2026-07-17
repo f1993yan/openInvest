@@ -887,18 +887,9 @@ def _config_stock_row(stock: Dict[str, Any], price_info: Dict[str, Any], total_a
         buy_criteria["reason"] = ee.get("reason", "")
         
         # Populate exit_points
-        pe = cached.get("position_exit_policy") or {}
-        if position_pct > 0 and pe:
-            exit_points["stop_loss_price"] = _safe_num(
-                pe.get("effective_stop_price"),
-                _safe_num(pe.get("hard_stop_price"), _safe_num(ee.get("stop_loss_price")))
-            )
-            exit_points["take_profit_price"] = _safe_num(pe.get("take_profit_1_price"), _safe_num(ee.get("take_profit_price")))
-            exit_points["trim_price"] = _safe_num(pe.get("trim_price"), _safe_num(ee.get("trim_price")))
-        else:
-            exit_points["stop_loss_price"] = _safe_num(ee.get("stop_loss_price"))
-            exit_points["take_profit_price"] = _safe_num(ee.get("take_profit_price"))
-            exit_points["trim_price"] = _safe_num(ee.get("trim_price"))
+        exit_points["stop_loss_price"] = _safe_num(ee.get("stop_loss_price"))
+        exit_points["take_profit_price"] = _safe_num(ee.get("take_profit_price"))
+        exit_points["trim_price"] = _safe_num(ee.get("trim_price"))
             
         verdict = cached.get("verdict") or verdict
         confidence = _safe_num(cached.get("confidence"))

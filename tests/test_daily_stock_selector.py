@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import pandas as pd
 
 from core.daily_stock_selector import (
@@ -155,7 +157,18 @@ def test_entry_plan_uses_reclaim_trigger_for_weak_close_without_breakdown():
     assert plan.trigger_price == 13.23
 
 
-def test_daily_selection_ranks_hot_a_share_leaders_only():
+def test_daily_selection_ranks_hot_a_share_leaders_only(monkeypatch):
+    monkeypatch.setattr(
+        "core.daily_stock_selector.assess_behavioral_universe",
+        lambda *_args, **_kwargs: {
+            "601138": SimpleNamespace(
+                low_confidence=False, score=82.0, selected=True, target_weight_pct=30.0, expected_return_pct=5.0,
+            ),
+            "300476": SimpleNamespace(
+                low_confidence=False, score=55.0, selected=False, target_weight_pct=0.0, expected_return_pct=1.0,
+            ),
+        },
+    )
     items = [
         RawNewsItem(
             src_name="baidu_hot",
@@ -254,7 +267,15 @@ def test_daily_selection_filters_unaffordable_a_share_lots():
     assert result.news_impact_summary["affordability_filtered"] == 1
 
 
-def test_daily_selection_uses_sector_fund_flow_and_fundamentals():
+def test_daily_selection_uses_sector_fund_flow_and_fundamentals(monkeypatch):
+    monkeypatch.setattr(
+        "core.daily_stock_selector.assess_behavioral_universe",
+        lambda *_args, **_kwargs: {
+            "603308": SimpleNamespace(
+                low_confidence=False, score=78.0, selected=True, target_weight_pct=25.0, expected_return_pct=4.0,
+            ),
+        },
+    )
     result = build_daily_selection(
         [],
         {"603308": _trend_df()},
@@ -286,3 +307,19 @@ def test_daily_selection_uses_sector_fund_flow_and_fundamentals():
     assert result.stocks[0].money_flow_score > 70
     assert result.stocks[0].fundamental_score == 82
     assert "基本面质量较好" in result.stocks[0].reasons
+
+
+def test_daily_selection_does_not_fallback_when_behavioral_factor_is_unavailable():
+    result = build_daily_selection(
+        [],
+        {"603308": _trend_df()},
+        sector_fund_flows=[
+            {
+                "sector": "商业航天",
+                "leaders": [{"symbol": "603308", "name": "应流股份"}],
+            }
+        ],
+    )
+
+    assert result.stocks == []
+    assert result.news_impact_summary["factor_unavailable_filtered"] == 1

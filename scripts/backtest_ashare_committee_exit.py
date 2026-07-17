@@ -1,9 +1,9 @@
 ﻿"""A-share committee-style exit model backtest.
 
-This research runner keeps the decision path deterministic and leak-free:
-each trading-day signal only sees bars up to the previous close, while the next
-bar's OHLC is used for executable A-share orders. It is designed for tuning
-the post-entry stop/take-profit discipline used by the monitor window.
+This historical research runner keeps the decision path deterministic and
+leak-free: each trading-day signal only sees bars up to the previous close,
+while the next bar's OHLC is used for executable A-share orders. Its exit
+parameters are not used by production and cannot be written back to ``.env``.
 """
 from __future__ import annotations
 
@@ -24,17 +24,6 @@ if str(ROOT) not in sys.path:
 
 
 DEFAULT_SYMBOLS: Dict[str, str] = {}
-
-
-ENV_PARAM_KEYS = {
-    "max_loss_pct": "INVEST_A_SHARE_POSITION_MAX_LOSS_PCT",
-    "stop_atr_mult": "INVEST_A_SHARE_POSITION_STOP_ATR_MULT",
-    "take_profit_r1": "INVEST_A_SHARE_POSITION_TAKE_PROFIT_R1",
-    "take_profit_r2": "INVEST_A_SHARE_POSITION_TAKE_PROFIT_R2",
-    "trailing_atr_mult": "INVEST_A_SHARE_POSITION_TRAIL_ATR_MULT",
-}
-
-SECTOR_POLICY_ENV_KEY = "INVEST_A_SHARE_SECTOR_EXIT_POLICIES"
 
 
 @dataclass(frozen=True)
@@ -1064,75 +1053,6 @@ def optimize_exit_params(
 
 
 
-def update_env_exit_params(params: Dict[str, Any], env_path: Path) -> Dict[str, Any]:
-    """Update only the exit-model keys in .env, preserving all other secrets."""
-    env_path.parent.mkdir(parents=True, exist_ok=True)
-    existing = env_path.read_text(encoding="utf-8") if env_path.exists() else ""
-    lines = existing.splitlines()
-    rendered = {
-        key: str(params[param_name])
-        for param_name, key in ENV_PARAM_KEYS.items()
-        if param_name in params
-    }
-    seen = set()
-    updated_lines: List[str] = []
-    for line in lines:
-        stripped = line.strip()
-        if not stripped or stripped.startswith("#") or "=" not in stripped:
-            updated_lines.append(line)
-            continue
-        key = stripped.split("=", 1)[0].strip()
-        if key in rendered:
-            updated_lines.append(f"{key}={rendered[key]}")
-            seen.add(key)
-        else:
-            updated_lines.append(line)
-
-    missing = [key for key in rendered if key not in seen]
-    if missing:
-        if updated_lines and updated_lines[-1].strip():
-            updated_lines.append("")
-        updated_lines.append("# A股持仓止盈止损模型参数（由离散回测每周自动更新）")
-        for key in missing:
-            updated_lines.append(f"{key}={rendered[key]}")
-
-    env_path.write_text("\n".join(updated_lines).rstrip() + "\n", encoding="utf-8")
-    return {
-        "updated": True,
-        "env_path": str(env_path),
-        "keys": sorted(rendered),
-    }
-
-
-def update_env_sector_exit_policies(policies: Dict[str, Dict[str, Any]], env_path: Path) -> Dict[str, Any]:
-    """Update sector-specific exit policies in .env as one JSON value."""
-    env_path.parent.mkdir(parents=True, exist_ok=True)
-    existing = env_path.read_text(encoding="utf-8") if env_path.exists() else ""
-    rendered = json.dumps(policies, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-    lines = existing.splitlines()
-    updated_lines: List[str] = []
-    seen = False
-    for line in lines:
-        stripped = line.strip()
-        if stripped and not stripped.startswith("#") and "=" in stripped:
-            key = stripped.split("=", 1)[0].strip()
-            if key == SECTOR_POLICY_ENV_KEY:
-                updated_lines.append(f"{SECTOR_POLICY_ENV_KEY}={rendered}")
-                seen = True
-                continue
-        updated_lines.append(line)
-    if not seen:
-        if updated_lines and updated_lines[-1].strip():
-            updated_lines.append("")
-        updated_lines.append("# A股板块级持仓止盈止损模型参数（由离散回测每周自动更新）")
-        updated_lines.append(f"{SECTOR_POLICY_ENV_KEY}={rendered}")
-    env_path.write_text("\n".join(updated_lines).rstrip() + "\n", encoding="utf-8")
-    return {
-        "updated": True,
-        "env_path": str(env_path),
-        "key": SECTOR_POLICY_ENV_KEY,
-        "sector_count": len(policies),
-    }
 def _default_dates(days: int) -> Tuple[str, str]:
     end = datetime.now().date()
     start = end - timedelta(days=days)
@@ -1170,14 +1090,12 @@ def main() -> None:
     parser.add_argument("--out", default=str(ROOT / "reports" / "ashare_committee_exit_backtest.json"))
     parser.add_argument("--trades-csv", default=str(ROOT / "reports" / "ashare_committee_exit_trades.csv"))
     parser.add_argument("--daily-csv", default=str(ROOT / "reports" / "ashare_committee_exit_daily_samples.csv"))
-    parser.add_argument("--update-env", action="store_true", help="把最优止盈止损参数写回本地 .env")
-    parser.add_argument("--env-path", default=str(ROOT / ".env"))
     args = parser.parse_args()
 
     start, end = (args.start, args.end) if args.start and args.end else _default_dates(args.days)
     symbols = [s.strip() for s in args.symbols.split(",") if s.strip()]
     if not symbols:
-        raise SystemExit("请通过 --symbols 或 INVEST_EXIT_PARAM_OPT_SYMBOLS 指定A股样本")
+        raise SystemExit("请通过 --symbols 指定A股样本")
     names = {s: DEFAULT_SYMBOLS.get(s, s) for s in symbols}
     histories = _fetch_histories(symbols, period="2y")
     signal_cache = build_signal_cache(histories=histories, start=start, end=end)
@@ -1234,9 +1152,6 @@ def main() -> None:
             "limit_up_down_blocked": True,
         },
     }
-    if args.update_env:
-        best_payload = result["legacy"]["best"] if args.strategy_mode == "compare_regime_gate" else result["best"]
-        result["env_update"] = update_env_exit_params(best_payload["params"], Path(args.env_path))
     out = Path(args.out)
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")

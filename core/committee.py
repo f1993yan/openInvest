@@ -40,12 +40,24 @@ LLM_BASE_DELAY = float(os.getenv("INVEST_LLM_BASE_DELAY", "2.0"))
 LLM_MAX_DELAY = float(os.getenv("INVEST_LLM_MAX_DELAY", "20.0"))
 
 
+def _normalize_trading_mode_value(value: Any) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return "active_profit"
+    if text in {"现金回收", "主动避险"}:
+        return "cash_recovery"
+    lowered = text.lower()
+    if lowered in {"cash_recovery", "cash", "risk_off", "bear", "defensive"}:
+        return "cash_recovery"
+    return "active_profit"
+
+
 def _load_trading_mode() -> str:
     import os
     from pathlib import Path
     mode = os.getenv("INVEST_TRADING_MODE")
     if mode:
-        return mode
+        return _normalize_trading_mode_value(mode)
 
     root = Path(__file__).resolve().parent.parent
     for path in [
@@ -60,8 +72,8 @@ def _load_trading_mode() -> str:
                     val = data.get("trading_mode")
                     if val:
                         if isinstance(val, dict):
-                            return val.get("mode", "active_profit")
-                        return str(val)
+                            return _normalize_trading_mode_value(val.get("mode", "active_profit"))
+                        return _normalize_trading_mode_value(val)
             except Exception:
                 pass
     return "active_profit"
@@ -88,7 +100,6 @@ class CommitteeReport:
         trading_mode_desc = {
             "active_profit": "主动盈利模式 (Active Profit Mode): 交易策略偏向进取，积极捕捉上升趋势与超额收益机会。",
             "cash_recovery": "现金回收模式 (Cash Recovery Mode): 交易策略偏向防守，保留较多现金，优先减仓释放流动性，且对新买入标的有更严格的估值/胜率要求，非极高胜率不建议加仓。",
-            "risk_off": "主动避险模式 (Risk-Off Mode): 交易策略极度保守，避险情绪主导。必须严格遵守止损纪律，拒绝弱势反弹加仓，新入场门槛极高，优先削减仓位避险。"
         }.get(trading_mode, "主动盈利模式")
         lines = [
             f"=== ASSET: {self.asset.get('display_name', self.asset.get('symbol'))} ===",
@@ -568,9 +579,9 @@ def run_optimizer_review_view(
         "You are an optimizer audit reviewer for an investment committee. "
         "You evaluate deterministic optimizer outputs; you do not recalculate "
         "or invent new prices, positions, or allocation amounts. "
-        "Keep ENTRY_EXIT_POINTS, RIGHT_SIDE_TREND_GATE, and POSITION_EXIT_POLICY separate: "
+        "Keep ENTRY_EXIT_POINTS and RIGHT_SIDE_TREND_GATE separate: "
         "entry/exit points are price levels, right-side gate is entry permission, "
-        "and position policy is cost-anchored exits after holding. "
+        "and cost-anchored position-exit discipline is disabled in production. "
         "Return only the following format:\n"
         "OPTIMIZER_REVIEW:\n"
         "CONCLUSION: accept | caution | override_required\n"
@@ -594,10 +605,9 @@ def run_optimizer_review_view(
         f"# Deterministic optimizer audit\n{optimizer_audit or '(none)'}\n\n"
         f"# Entry/exit point audit\n{entry_exit_audit or '(none)'}\n\n"
         f"# Right-side trend gate audit\n{right_side_gate_audit or '(none)'}\n\n"
-        f"# Position exit policy audit\n{position_exit_policy_audit or '(none)'}\n\n"
         "Task: judge whether the optimizer output is coherent and actionable. "
         "Do not change the numbers. Do not mix right-side entry permission, buy entry points, "
-        "or cost-anchored position stops. If hard constraints, tail risk, low data "
+        "or disabled cost-anchored position stops. If hard constraints, tail risk, low data "
         "confidence, or reward/risk are questionable, use CONCLUSION: caution. "
         "Use override_required only when the deterministic output contradicts "
         "the provided constraints or has missing critical data. "
@@ -808,7 +818,6 @@ def run_committee(
     trading_mode_desc = {
         "active_profit": "主动盈利模式 (Active Profit Mode): 交易策略偏向进取，积极捕捉上升趋势与超额收益机会。",
         "cash_recovery": "现金回收模式 (Cash Recovery Mode): 交易策略偏向防守，保留较多现金，优先减仓释放流动性，且对新买入标的有更严格的估值/胜率要求，非极高胜率不建议加仓。",
-        "risk_off": "主动避险模式 (Risk-Off Mode): 交易策略极度保守，避险情绪主导。必须严格遵守止损纪律，拒绝弱势反弹加仓，新入场门槛极高，优先削减仓位避险。"
     }.get(trading_mode, "主动盈利模式")
     mode_section = f"# 系统当前运行交易模式:\n- {trading_mode_desc}\n\n"
 

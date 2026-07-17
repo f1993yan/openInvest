@@ -158,6 +158,7 @@ def build_mobile_recommendation_text(
     buy_signal_backtest: Optional[Dict[str, Any]] = None,
     behavioral_factor: Optional[Dict[str, Any]] = None,
 ) -> str:
+    _ = position_exit_policy  # Deprecated compatibility argument.
     current = _safe_num(current_price)
     confidence_val = _safe_num(confidence)
     alloc = _safe_num(suggested_alloc_cny)
@@ -165,15 +166,8 @@ def build_mobile_recommendation_text(
     pullback = _safe_num(entry_exit_points.get("buy_pullback_price"))
     breakout = _safe_num(entry_exit_points.get("buy_breakout_price"))
 
-    stop = _safe_num(position_exit_policy.get("stop_loss_price"))
-    if not stop or stop <= 0:
-        stop = _safe_num(entry_exit_points.get("stop_loss_price"))
-
-    take = _safe_num(position_exit_policy.get("take_profit_price"))
-    if not take or take <= 0:
-        take = _safe_num(entry_exit_points.get("take_profit_price"))
-
-    plan_type = str(position_exit_policy.get("plan_type") or "")
+    stop = _safe_num(entry_exit_points.get("stop_loss_price"))
+    take = _safe_num(entry_exit_points.get("take_profit_price"))
 
     pullback_dist = _distance_pct(current, pullback)
     breakout_dist = _distance_pct(current, breakout)
@@ -200,7 +194,7 @@ def build_mobile_recommendation_text(
         f"1. 当前价: {_fmt_price(current)}，今日涨跌 {_fmt_pct(change_pct)}。",
         f"2. 决策结论: {decision}",
         f"3. 理想买点: 回调 {_fmt_price(pullback)} (在当前价 {_fmt_distance(pullback_dist)})；突破 {_fmt_price(breakout)} (在当前价 {_fmt_distance(breakout_dist)})。",
-        f"4. 风险线: {'持仓纪律' if plan_type == 'a_share_position_exit' else '入场估算'}，止损 {_fmt_price(stop)} (在当前价 {_fmt_distance(stop_dist)})；止盈 {_fmt_price(take)} (在当前价 {_fmt_distance(take_dist)})。",
+        f"4. 风险线: 技术估算，止损 {_fmt_price(stop)} (在当前价 {_fmt_distance(stop_dist)})；止盈 {_fmt_price(take)} (在当前价 {_fmt_distance(take_dist)})。",
         f"5. 仓位建议: {_fmt_money(alloc)} 元；置信度 {int(confidence_val * 100)}%；当前{'已有持仓' if is_holding else '没有持仓'}。",
         "",
         "为什么这么判断:",
@@ -249,8 +243,6 @@ def build_mobile_recommendation_text(
         lines.extend(["", "需要小心:"])
         if low_confidence:
             lines.append("- 买卖点模型置信度偏低，价格线只能当参考，不能机械下单。")
-        if plan_type == "a_share_position_exit":
-            lines.append("- 已持仓标的的止盈止损盘中不重算，只在收盘后按追踪规则上移风险线。")
         for warning in synthesis_warnings:
             lines.append(f"- {warning}")
         if signal_warning:
@@ -526,17 +518,6 @@ def run_committee_local(
         portfolio_summary = "\n".join(lines)
         portfolio_summary += f"\n\n### 基本面数学模型锚点\n{fundamental_brief}"
 
-        from core.position_exit_policy import load_position_exit_policy
-        position_exit_policy = load_position_exit_policy(sector=sector)
-        position_exit_policy_text = position_exit_policy.audit_text(
-            symbol=symbol,
-            market=market,
-            is_holding=position_pct > 0,
-            cost=cost,
-            current_price=current_price or 0.0,
-        )
-        portfolio_summary += f"\n\n### 已持仓A股止盈止损纪律（不要当作入场点）\n{position_exit_policy_text}"
-
         from core.committee import run_wealth_context_view
         wealth_context = run_wealth_context_view(None, cash)
 
@@ -629,8 +610,9 @@ def run_committee_local(
             regime_probability=regime_probability,
             conditional_return_stats=conditional_return_stats,
             fundamental_assessment=fundamental_assessment,
-            position_exit_policy=position_exit_policy,
+            position_exit_policy=None,
             behavioral_assessment=behavioral_assessment,
+            require_a_share_behavioral=True,
         )
         entry_exit_plan = compute_entry_exit_points(
             symbol=symbol,
@@ -669,7 +651,7 @@ def run_committee_local(
                     optimizer_audit=opt_audit_text,
                     entry_exit_audit=entry_exit_audit_text,
                     right_side_gate_audit=right_side_gate_text,
-                    position_exit_policy_audit=position_exit_policy_text,
+                    position_exit_policy_audit="",
                     regime_brief=regime_brief,
                     fundamental_brief=fundamental_brief,
                 )
@@ -732,7 +714,7 @@ def run_committee_local(
             parsed=parsed,
             entry_exit_points=entry_exit_plan.as_dict(),
             right_side_gate=right_side_gate.as_dict(),
-            position_exit_policy=position_exit_policy.as_dict(),
+            position_exit_policy={},
             optimizer_review=optimizer_review,
             current_price=current_price or 0.0,
             is_holding=(position_pct > 0),
@@ -755,7 +737,7 @@ def run_committee_local(
             fundamental_model=fundamental_assessment.model_key,
             fundamental_score=fundamental_assessment.score,
             entry_exit_points=entry_exit_plan.as_dict(),
-            position_exit_policy=position_exit_policy.as_dict(),
+            position_exit_policy={},
             right_side_trend_gate=right_side_gate.as_dict(),
             optimizer_review=optimizer_review[:500],
             cio_note=cio_memo[:500],
@@ -772,7 +754,7 @@ def run_committee_local(
             suggested_alloc_cny=float(parsed.get("alloc_cny", 0)),
             is_holding=(position_pct > 0),
             entry_exit_points=entry_exit_plan.as_dict(),
-            position_exit_policy=position_exit_policy.as_dict(),
+            position_exit_policy={},
             right_side_trend_gate=right_side_gate.as_dict(),
             fundamental_score=float(fundamental_assessment.score),
             regime_brief=regime_brief,
@@ -806,7 +788,7 @@ def run_committee_local(
             "fundamental_coverage": float(fundamental_assessment.coverage),
             "fundamental_anchor_multiplier": float(fundamental_assessment.anchor_multiplier),
             "entry_exit_points": entry_exit_plan.as_dict(),
-            "position_exit_policy": position_exit_policy.as_dict(),
+            "position_exit_policy": {},
             "right_side_trend_gate": right_side_gate.as_dict(),
             "optimizer_review": optimizer_review,
             "decision_synthesis": decision_synthesis.as_dict(),

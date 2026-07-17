@@ -155,7 +155,7 @@ start-invest-backend.bat
 - `jobs.market_monitor_quotes.build_behavioral_factor_context()` 在每轮委员会前只构建一次 A 股横截面。它读取两年日线，调用 `core.ashare_behavioral_factor.assess_behavioral_universe()`，并把每只标的评估作为可选 `behavioral_factor` 传给 Direct 委员会。
 - 因子前四成员与逆波动目标仓位存放在 `data/behavioral_factor_state.json`，每 5 个交易日更新。分数和最近三个月标的级证据可随新收盘数据重算，但五日内不切换目标成员；`data/` 被 git 忽略。
 - A 股优化器优先使用行为因子的经验 20 日收益和目标仓位。标的级优化器权重由最近 63 个交易日的因子方向超额收益决定，范围 `0.55~1.0`；港股等非 A 股保持原 `_estimate_expected_return_pct()` 路径。
-- 行为因子的 5 个百分点免交易带只抑制因子目标附近的反复调仓。`sell_reliability >= 0.50` 且持仓卖出效用调整至少 1 个百分点时，止盈止损风险卖出可以越过免交易带；它不把入场/出场点和持仓纪律线混为一套。
+- 行为因子的 5 个百分点免交易带只抑制因子目标附近的反复调仓。委员会/优化器给出的高置信卖出仍可越过免交易带；成本锚定持仓纪律已停用，不再作为越过免交易带的依据。
 - 每个标的一次 Direct 调用可以同时携带真实账户和影子账户上下文：`position_pct/cash/holdings` 属于 `real`，`shadow_position_pct/shadow_cash/shadow_holdings` 属于 `committee`。
 - 返回给主窗口、报告和 HTTP `/api/committee` 的是真实账户评估；`shadow_result` 只在 Python 内部给 `jobs.market_monitor_runtime` 执行影子账户，不展示给用户。
 - `jobs.market_monitor_runtime.run_monitor_round()` 是一轮盘中监控的唯一编排入口，负责行情、委员会、账本、新闻、告警和快照输出。
@@ -175,7 +175,7 @@ start-invest-backend.bat
 | `jobs/market_monitor.py` | CLI 入口、旧导入兼容 |
 | `jobs/market_monitor_runtime.py` | 一轮监控为什么跑、什么时候跑、快照何时写 |
 | `jobs/market_monitor_quotes.py` | 行情和委员会直接调用 |
-| `jobs/market_monitor_entry_exit.py` | 买卖点连续触发、持仓止盈止损计划 |
+| `jobs/market_monitor_entry_exit.py` | 买卖点连续触发；旧持仓止盈止损函数仅保留兼容 |
 | `jobs/market_monitor_alerts.py` | 为什么某只标的排在前面、为什么被现金/风险约束压掉 |
 | `jobs/market_monitor_guards.py` | 涨停和重复交易为什么被拦截 |
 | `jobs/market_monitor_snapshot.py` | 主窗口看到的字段从哪里来 |
@@ -185,22 +185,19 @@ start-invest-backend.bat
 对新维护者最容易混淆的一点：
 
 - 入场/出场点来自 `entry_exit_points`，服务于“现在能不能买/加/减”的技术确认。
-- 持仓止盈止损来自 `position_exit_plan`，服务于“已经持有后如何守纪律”，锚定成本和板块参数，不能拿来反推买入点。
-- `policy_quality_score` 是 risk-adjusted expected utility，不是裸胜率：胜率先用 Wilson 下界保守化，再按卖出样本数可靠性收缩；监控只把它作为已持仓 `TRIM/SELL` 的小幅 likelihood-ratio 校准。
-- `sell_utility_adjustment_pct` 是同一周度回测派生的确定性优化器输入：默认回看最近 62 天，同板块样本用 Wilson 下界、卖出后路径净优势和样本可靠性收缩，得到对“继续持有该仓位”的 30 日期望收益折减。证据不足时自动接近 0；它只作用于已有持仓，不参与空仓买入。
-- `position_exit_discipline_review` 是提醒层的可选合成候选，不是委员会新 verdict：当真实持仓触发 `position_exit_plan`，即使委员会返回 `HOLD`，也会计算 `sell_expected_edge_pct - continuation_edge_pct - execution_friction_pct`。净效用为正且触发已确认时进入 `action_required`；否则窗口显示止盈/止损复核，避免既误卖又漏掉纪律风险。
-- `sector_panic_guard` 是纪律复核下的可选保护项：当同板块监控样本至少 3 个、板块中位跌幅和下跌占比显示共振杀跌，且个股相对板块 MAD Z 值没有明显弱于板块时，系统会把板块错杀/错过反弹成本计入 `continuation_edge_pct`，并要求卖出净效用超过保护门槛。个股显著弱于板块或委员会强 `SELL` 且卖出压力足够高时，保护项不拦截。
-- 卖出提醒阈值在 `jobs/market_monitor_alerts.py`，不是持仓止损线本身：`_sell_alert_threshold()` 会结合是否触发 `position_exit_plan`、`sell_win_rate_lower`、`conservative_sell_expectancy_cny`、`avg_post_sell_net_edge_pct` 和 `policy_quality_score` 调整提醒门槛。已经触发锁定出场线时可以低于基础 45 分；没有价格触发时强 `SELL/TRIM` 只保留为候选/复核，不直接升级为可执行操作。
-- 反向交易冷却不是固定禁买回：当天或冷却窗口内发生过同标的真实/影子反向成交时，再次买入必须重新触发 `buy_pullback`、`reentry` 或 `buy_breakout`，且当前价要相对上次成交价穿越对应触发边界；再次卖出必须触发当前 `position_exit_plan`。这把“少折腾”的约束锚定在价格线和历史效用证据上，而不是靠任意分钟数封禁所有机会。
-- 交易模式在 `jobs/trading_mode.py` 定义，并由 `jobs/market_monitor_alerts.py` 使用：`主动盈利` 保持旧的期望最大化，`现金回收` 增加现金保留和卖出释放现金效用，`主动避险` 提高买入门槛并强化风险卖出。它只改变提醒优化层，不改变 `entry_exit_points`、`position_exit_plan` 或委员会原始 verdict。
+- 成本锚定的 `position_exit_plan`、`position_exit_policy` 和 `position_exit_discipline_review` 已从生产路径删除；同名空字段/空函数仅用于旧接口兼容，周度参数模块与调度不再存在。
+- 卖出提醒阈值在 `jobs/market_monitor_alerts.py`：当前只看委员会/优化器 `SELL/TRIM`、负向建议金额、可卖手数、交易模式、A 股 T+1 和重复交易护栏。旧持仓纪律线不会合成 `action_required`。
+- A 股生产优化器要求有效 `behavioral_factor`。缺失时先从持仓与关注列表补建横截面；补全失败返回 `WAIT`，快照状态为 `factor_unavailable`，窗口灰卡且不允许交易。
+- 反向交易冷却不是固定禁买回：当天或冷却窗口内发生过同标的真实/影子反向成交时，再次买入必须重新触发 `buy_pullback`、`reentry` 或 `buy_breakout`，且当前价要相对上次成交价穿越对应触发边界；再次卖出按委员会/优化器卖出方向和交易约束判断。
+- 交易模式在 `jobs/trading_mode.py` 定义，并由 `jobs/market_monitor_alerts.py` 使用：`主动盈利` 保持期望最大化，`现金回收` 增加现金保留和卖出释放现金效用。旧 `risk_off` / “主动避险”会归一化为现金回收；模式只改变提醒优化层，不改变 `entry_exit_points` 或委员会原始 verdict。
 - 主窗口文案在 `scripts/monitor_window_text.py`：方向性委员会结果但未成为可执行提醒时显示“候选卖/候选买”，避免和普通“观察”混淆。快照原因来自 `jobs/market_monitor_snapshot.py` 的 `operation.reason`。
 - 详情弹窗颜色也在 `scripts/monitor_window_text.py` / `scripts/monitor_window_analysis.py`：风险行红色加粗、正向证据绿色加粗、背景信息灰色。这是 Tk 桌面渲染层，不改变 `utils.phone_committee`、HTTP 或 Android App 的 JSON 接口。
 - 主窗口 `technical.ma20/ma120/atr_pct` 正常来自 `jobs/market_monitor_snapshot.py`；只有配置兜底快照才会在 `scripts.monitor_window_services` 里补算，而且只读本地 `market_data.db`。如果维护者发现窗口技术指标为空，应先确认 API 后台预拉或监控任务是否已把历史行情写入本地缓存，不要把历史行情拉取放进 UI 服务。
-- 卖出阈值诊断脚本是 `scripts/diagnose_ashare_sell_threshold.py`。它比较不同 `committee_sell_stop_band` 的收益/回撤、卖出胜率下界、卖出后规避回撤和错过反弹成本；如果多组 band 结果完全一致，说明委员会卖出带不是约束点，应优先检查提醒筛选、止盈止损参数或 UI 状态。
-- 周度优化的 `policy_quality_score` 会纳入卖出后 5 日路径效用：`avg_post_sell_net_edge_pct = avoided_drawdown - missed_rebound`。这个指标为负时，说明卖出经常躲过一部分下跌但错过更大的反弹，参数优化会相应惩罚该策略。
+- 卖出阈值诊断脚本是 `scripts/diagnose_ashare_sell_threshold.py`。它比较历史 `committee_sell_stop_band` 的收益/回撤、卖出胜率下界、卖出后规避回撤和错过反弹成本；结果只用于研究，不代表当前生产提醒逻辑。
+- 周度优化的 `policy_quality_score` 会纳入卖出后 5 日路径效用：`avg_post_sell_net_edge_pct = avoided_drawdown - missed_rebound`。该指标只用于历史参数评估。
 - 周度参数优化的行业映射会先用更像浏览器的东方财富直连，失败后尝试 AkShare，再读 `data/sector_cache.json`；缓存仍缺失时才使用本地配置里的 `sector`/`industry`。
-- 盘中监控会在读取账本/配置后调用 `load_sector_cache_mapping()` 和 `_with_sector_cache()`，对 A 股标的用 `data/sector_cache.json` 覆盖运行时 `sector`，原始配置板块保留在 `config_sector`。因此委员会上下文、`position_exit_plan`、告警板块约束和窗口展示使用同一个东方财富板块。
-- 行业映射是多源合并，不再因为实时源返回了部分标的就跳过缓存补缺；`sample_quality` 会标记 `ok/thin/sparse`，薄样本板块仍保留止盈止损参数，但会收缩 `sell_utility_adjustment_pct`，避免单票卖出样本把委员会带偏。
+- 盘中监控会在读取账本/配置后调用 `load_sector_cache_mapping()` 和 `_with_sector_cache()`，对 A 股标的用 `data/sector_cache.json` 覆盖运行时 `sector`，原始配置板块保留在 `config_sector`。因此委员会上下文、告警板块约束和窗口展示使用同一个东方财富板块。
+- 行业映射是多源合并，不再因为实时源返回了部分标的就跳过缓存补缺；`sample_quality` 只用于历史止盈止损研究输出，不影响当前生产提醒。
 - `AccountLedger(real)` 是持仓单一可信源；ledger 更新后同步 config/snapshot，config 只作为旧路径兼容和新标的首次播种来源。
 - `latest_window.json` 只保留 real 的 `analysis_id/decision_id`，并递归剔除 `shadow_result`/`shadow_*`。用户执行推荐手数时，以 real `decision_id + 方向 + 股数` 组成幂等键；重复点击/请求重放返回原成交。
 

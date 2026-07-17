@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from fastapi.testclient import TestClient
 
+from backend import server as server_module
 from backend.server import app
 
 
@@ -27,3 +28,56 @@ def test_api_token_protects_every_non_health_route(monkeypatch):
             "/api/monitor/snapshot",
             headers={"Authorization": "Bearer unit-test-token"},
         ).status_code == 200
+
+
+def test_behavioral_factor_repair_uses_holdings_and_watchlist(tmp_path, monkeypatch):
+    config_path = tmp_path / "market_monitor_config.json"
+    config_path.write_text(
+        '{"holdings":[{"symbol":"SH600183","market":"sh"}],'
+        '"watchlist":[{"symbol":"002185.SZ","market":"sz"},{"symbol":"601138","market":"a"}]}',
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(server_module, "MONITOR_CONFIG_PATH", config_path)
+
+    captured = {}
+
+    def fake_context(rows):
+        captured["symbols"] = {row["symbol"] for row in rows}
+        return {
+            "600900": {
+                "symbol": "600900",
+                "score": 80.0,
+                "expected_return_pct": 4.0,
+                "target_weight_pct": 20.0,
+                "eligible": True,
+                "selected": True,
+                "low_confidence": False,
+                "sample_size": 40,
+            }
+        }
+
+    import jobs.market_monitor_quotes as quotes
+
+    monkeypatch.setattr(quotes, "build_behavioral_factor_context", fake_context)
+    assessment = server_module._resolve_a_share_behavioral_assessment(
+        "600900",
+        holdings=[{"symbol": "600487", "market": "a"}],
+    )
+
+    assert assessment.low_confidence is False
+    assert assessment.selected is True
+    assert captured["symbols"] == {"600900", "600487", "600183", "002185", "601138"}
+
+
+def test_retired_exit_parameter_endpoints_remain_non_persisting_compatible(monkeypatch):
+    monkeypatch.delenv("INVEST_API_TOKEN", raising=False)
+    with TestClient(app) as client:
+        posted = client.post("/api/config/exit_params", json={"max_loss_pct": 5})
+        assert posted.status_code == 200
+        assert posted.json()["ok"] is True
+        assert client.get("/api/config/exit_params").json() == {}
+
+        policies = client.post("/api/config/env_policies", json={"policies": "sensitive-old-value"})
+        assert policies.status_code == 200
+        assert policies.json()["ok"] is True
+        assert client.get("/api/config/env_policies").json() == {"policies": ""}

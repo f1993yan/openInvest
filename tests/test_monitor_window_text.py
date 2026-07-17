@@ -1,7 +1,8 @@
 import pandas as pd
 import numpy as np
 import sqlite3
-from scripts.monitor_window_text import _beginner_summary_lines, _detail_line_style, _operation_summary, _sector_summary
+import pytest
+from scripts.monitor_window_text import _beginner_summary_lines, _card_bg, _detail_line_style, _operation_summary, _sector_summary
 from scripts.monitor_window_services import (
     _compute_tech_from_local_history,
     _config_stock_row,
@@ -123,7 +124,17 @@ def test_executed_operation_summary_is_stable():
     assert _operation_summary(row) == "已执行"
 
 
-def test_sector_summary_prefers_panic_guard_sector():
+def test_unavailable_factor_uses_gray_card_and_clear_label():
+    row = {
+        "state": "factor_unavailable",
+        "operation": {"status": "factor_unavailable", "verdict": "WAIT", "suggested_alloc_cny": 0},
+    }
+
+    assert _operation_summary(row) == "无法判断"
+    assert _card_bg(row) == "#edf0f4"
+
+
+def test_sector_summary_ignores_retired_panic_guard_sector():
     row = {
         "symbol": "002185",
         "sector": "电子元件",
@@ -134,7 +145,7 @@ def test_sector_summary_prefers_panic_guard_sector():
         },
     }
 
-    assert _sector_summary(row) == "板块 半导体（恐慌判定）"
+    assert _sector_summary(row) == "板块 电子元件（分类）"
 
 
 def test_beginner_summary_lines_show_sector(monkeypatch):

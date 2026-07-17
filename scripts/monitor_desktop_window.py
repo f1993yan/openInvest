@@ -239,9 +239,9 @@ class MonitorWindow(MonitorNewsMixin, MonitorSelectionMixin, MonitorTradeMixin, 
         self.cash_bar.bind("<Button-1>", lambda _event: self._toggle_cash_correction_popover())
         self.trading_mode_switch = ModeSlider(
             top,
-            options=(("active_profit", "盈利"), ("cash_recovery", "回收"), ("risk_off", "避险")),
+            options=(("active_profit", "盈利"), ("cash_recovery", "现金")),
             command=self._change_trading_mode,
-            width=92,
+            width=72,
             height=22,
         )
         self.trading_mode_switch.pack(side=tk.RIGHT, padx=(0, 8))
@@ -554,7 +554,7 @@ class MonitorWindow(MonitorNewsMixin, MonitorSelectionMixin, MonitorTradeMixin, 
     def _change_trading_mode(self, mode: str) -> None:
         try:
             if self.demo:
-                payload = {"mode": mode, "label": {"active_profit": "主动盈利", "cash_recovery": "现金回收", "risk_off": "主动避险"}.get(mode, "主动盈利")}
+                payload = {"mode": mode, "label": {"active_profit": "主动盈利", "cash_recovery": "现金回收"}.get(mode, "主动盈利")}
             else:
                 payload = _set_trading_mode(mode)
             self.trading_mode_text.set(payload.get("label", "主动盈利"))
@@ -601,7 +601,6 @@ class MonitorWindow(MonitorNewsMixin, MonitorSelectionMixin, MonitorTradeMixin, 
             return
 
         config_path = ROOT / "jobs" / "market_monitor_config.json"
-        exit_path = ROOT / "reports" / "weekly_exit_param_optimization.json"
 
         if not config_path.exists():
             messagebox.showerror("错误", f"配置文件不存在: {config_path}")
@@ -635,43 +634,7 @@ class MonitorWindow(MonitorNewsMixin, MonitorSelectionMixin, MonitorTradeMixin, 
                 messagebox.showerror("错误", f"上传监控配置失败: HTTP {resp.status_code}\n{resp.text}")
                 return
 
-            if exit_path.exists():
-                with open(exit_path, "r", encoding="utf-8") as f:
-                    exit_data = json.load(f)
-
-                # Inject sector policies from environment variables
-                sector_policies = os.getenv("INVEST_A_SHARE_SECTOR_EXIT_POLICIES", "")
-                if sector_policies:
-                    try:
-                        exit_data["sector_exit_policies"] = json.loads(sector_policies)
-                    except Exception:
-                        exit_data["sector_exit_policies"] = sector_policies
-                    try:
-                        with open(exit_path, "w", encoding="utf-8") as f:
-                            json.dump(exit_data, f, ensure_ascii=False, indent=2)
-                    except Exception:
-                        pass
-
-                url_exit = f"{self.remote_server_url.rstrip('/')}/api/config/exit_params"
-                resp_exit = requests.post(url_exit, json=exit_data, headers=_remote_api_headers(), timeout=10)
-                if resp_exit.status_code != 200:
-                    messagebox.showerror("错误", f"上传每周止盈参数失败: HTTP {resp_exit.status_code}\n{resp_exit.text}")
-                    return
-
-            # 1. 上传 .env 的 INVEST_A_SHARE_SECTOR_EXIT_POLICIES
-            sector_policies = os.getenv("INVEST_A_SHARE_SECTOR_EXIT_POLICIES", "")
-            if sector_policies:
-                url_env = f"{self.remote_server_url.rstrip('/')}/api/config/env_policies"
-                resp_env = requests.post(
-                    url_env,
-                    json={"policies": sector_policies},
-                    headers=_remote_api_headers(),
-                    timeout=10,
-                )
-                if resp_env.status_code != 200:
-                    print(f"Failed to upload env policies to server: {resp_env.status_code}")
-
-            # 2. 上传 data/sector_cache.json
+            # 1. 上传 data/sector_cache.json
             sector_cache_path = ROOT / "data" / "sector_cache.json"
             if sector_cache_path.exists():
                 try:
@@ -689,7 +652,7 @@ class MonitorWindow(MonitorNewsMixin, MonitorSelectionMixin, MonitorTradeMixin, 
                 except Exception as se_err:
                     print(f"Failed to read/upload sector cache: {se_err}")
 
-            # 3. 上传真实双账户账本 db/accounts.db
+            # 2. 上传真实双账户账本 db/accounts.db
             db_path = _account_ledger_db_path()
             if db_path.exists():
                 try:
@@ -763,59 +726,7 @@ class MonitorWindow(MonitorNewsMixin, MonitorSelectionMixin, MonitorTradeMixin, 
                 messagebox.showerror("错误", f"同步监控配置失败: HTTP {resp_config.status_code}\n{resp_config.text}")
                 return
 
-            url_exit = f"{self.remote_server_url.rstrip('/')}/api/config/exit_params"
-            resp_exit = requests.get(url_exit, headers=_remote_api_headers(), timeout=10)
-            if resp_exit.status_code == 200:
-                exit_data = resp_exit.json()
-                exit_path = ROOT / "reports" / "weekly_exit_param_optimization.json"
-                from utils.safe_persistence import backup_and_atomic_write_json
-
-                backup_and_atomic_write_json(
-                    exit_path,
-                    exit_data,
-                    reason="desktop-remote-exit-params-sync",
-                )
-            elif resp_exit.status_code == 404:
-                pass
-            else:
-                messagebox.showerror("错误", f"同步每周止盈参数失败: HTTP {resp_exit.status_code}\n{resp_exit.text}")
-                return
-
-            # 1. 同步 .env 中的 INVEST_A_SHARE_SECTOR_EXIT_POLICIES
-            try:
-                url_env = f"{self.remote_server_url.rstrip('/')}/api/config/env_policies"
-                resp_env = requests.get(url_env, headers=_remote_api_headers(), timeout=10)
-                if resp_env.status_code == 200:
-                    policies_val = resp_env.json().get("policies", "")
-                    if policies_val:
-                        env_path = ROOT / ".env"
-                        content = ""
-                        if env_path.exists():
-                            with open(env_path, "r", encoding="utf-8") as f:
-                                content = f.read()
-                        lines = content.splitlines()
-                        found = False
-                        key = "INVEST_A_SHARE_SECTOR_EXIT_POLICIES"
-                        new_line = f"{key}={policies_val}"
-                        for i, line in enumerate(lines):
-                            if line.strip().startswith(f"{key}="):
-                                lines[i] = new_line
-                                found = True
-                                break
-                        if not found:
-                            lines.append(new_line)
-                        from utils.safe_persistence import backup_and_atomic_write_text
-
-                        backup_and_atomic_write_text(
-                            env_path,
-                            "\n".join(lines) + "\n",
-                            reason="desktop-remote-env-policies-sync",
-                        )
-                        os.environ[key] = policies_val
-            except Exception as env_err:
-                print(f"Failed to sync env policies: {env_err}")
-
-            # 2. 同步 data/sector_cache.json
+            # 1. 同步 data/sector_cache.json
             try:
                 url_sector = f"{self.remote_server_url.rstrip('/')}/api/config/sector_cache"
                 resp_sector = requests.get(url_sector, headers=_remote_api_headers(), timeout=10)
@@ -831,7 +742,7 @@ class MonitorWindow(MonitorNewsMixin, MonitorSelectionMixin, MonitorTradeMixin, 
             except Exception as sector_err:
                 print(f"Failed to sync sector cache: {sector_err}")
 
-            # 3. 同步真实双账户账本 db/accounts.db，再由账本回写 config/snapshot
+            # 2. 同步真实双账户账本 db/accounts.db，再由账本回写 config/snapshot
             ledger_synced = False
             ledger_error_msg = None
 
@@ -1207,7 +1118,12 @@ class MonitorWindow(MonitorNewsMixin, MonitorSelectionMixin, MonitorTradeMixin, 
         trade_bar.pack(fill=tk.X, pady=(6, 0))
         max_lots = _max_executable_lots(row)
         lots_var = tk.StringVar(value=str(max_lots) if max_lots > 0 else "0")
-        side_text = "已执行卖出" if _operation_direction(row) == "SELL" else "已执行买入"
+        factor_unavailable = str(row.get("state") or "") == "factor_unavailable"
+        side_text = (
+            "不可操作"
+            if factor_unavailable
+            else "已执行卖出" if _operation_direction(row) == "SELL" else "已执行买入"
+        )
         status_var = tk.StringVar(value="")
         tk.Label(trade_bar, text="手", bg=bg, fg=MUTED, font=("Microsoft YaHei UI", 8)).pack(side=tk.LEFT)
         lots_entry = tk.Entry(
@@ -1221,15 +1137,17 @@ class MonitorWindow(MonitorNewsMixin, MonitorSelectionMixin, MonitorTradeMixin, 
             font=("Microsoft YaHei UI", 9, "bold"),
         )
         lots_entry.pack(side=tk.LEFT, padx=(4, 8), ipady=2)
+        if factor_unavailable:
+            lots_entry.configure(state="disabled", disabledbackground="#e4e7ec", disabledforeground=MUTED)
         exec_btn = tk.Label(
             trade_bar,
             text=side_text,
-            bg=BLUE,
+            bg=MUTED if factor_unavailable else BLUE,
             fg="#ffffff",
             font=("Microsoft YaHei UI", 8, "bold"),
             padx=8,
             pady=3,
-            cursor="hand2",
+            cursor="arrow" if factor_unavailable else "hand2",
         )
         exec_btn.pack(side=tk.LEFT)
         llm_lots_hint = _llm_review_lots_hint(row)
@@ -1284,8 +1202,9 @@ class MonitorWindow(MonitorNewsMixin, MonitorSelectionMixin, MonitorTradeMixin, 
                 self.status_text.set(f"记账失败: {exc}")
                 return "break"
 
-        exec_btn.bind("<Button-1>", confirm_trade)
-        lots_entry.bind("<Return>", confirm_trade)
+        if not factor_unavailable:
+            exec_btn.bind("<Button-1>", confirm_trade)
+            lots_entry.bind("<Return>", confirm_trade)
 
         mid = tk.Frame(card, bg=bg)
         mid.pack(fill=tk.X, pady=(6, 0))

@@ -76,6 +76,7 @@ STATE_PRIORITY = {
     "executed": 5,
     "blocked": 6,
     "error": 7,
+    "factor_unavailable": 8,
 }
 
 VERDICT_PRIORITY = {

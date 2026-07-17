@@ -263,6 +263,7 @@ def build_daily_selection(
     stocks: List[StockSelection] = []
     _tapes: Dict[str, Any] = {}
     affordability_filtered = 0
+    factor_unavailable_filtered = 0
     for symbol, bucket in stock_buckets.items():
         tape = analyze_daily_tape(history_by_symbol.get(symbol), trade_date=trade_date)
         if tape is None:
@@ -319,18 +320,8 @@ def build_daily_selection(
                 100.0,
             )
         else:
-            score = _bounded(
-                news_score * 0.34
-                + tape.tape_score * 0.20
-                + trend.alignment_score * 0.14
-                + fundamental_score * 0.14
-                + money_flow_score * 0.16
-                + model_edge_score * 0.12
-                - risk_penalty * 0.30
-                - risk_defense.risk_penalty * 0.12,
-                0.0,
-                100.0,
-            )
+            factor_unavailable_filtered += 1
+            continue
         reasons = list(bucket["reasons"])
         if behavioral is not None:
             reasons.append(
@@ -413,6 +404,7 @@ def build_daily_selection(
         news_impact_summary={
             **_summarize_news_impact(news_rows),
             "affordability_filtered": affordability_filtered,
+            "factor_unavailable_filtered": factor_unavailable_filtered,
             "cash_constraint_enabled": available_cash_cny is not None,
             "fund_flow_sector_count": len(flow_rows),
         },

@@ -386,11 +386,11 @@ def test_set_trading_mode_preserves_existing_snapshot_rows(tmp_path, monkeypatch
 
     payload = svc._set_trading_mode("risk_off")
 
-    assert payload == {"mode": "risk_off", "label": "主动避险"}
+    assert payload == {"mode": "cash_recovery", "label": "现金回收"}
     updated_config = json.loads(config_path.read_text(encoding="utf-8"))
     updated_snapshot = json.loads(target_snapshot.read_text(encoding="utf-8"))
-    assert updated_config["trading_mode"] == "risk_off"
-    assert updated_snapshot["trading_mode"] == {"mode": "risk_off", "label": "主动避险"}
+    assert updated_config["trading_mode"] == "cash_recovery"
+    assert updated_snapshot["trading_mode"] == {"mode": "cash_recovery", "label": "现金回收"}
     assert updated_snapshot["rows"] == [{"symbol": "000063", "state": "action_required"}]
 
 

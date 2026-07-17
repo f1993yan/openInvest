@@ -69,8 +69,8 @@
 | 监控通用 | `jobs/market_monitor_common.py` | 路径、日志、交易时段常量、通用数值函数 |
 | 行情/委员会 | `jobs/market_monitor_quotes.py` | 腾讯/新浪行情、构建 A 股行为因子横截面、直接 Python 调用委员会，不依赖 8766 HTTP |
 | A 股行为因子 | `core/ashare_behavioral_factor.py` | 点时横截面特征、前四目标、20 日收益校准、每标的三个月优化器权重 |
-| 确定性优化器 | `core/decision_optimizer.py` | 离散手数效用、行为因子目标、现金/风险/成本/止盈止损证据约束 |
-| 买卖点/止盈止损 | `jobs/market_monitor_entry_exit.py` | 连续触发状态、A 股持仓纪律止盈止损计划 |
+| 确定性优化器 | `core/decision_optimizer.py` | 离散手数效用、行为因子目标、现金/风险/成本约束 |
+| 买卖点 | `jobs/market_monitor_entry_exit.py` | 连续触发状态；旧 A 股持仓纪律函数仅保留兼容，不进入生产监控 |
 | 风控护栏 | `jobs/market_monitor_guards.py` | 涨停买入拦截、同向重复交易冷却、反向交易需重新触发价格线 |
 | 告警优化 | `jobs/market_monitor_alerts.py` | 现金约束、仓位风险、LLM 审核修正后的最优提醒选择 |
 | 快照/报告 | `jobs/market_monitor_snapshot.py` | 写 `data/market_monitor/latest_window.json` 和本地报告 |
@@ -111,20 +111,19 @@ Web/API 的持仓和关注列表 CRUD 是另一条增量路径：`POST/PUT/DELET
 
 - `active_profit` / 主动盈利：默认模式，沿用胜率期望最大化和现金约束下的最优提醒选择。
 - `cash_recovery` / 现金回收：提高买入阈值、保留更高现金垫，给释放现金的卖出更高效用；目标是尽量回收现金，同时避免无条件清仓。
-- `risk_off` / 主动避险：提高买入门槛、压缩买入手数，并降低已持仓风险卖出的执行门槛；用于用户判断市场处于熊市或系统性风险偏高时。
+- 旧 `risk_off`、`bear`、`defensive` 和“主动避险”配置统一归一化为 `cash_recovery`，不再作为第三种独立模式。
 
 桌面窗口现金栏的可用现金/T+2修正也走同一状态源：UI 调用 `scripts.monitor_window_services._correct_real_cash()`，内部写 `AccountLedger(real).correct_cash()`，ledger 再同步本地 config 和快照。
 
-止盈止损和入场出场的边界要分清：
+买卖点和旧持仓纪律的边界要分清：
 
 - `entry_exit_points` 是委员会/技术模型给出的入场、突破、回调、重新入场和技术出场参考，会随行情刷新。
-- `position_exit_plan` 是已经持仓后的 A 股纪律计划，锚定真实成本和板块参数，盘中只检查触发，收盘后才允许追踪止损上移。
-- A 股持仓纪律止损在 `evaluate_position_exit_plan_triggers()` 中判断，价格**跌破**锁定止损线才触发；止盈目标价达到即可触发。
-- 每周 `jobs/weekly_exit_param_optimization.py` 会按板块回看最近数据，写入 `policy_quality_score`、`sell_win_rate_lower`、`profit_factor` 等质量字段；这些字段只用于校准已有持仓的减仓/卖出纪律，不参与买入点计算。
-- `jobs.market_monitor_alerts.select_optimal_actionable_alerts()` 对已持仓纪律触发使用期望效用复核：止损是即时风险事件，止盈/减仓需连续确认；纪律卖出期望会被周度参数的 `sell_reliability`、Wilson 胜率下界和卖出后路径优势折减，再和委员会继续持有证据比较。委员会 `HOLD` 不能静默吞掉已确认纪律触发，但纪律参数也不会被当作 100% 可靠的硬卖点。
-- 同一函数会从本轮 `stocks + prices` 构造板块恐慌杀跌保护：同板块至少 3 个有效样本，板块中位跌幅、下跌占比、硬跌幅占比和相对全样本中位数的超额跌幅同时满足时，再用个股相对板块 MAD Z 值判断是否只是跟随板块下跌。命中时只增加 `discipline_review.sector_panic_guard` 和继续持有证据，不修改 `verdict` 或买卖点字段。
-- 未触发当前 `position_exit_plan` 时，强 `SELL/TRIM` 不能直接成为可执行卖出；当天或冷却窗口内已有同标的反向成交时，再次买入必须重新触发回踩、再入场或突破线，并且当前价相对上次成交价穿越对应边界。
-- 板块映射顺序是：东方财富浏览器请求头直连 → AkShare → `data/sector_cache.json` 本地缓存 → `market_monitor_config.json` 的 `sector`/`industry`；`data/` 被 git 忽略，移植时可手动带走缓存。盘中监控会读取同一份 `sector_cache` 覆盖运行时 A 股标的 `sector`，让委员会、窗口和止盈止损参数读取都对齐周更优化的东方财富板块。
+- 成本锚定的 `position_exit_plan`、`position_exit_policy` 和 `position_exit_discipline_review` 已在生产链路停用；它们不再改变优化器预期收益、提醒评分、提醒阈值、主窗口状态或详情文案。
+- `jobs.market_monitor_alerts.select_optimal_actionable_alerts()` 的卖出提醒只来自委员会/优化器 `SELL/TRIM`、负向建议金额、可卖手数、交易模式、A 股 T+1 和重复交易护栏，不会因为旧持仓纪律线触发而合成卖出候选。
+- `jobs/weekly_exit_param_optimization.py`、对应 YAML 和 `core/position_exit_policy.py` 已删除；旧参数同步接口只返回空兼容响应，不读写 `.env` 或报告。
+- A 股行为因子缺失时，后端把目标标的、真实持仓和关注列表组成候选池，补拉两年历史并重建横截面；仍低置信度时输出 `WAIT` 和 `factor_unavailable` 灰色卡片，不回退旧技术收益模型。
+- 当天或冷却窗口内已有同标的反向成交时，再次买入必须重新触发回踩、再入场或突破线，并且当前价相对上次成交价穿越对应边界；再次卖出按委员会/优化器卖出方向和交易约束判断。
+- 板块映射顺序是：东方财富浏览器请求头直连 → AkShare → `data/sector_cache.json` 本地缓存 → `market_monitor_config.json` 的 `sector`/`industry`；`data/` 被 git 忽略，移植时可手动带走缓存。盘中监控会读取同一份 `sector_cache` 覆盖运行时 A 股标的 `sector`，让委员会、窗口和告警板块分布对齐东方财富板块。
 
 ### 1.2 真实账户单源与影子账户隔离
 
@@ -154,7 +153,7 @@ Web/API 的持仓和关注列表 CRUD 是另一条增量路径：`POST/PUT/DELET
 当前落地位置：
 
 - `scripts/export_accuracy.py` 在生成公开 `docs/accuracy_summary.json` 前对小样本 rate 置空。
-- `core/position_exit_policy.py` / `jobs/weekly_exit_param_optimization.py` 对卖出胜率使用 Wilson 下界、样本可靠性收缩和风险调整期望效用。
+- 成本锚定持仓策略模块与周度任务已删除；API 的空 `position_exit_policy` 仅用于旧客户端反序列化兼容。
 - `db/account_ledger.py` 的 dual-account PnL 和 trades 是后续验证委员会胜率的真实对照基座。
 
 ---

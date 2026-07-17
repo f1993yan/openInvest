@@ -57,7 +57,7 @@ def _row_tag(row: Dict[str, Any]) -> str:
         return "trigger"
     if state == "error":
         return "error"
-    if state == "blocked":
+    if state in {"blocked", "factor_unavailable"}:
         return "blocked"
     if state == "executed":
         return "blocked"
@@ -89,6 +89,8 @@ def _card_bg(row: Dict[str, Any]) -> str:
         return ACTION_BG
     if tag == "trigger":
         return TRIGGER_BG
+    if tag == "blocked":
+        return "#edf0f4"
     return CARD_BG
 
 
@@ -98,7 +100,7 @@ def _stack_layer_bg(row: Dict[str, Any]) -> str:
         return "#ffd8d2"
     if state in {"trigger_confirmed", "watch_trigger"}:
         return "#ffe4b5"
-    if state == "blocked":
+    if state in {"blocked", "factor_unavailable"}:
         return "#d7dde7"
     return "#d7e8ff"
 
@@ -132,9 +134,8 @@ def _exit_summary(row: Dict[str, Any]) -> str:
     parts = []
     stop = _safe_num(exit_points.get("stop_loss_price"))
     take = _safe_num(exit_points.get("take_profit_price"))
-    prefix = "纪" if exit_points.get("plan_type") == "a_share_position_exit" else ""
     if stop > 0:
-        parts.append(f"{prefix}损{stop:.2f}")
+        parts.append(f"损{stop:.2f}")
     if take > 0:
         parts.append(f"止{take:.2f}")
     return " ".join(parts[:2]) or "-"
@@ -142,41 +143,26 @@ def _exit_summary(row: Dict[str, Any]) -> str:
 
 def _sector_summary(row: Dict[str, Any]) -> str:
     op = row.get("operation") or {}
-    discipline = op.get("discipline_review") or {}
-    panic_guard = discipline.get("sector_panic_guard") or {}
-    sector = str(panic_guard.get("sector") or row.get("sector") or row.get("industry") or "").strip()
+    sector = str(row.get("sector") or row.get("industry") or "").strip()
     if not sector:
         return "板块 -"
-    source = "恐慌判定" if panic_guard.get("sector") else "分类"
-    return f"板块 {_short(sector, 12)}（{source}）"
+    return f"板块 {_short(sector, 12)}（分类）"
 
 
 def _operation_summary(row: Dict[str, Any]) -> str:
     op = row.get("operation") or {}
     status = str(op.get("status") or row.get("state") or "")
+    if status == "factor_unavailable":
+        return "无法判断"
     alloc = _safe_num(op.get("suggested_alloc_cny"))
     lots = _suggested_lots(row)
     verdict = str(op.get("verdict") or "").upper()
-    discipline = op.get("discipline_review") or {}
-    trigger_kind = str(discipline.get("trigger_kind") or "")
     side = "卖" if verdict in {"SELL", "TRIM"} or alloc < 0 or lots < 0 else "买"
     if status == "action_required":
-        if trigger_kind in {"position_stop", "cost_stop_loss", "stop_loss"}:
-            return f"止损卖{_fmt_lots(abs(lots))}" if lots else "止损卖"
-        if trigger_kind in {"take_profit_2", "take_profit", "take_profit_1", "trim"}:
-            return f"止盈卖{_fmt_lots(abs(lots))}" if lots else "止盈卖"
         return f"{side}{_fmt_lots(abs(lots))}" if lots else "操作"
     if status in {"trigger_confirmed", "watch_trigger"}:
-        if trigger_kind in {"position_stop", "cost_stop_loss", "stop_loss"}:
-            return "止损复核"
-        if trigger_kind in {"take_profit_2", "take_profit", "take_profit_1", "trim"}:
-            return "止盈复核"
         return "触发"
     if status == "candidate":
-        if discipline:
-            if trigger_kind in {"position_stop", "cost_stop_loss", "stop_loss"}:
-                return "止损复核"
-            return "止盈复核"
         if verdict in {"SELL", "TRIM"} or alloc < 0:
             return "待确认卖"
         if verdict in {"BUY", "ACCUMULATE"} or alloc > 0:
@@ -346,7 +332,6 @@ def _detail_line_style(line: str) -> str:
         "当前价:",
         "理想买点:",
         "仓位建议:",
-        "持仓纪律",
         "入场估算",
         "缠论与技术形态分析",
         "最新确认笔",
@@ -391,7 +376,6 @@ def _beginner_summary_lines(
     right_gate = (source or {}).get("right_side_trend_gate") or row.get("right_side_trend_gate") or {}
     review = str((source or {}).get("optimizer_review") or (source or {}).get("cio_memo") or _review_text_from_row(row))
     decision_synthesis = (source or {}).get("decision_synthesis") or row.get("decision_synthesis") or {}
-    discipline_review = op.get("discipline_review") or {}
     buy_signal_backtest = (
         (source or {}).get("buy_signal_backtest")
         or row.get("buy_signal_backtest")
@@ -411,7 +395,6 @@ def _beginner_summary_lines(
     take = exit_points.get("take_profit_price")
     if not take or take <= 0:
         take = ee.get("take_profit_price")
-    plan_type = str(exit_points.get("plan_type") or "")
     pullback_dist = _distance_pct(current, pullback)
     breakout_dist = _distance_pct(current, breakout)
     stop_dist = _distance_pct(current, stop)
@@ -437,9 +420,6 @@ def _beginner_summary_lines(
         decision = f"{action}，先看是否接近买点。"
     elif str(verdict or "").upper() in {"TRIM", "SELL"}:
         decision = f"{action}，重点看是否触发止损/减仓线。"
-    elif discipline_review:
-        edge = _safe_num(discipline_review.get("expected_utility_edge_pct"))
-        decision = f"纪律复核，卖出期望相对继续持有净优势 {edge:.2f}pct。"
     else:
         decision = f"{action}，暂时以观察为主。"
     lines = [
@@ -450,7 +430,7 @@ def _beginner_summary_lines(
         f"1. 当前价: {_fmt_price(current)}，今日涨跌 {_fmt_pct(price.get('change_pct'))}。",
         f"   所属板块: {str(row.get('sector') or row.get('industry') or '-')}。",
         f"2. 理想买点: 回调 {_fmt_price(pullback)}（在当前价 {_fmt_distance(pullback_dist)}）；突破 {_fmt_price(breakout)}（在当前价 {_fmt_distance(breakout_dist)}）。",
-        f"3. 风险线: {'持仓纪律' if plan_type == 'a_share_position_exit' else '入场估算'}，止损 {_fmt_price(stop)}（在当前价 {_fmt_distance(stop_dist)}）；止盈 {_fmt_price(take)}（在当前价 {_fmt_distance(take_dist)}）。",
+        f"3. 风险线: 入场估算，止损 {_fmt_price(stop)}（在当前价 {_fmt_distance(stop_dist)}）；止盈 {_fmt_price(take)}（在当前价 {_fmt_distance(take_dist)}）。",
         f"4. 仓位建议: {_fmt_money(alloc)} 元；置信度 {confidence:.0%}；当前{'已有持仓' if row.get('is_holding') else '没有持仓'}。",
         "",
         "为什么这么判断:",
@@ -481,37 +461,6 @@ def _beginner_summary_lines(
             f"- 盘中哨兵: 尚未启用（{price_sentinel.get('reason') or '样本不足'}，"
             f"n={int(_safe_num(price_sentinel.get('sample_count')))}）。"
         )
-    if discipline_review:
-        trigger_label = {
-            "position_stop": "持仓止损",
-            "cost_stop_loss": "成本止损",
-            "stop_loss": "技术止损",
-            "take_profit_1": "第一止盈",
-            "take_profit_2": "第二止盈",
-            "take_profit": "止盈",
-            "trim": "减仓",
-        }.get(str(discipline_review.get("trigger_kind") or ""), "持仓纪律")
-        lines.append(
-            f"- 纪律复核: {trigger_label}已触发；"
-            f"卖出期望 {_safe_num(discipline_review.get('sell_expected_edge_pct')):.2f}pct，"
-            f"继续持有证据 {_safe_num(discipline_review.get('continuation_edge_pct')):.2f}pct，"
-            f"净效用 {_safe_num(discipline_review.get('expected_utility_edge_pct')):.2f}pct。"
-        )
-        lines.append(
-            f"- 参数可信度: 周度策略可靠性 {_safe_num(discipline_review.get('policy_reliability')):.0%}，"
-            f"卖出胜率下界 {_safe_num(discipline_review.get('sell_win_rate_lower')):.0%}，"
-            f"卖出后路径优势下界 {_safe_num(discipline_review.get('post_sell_positive_edge_lower')):.0%}。"
-        )
-        panic_guard = discipline_review.get("sector_panic_guard") or {}
-        if panic_guard.get("active"):
-            lines.append(
-                f"- 板块恐慌保护: {panic_guard.get('sector') or '同板块'}中位跌幅"
-                f" {_safe_num(panic_guard.get('sector_median_change_pct')):.2f}%，"
-                f"下跌占比 {_safe_num(panic_guard.get('sector_down_ratio')):.0%}；"
-                f"该股相对板块Z值 {_safe_num(panic_guard.get('target_relative_z')):.2f}，"
-                f"不是独立走弱，已增加继续持有证据"
-                f" {_safe_num(panic_guard.get('hold_utility_bonus_pct')):.2f}pct。"
-            )
     if buy_signal_backtest:
         lines.append(f"- {buy_signal_summary_text(buy_signal_backtest)}")
     if one_line and one_line != "-":
@@ -520,8 +469,6 @@ def _beginner_summary_lines(
     signal_warning = str((buy_signal_backtest or {}).get("warning") or "")
     if risk_flags or synthesis_warnings or signal_warning:
         lines.extend(["", "需要小心:"])
-        if plan_type == "a_share_position_exit":
-            lines.append("- 已持仓标的的止盈止损盘中不重算，只在收盘后按追踪规则上移风险线。")
         for warning in synthesis_warnings:
             lines.append(f"- {warning}")
         if signal_warning:
@@ -598,13 +545,6 @@ def _beginner_next_step(
         if wait_reasons:
             return f"方向偏卖，但暂未进入执行提醒：{wait_reasons[0]}。若跌破 {_fmt_price(stop_num)} 或下一轮评分增强，再优先降风险。"
         return f"方向偏卖，重点看是否跌破 {_fmt_price(stop_num)}，或卖出期望收益是否继续占优。"
-    discipline = op.get("discipline_review") or {}
-    if discipline:
-        edge = _safe_num(discipline.get("expected_utility_edge_pct"))
-        if status == "action_required":
-            lots = abs(_suggested_lots(row or {}))
-            return f"持仓纪律已确认且净效用为正，按最新价核对后优先卖出{'约 ' + _fmt_lots(lots) if lots else '对应仓位'}。"
-        return f"纪律线已经触发但净效用 {edge:.2f}pct 尚未压过继续持有证据，下一轮仍触发或净效用转正再执行。"
     return "先不动，等价格接近买点/止损点，或下一轮监控给出明确触发。"
 
 

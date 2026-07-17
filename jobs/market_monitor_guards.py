@@ -7,9 +7,7 @@ from typing import Any, Dict, Optional
 from jobs.market_monitor_common import AUTO_TRADE_REPEAT_COOLDOWN_MINUTES, log, _fmt_price, _safe_num
 from jobs.market_monitor_entry_exit import (
     evaluate_entry_exit_triggers,
-    evaluate_position_exit_plan_triggers,
     _stock_units,
-    _update_position_exit_plan,
 )
 
 def _result_direction(result: Dict[str, Any]) -> Optional[str]:
@@ -201,15 +199,7 @@ def _current_direction_triggers(
     previous = ((entry_exit_state.get("symbols") or {}).get(symbol) or {})
     is_holding = _safe_num(stock.get("position_pct")) > 0 or _stock_units(stock) > 0
     if is_holding and direction == "SELL":
-        position_exit_plan = _update_position_exit_plan(
-            previous.get("position_exit_plan"),
-            symbol=symbol,
-            stock=stock,
-            result=result,
-            current_price=current_price,
-            is_holding=True,
-        )
-        return evaluate_position_exit_plan_triggers(current_price, position_exit_plan)
+        return []
     return evaluate_entry_exit_triggers(
         current_price,
         previous.get("entry_exit_points"),
@@ -278,16 +268,6 @@ def apply_repeated_trade_guard(
         entry_exit_state=entry_exit_state,
     )
     has_direction_trigger = _has_direction_trigger(direction, triggers)
-    is_holding = _safe_num(stock.get("position_pct")) > 0 or _stock_units(stock) > 0
-    if is_holding and direction == "SELL" and not has_direction_trigger:
-        return _block_execution(
-            result,
-            reason="sell_waiting_for_current_exit_trigger",
-            direction=direction,
-            current_price=current_price,
-            triggers=triggers,
-        )
-
     # 显式传 cooldown：避免依赖函数默认参数（默认参数在 def 时绑定，曾被模块后段
     # 的重复赋值坑过——实际生效值与 memo 显示值不一致）。现在唯一来源是模块顶部
     # 的 AUTO_TRADE_REPEAT_COOLDOWN_MINUTES（env 可配，默认 240），实际过滤与
@@ -300,7 +280,7 @@ def apply_repeated_trade_guard(
         cooldown_minutes=AUTO_TRADE_REPEAT_COOLDOWN_MINUTES,
     )
     if recent_trade:
-        if has_direction_trigger and _trigger_has_price_progress_from_trade(
+        if direction != "SELL" and has_direction_trigger and _trigger_has_price_progress_from_trade(
             direction=direction,
             triggers=triggers,
             current_price=current_price,
@@ -328,6 +308,10 @@ def apply_repeated_trade_guard(
         recent_symbol_trade
         and str(recent_symbol_trade.get("direction", "")).upper() != direction
     ):
+        # A committee SELL no longer depends on the retired position-exit
+        # price plan. A-share T+1 and sellable-unit checks remain downstream.
+        if direction == "SELL":
+            return result
         if not has_direction_trigger:
             return _block_execution(
                 result,

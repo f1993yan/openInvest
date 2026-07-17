@@ -34,9 +34,6 @@ from jobs.market_monitor_common import (  # noqa: F401
 )
 from jobs.market_monitor_entry_exit import (  # noqa: F401
     _build_initial_position_exit_plan,
-    _effective_atr_pct,
-    _is_after_a_share_close,
-    _position_plan_should_reset,
     _stock_units,
     _trigger_label,
     _trigger_sides,

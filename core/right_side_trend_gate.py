@@ -102,7 +102,7 @@ def evaluate_right_side_trend_gate(
             required_edge_pct=0.0,
             trend_score=0.0,
             committee_trend="neutral",
-            reason="已有持仓，加仓/减仓由持仓纪律和优化器共同处理",
+            reason="已有持仓，本闸门只约束新开仓；加仓/减仓由优化器处理",
             inputs={},
         )
 

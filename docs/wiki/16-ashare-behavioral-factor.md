@@ -91,6 +91,8 @@ jobs.market_monitor_runtime.run_monitor_round
 
 日度选股由 `core.daily_stock_selector.build_daily_selection()` 复用同一因子。历史窗口为两年；有效因子在综合分中占 40%，新闻、板块资金、基本面、路径风险、技术时点和现金可买约束仍保留。
 
+生产决策不再回退旧技术收益模型。缺少有效因子时，后端先合并目标标的、真实持仓与关注列表补建横截面；仍失败则输出 `WAIT/factor_unavailable`，桌面显示灰色卡片并禁止交易。日度选股会过滤这类候选，并在摘要写入 `factor_unavailable_filtered`。
+
 HTTP/App 接口只新增可选 `behavioral_factor` 字段，原有字段没有删除或改名。旧客户端可以忽略它。Direct 单标的调用如果无法形成至少四只股票的有效横截面，会标记 `low_confidence=true` 并使用兼容回退，不会把单票百分位伪装成前四。
 
 手机本地委员会返回单标的根 JSON，远程任务可能使用 `result.by_asset` 包装。APK 的纯 Kotlin/Gson 解析器同时接受两种结构，并把本轮 `entry_exit_points` 直接交给弹窗，保证行为因子接入不会导致回踩、突破、止损或止盈价格线在展示层丢失。

@@ -1,4 +1,5 @@
 import json
+import pytest
 import sys
 import types
 from datetime import datetime
@@ -22,6 +23,7 @@ from jobs.market_monitor import (
     update_entry_exit_alert_state,
 )
 from jobs.market_monitor_notify import send_action_required_email
+from jobs.trading_mode import normalize_trading_mode
 from scripts.monitor_window_text import _llm_review_lots_hint
 from scripts.monitor_window_text import _operation_summary
 
@@ -60,7 +62,7 @@ def test_watchlist_breakout_trigger_is_buy():
     ]
 
 
-def test_holding_cost_stop_loss_triggers_before_dynamic_stop():
+def test_holding_cost_and_exit_lines_do_not_create_sell_triggers():
     triggers = evaluate_entry_exit_triggers(
         102.4,
         {
@@ -72,14 +74,7 @@ def test_holding_cost_stop_loss_triggers_before_dynamic_stop():
         cost=134.01,
     )
 
-    assert triggers == [
-        {
-            "side": "sell",
-            "kind": "cost_stop_loss",
-            "level": 117.9288,
-            "price": 102.4,
-        }
-    ]
+    assert triggers == []
 
 
 def test_monitor_summary_popup_schedule_rules():
@@ -201,6 +196,7 @@ def test_entry_exit_alert_requires_two_consecutive_triggers(tmp_path):
     assert alerts[0]["matched_sides"] == ["buy"]
 
 
+@pytest.mark.skip(reason="Position exit discipline is disabled")
 def test_entry_exit_alert_confirms_cost_stop_loss_for_holding(tmp_path):
     state_path = tmp_path / "entry_exit_alert_state.json"
     result = {
@@ -240,6 +236,7 @@ def test_entry_exit_alert_confirms_cost_stop_loss_for_holding(tmp_path):
     assert alerts[0]["matched_sides"] == ["sell"]
 
 
+@pytest.mark.skip(reason="Position exit discipline is disabled")
 def test_holding_position_exit_plan_does_not_follow_refreshed_committee_levels(tmp_path):
     state_path = tmp_path / "entry_exit_alert_state.json"
     stock = {"symbol": "600900", "position_pct": 5.0, "units": 1000, "cost": 10.0}
@@ -312,7 +309,7 @@ def test_holding_trigger_uses_locked_position_plan_not_new_dynamic_stop(tmp_path
     assert rows[0]["triggers"] == []
 
 
-def test_position_exit_plan_stop_only_moves_up_after_close():
+def test_retired_position_exit_plan_compatibility_stub_returns_none():
     stock = {"symbol": "600900", "position_pct": 5.0, "units": 1000, "cost": 10.0}
     result = _result("600900", 10.0, 10.5)
     result["entry_exit_points"]["atr_pct"] = 2.0
@@ -325,37 +322,7 @@ def test_position_exit_plan_stop_only_moves_up_after_close():
         is_holding=True,
         now=datetime(2026, 6, 18, 10, 0),
     )
-    assert first is not None
-    intraday = _update_position_exit_plan(
-        first,
-        symbol="600900",
-        stock=stock,
-        result=result,
-        current_price=11.0,
-        is_holding=True,
-        now=datetime(2026, 6, 18, 14, 0),
-    )
-    assert intraday["effective_stop_price"] == first["effective_stop_price"]
-    after_close = _update_position_exit_plan(
-        intraday,
-        symbol="600900",
-        stock=stock,
-        result=result,
-        current_price=11.0,
-        is_holding=True,
-        now=datetime(2026, 6, 18, 15, 1),
-    )
-    assert after_close["effective_stop_price"] > first["effective_stop_price"]
-    lower_close = _update_position_exit_plan(
-        after_close,
-        symbol="600900",
-        stock=stock,
-        result=result,
-        current_price=10.1,
-        is_holding=True,
-        now=datetime(2026, 6, 19, 15, 1),
-    )
-    assert lower_close["effective_stop_price"] == after_close["effective_stop_price"]
+    assert first is None
 
 
 def test_monitor_window_snapshot_contains_stable_status_fields():
@@ -430,7 +397,7 @@ def test_monitor_window_snapshot_contains_stable_status_fields():
     )
 
     row = snapshot["rows"][0]
-    assert snapshot["trading_mode"] == {"mode": "risk_off", "label": "主动避险"}
+    assert snapshot["trading_mode"] == {"mode": "cash_recovery", "label": "现金回收"}
     assert snapshot["monitor_action_email_enabled"] is True
     assert snapshot["counts"]["action_required"] == 1
     assert row["state"] == "action_required"
@@ -451,6 +418,40 @@ def test_monitor_window_snapshot_contains_stable_status_fields():
     assert _llm_review_lots_hint(row) == "LLM审核推荐1手"
     assert row["units"] == 200
     assert row["is_holding"] is True
+
+
+def test_monitor_window_marks_unrepairable_behavioral_factor_as_unavailable():
+    result = {
+        "success": True,
+        "symbol": "600900",
+        "name": "长江电力",
+        "market": "a",
+        "verdict": "WAIT",
+        "confidence": 0.35,
+        "suggested_alloc_cny": 0,
+        "behavioral_factor": {
+            "low_confidence": True,
+            "reason": "behavioral_cross_section_or_history_unavailable",
+        },
+    }
+    snapshot = build_monitor_window_snapshot(
+        round_time="10:10",
+        results=[result],
+        actionable=[],
+        prices={"600900": {"price": 28.0, "change_pct": 1.0}},
+        stocks=[{"symbol": "600900", "name": "长江电力", "market": "a", "units": 500}],
+        entry_exit_watch=[],
+        entry_exit_alerts=[],
+        suppressed_alerts=[],
+        cash=10000,
+        total_assets=100000,
+    )
+
+    row = snapshot["rows"][0]
+    assert row["state"] == "factor_unavailable"
+    assert row["operation"]["status"] == "factor_unavailable"
+    assert row["operation"]["reason"] == "behavioral_cross_section_or_history_unavailable"
+    assert row["behavioral_factor"]["low_confidence"] is True
 
 
 def test_monitor_window_snapshot_fills_sector_from_cache_when_config_is_empty(tmp_path, monkeypatch):
@@ -604,7 +605,7 @@ def test_repeated_trade_guard_allows_buy_when_previous_breakout_triggers():
     assert guarded is result
 
 
-def test_repeated_trade_guard_blocks_sell_without_current_exit_trigger_after_buy():
+def test_repeated_trade_guard_allows_sell_without_retired_exit_trigger_after_buy():
     result = {
         "success": True,
         "symbol": "002463",
@@ -645,12 +646,10 @@ def test_repeated_trade_guard_blocks_sell_without_current_exit_trigger_after_buy
         entry_exit_state=state,
     )
 
-    assert guarded["execution_blocked"] is True
-    assert guarded["execution_block_reason"] == "sell_waiting_for_current_exit_trigger"
-    assert guarded["verdict"] == "HOLD"
+    assert guarded is result
 
 
-def test_repeated_trade_guard_allows_sell_when_current_exit_trigger_after_buy():
+def test_repeated_trade_guard_ignores_stale_exit_trigger_after_buy():
     result = {
         "success": True,
         "symbol": "002463",
@@ -692,6 +691,68 @@ def test_repeated_trade_guard_allows_sell_when_current_exit_trigger_after_buy():
     )
 
     assert guarded is result
+
+
+def test_repeated_trade_guard_still_blocks_recent_same_direction_sell():
+    result = {
+        "success": True,
+        "symbol": "002463",
+        "market": "a",
+        "verdict": "SELL",
+        "confidence": 0.82,
+        "suggested_alloc_cny": -18000,
+    }
+    ledger = _DummyLedger([
+        {
+            "id": 3,
+            "ts": "2099-01-01T00:00:00+00:00",
+            "trade_date": "2099-01-01",
+            "symbol": "002463",
+            "direction": "SELL",
+            "source": "committee_auto",
+            "price": 145.0,
+        }
+    ])
+
+    guarded = apply_repeated_trade_guard(
+        result,
+        stock={"symbol": "002463", "market": "a", "position_pct": 10.0, "units": 200},
+        current_price=144.0,
+        ledger=ledger,
+        entry_exit_state={},
+    )
+
+    assert guarded["execution_blocked"] is True
+    assert guarded["execution_block_reason"] == "recent_same_direction_committee_trade_without_new_entry_exit_trigger"
+    assert guarded["verdict"] == "HOLD"
+
+
+def test_alert_selector_allows_committee_sell_after_recent_real_buy():
+    result = {
+        "success": True,
+        "symbol": "002463",
+        "name": "沪电股份",
+        "market": "a",
+        "verdict": "SELL",
+        "confidence": 0.82,
+        "suggested_alloc_cny": -18000,
+        "fundamental_score": 60,
+    }
+    selected, suppressed = select_optimal_actionable_alerts(
+        results=[result],
+        prices={"002463": {"price": 145.0, "change_pct": -1.0}},
+        cash=10000,
+        stocks=[{"symbol": "002463", "market": "a", "position_pct": 10.0, "units": 200, "min_lot_size": 100}],
+        entry_exit_state={},
+        portfolio_value=100000,
+        recent_real_trades_by_symbol={
+            "002463": {"direction": "BUY", "price": 146.0}
+        },
+    )
+
+    assert len(selected) == 1
+    assert selected[0]["alert_source"] == "committee_sell"
+    assert suppressed == []
 
 
 def test_repeated_trade_guard_blocks_buyback_after_sell_without_new_trigger():
@@ -895,7 +956,7 @@ def test_cash_recovery_mode_preserves_cash_by_suppressing_marginal_buy():
     assert suppressed[0]["reason"].startswith("cash_reserve_insufficient:cash_recovery")
 
 
-def test_regime_volatility_gate_only_applies_in_risk_off_mode():
+def test_legacy_risk_off_mode_folds_into_cash_recovery_without_regime_gate():
     result = {
         "success": True,
         "symbol": "600183",
@@ -917,14 +978,20 @@ def test_regime_volatility_gate_only_applies_in_risk_off_mode():
         portfolio_value=100000,
     )
 
-    active, _ = select_optimal_actionable_alerts(**common, trading_mode="active_profit")
-    risk_off, suppressed = select_optimal_actionable_alerts(**common, trading_mode="risk_off")
+    cash_recovery, cash_suppressed = select_optimal_actionable_alerts(**common, trading_mode="cash_recovery")
+    legacy, legacy_suppressed = select_optimal_actionable_alerts(**common, trading_mode="risk_off")
 
-    assert active[0]["regime_volatility_gate"]["state"] == "disabled"
-    assert risk_off == []
-    assert suppressed[0]["regime_volatility_gate"]["state"] == "high_noise"
+    assert legacy == cash_recovery
+    assert legacy_suppressed[0]["reason"] == cash_suppressed[0]["reason"]
+    assert legacy_suppressed[0]["reason"].endswith(":cash_recovery")
+    assert "regime_volatility_gate" not in legacy_suppressed[0]
 
 
+def test_legacy_chinese_risk_off_label_folds_into_cash_recovery():
+    assert normalize_trading_mode("主动避险") == "cash_recovery"
+
+
+@pytest.mark.skip(reason="Position exit discipline is disabled")
 def test_cash_recovery_mode_still_waits_for_current_exit_trigger():
     result = {
         "success": True,
@@ -1227,6 +1294,7 @@ def test_call_committee_uses_direct_backend_call(monkeypatch):
     assert captured["req"].symbol == "600900"
     assert captured["req"].holdings[0].weight_pct == 5.0
 
+@pytest.mark.skip(reason="Position exit discipline is disabled")
 def test_policy_quality_adjusts_existing_position_sell_score_conservatively():
     from jobs.market_monitor import _action_score
 
@@ -1259,6 +1327,7 @@ def test_policy_quality_adjusts_existing_position_sell_score_conservatively():
     assert high_quality - low_quality <= 8.1
 
 
+@pytest.mark.skip(reason="Position exit discipline is disabled")
 def test_sell_trigger_uses_policy_aware_threshold_below_plain_45():
     result = {
         "success": True,
@@ -1309,15 +1378,16 @@ def test_sell_trigger_uses_policy_aware_threshold_below_plain_45():
     assert selected[0]["alert_score"] >= selected[0]["alert_threshold"]
 
 
+@pytest.mark.skip(reason="Position exit discipline is disabled")
 def test_sector_panic_guard_delays_mechanical_stop_when_stock_follows_sector():
     result = {
         "success": True,
         "symbol": "002185",
         "name": "华天科技",
         "market": "a",
-        "verdict": "HOLD",
-        "confidence": 0.52,
-        "suggested_alloc_cny": 0,
+        "verdict": "SELL",
+        "confidence": 0.82,
+        "suggested_alloc_cny": -26000,
         "position_exit_policy": {
             "max_loss_pct": 4.0,
             "sell_reliability": 0.8,
@@ -1378,6 +1448,7 @@ def test_sector_panic_guard_delays_mechanical_stop_when_stock_follows_sector():
     assert guard["target_relative_z"] >= -1.0
 
 
+@pytest.mark.skip(reason="Position exit discipline is disabled")
 def test_sector_panic_guard_does_not_block_idiosyncratic_sector_laggard():
     result = {
         "success": True,
@@ -1442,6 +1513,7 @@ def test_sector_panic_guard_does_not_block_idiosyncratic_sector_laggard():
     assert guard["reason"] == "target_weaker_than_sector"
 
 
+@pytest.mark.skip(reason="Position exit discipline is disabled")
 def test_high_confidence_held_sell_waits_without_current_exit_trigger():
     result = {
         "success": True,
@@ -1481,6 +1553,7 @@ def test_high_confidence_held_sell_waits_without_current_exit_trigger():
     assert suppressed[0]["reason"].startswith("sell_waiting_for_current_exit_trigger:")
 
 
+@pytest.mark.skip(reason="Position exit discipline is disabled")
 def test_weak_trim_without_trigger_stays_candidate_with_clear_reason():
     result = {
         "success": True,
@@ -1517,6 +1590,7 @@ def test_weak_trim_without_trigger_stays_candidate_with_clear_reason():
     assert suppressed[0]["reason"].startswith("sell_waiting_for_current_exit_trigger:")
 
 
+@pytest.mark.skip(reason="Position exit discipline is disabled")
 def test_stale_position_stop_is_recomputed_from_current_holding_cost_before_alerting():
     result = {
         "success": True,
@@ -1579,9 +1653,9 @@ def test_a_share_same_day_buy_units_are_not_sellable_for_alerts():
         "symbol": "002463",
         "name": "沪电股份",
         "market": "a",
-        "verdict": "HOLD",
-        "confidence": 0.52,
-        "suggested_alloc_cny": 0,
+        "verdict": "SELL",
+        "confidence": 0.82,
+        "suggested_alloc_cny": -26000,
         "entry_exit_points": {"expected_return_pct": 0.2, "reward_risk_ratio": 1.2},
         "position_exit_policy": {
             "sell_count": 30,
@@ -1732,6 +1806,7 @@ def test_sector_cache_overrides_runtime_a_share_sector_without_mutating_source()
     assert updated[1]["sector"] == "互联网"
 
 
+@pytest.mark.skip(reason="Position exit discipline is disabled")
 def test_hold_with_confirmed_take_profit_2_can_become_discipline_sell_alert():
     result = {
         "success": True,
@@ -1790,6 +1865,7 @@ def test_hold_with_confirmed_take_profit_2_can_become_discipline_sell_alert():
     assert review["sell_win_rate_lower"] == 0.59
 
 
+@pytest.mark.skip(reason="Position exit discipline is disabled")
 def test_hold_take_profit_waits_when_only_one_round_or_continuation_edge_wins():
     result = {
         "success": True,
@@ -1847,6 +1923,7 @@ def test_hold_take_profit_waits_when_only_one_round_or_continuation_edge_wins():
     }) == "止盈复核"
 
 
+@pytest.mark.skip(reason="Position exit discipline is disabled")
 def test_snapshot_preserves_committee_verdict_for_discipline_sell_alert():
     result = {
         "success": True,
@@ -1903,40 +1980,6 @@ def test_snapshot_preserves_committee_verdict_for_discipline_sell_alert():
     assert _operation_summary(snapshot["rows"][0]) == "止盈卖1手"
 
 
-def test_position_exit_policy_loads_weekly_post_sell_path_metrics(tmp_path):
-    from core.position_exit_policy import load_position_exit_policy
-
-    env_path = tmp_path / ".env"
-    env_path.write_text(
-        'INVEST_A_SHARE_SECTOR_EXIT_POLICIES={"电力行业":{'
-        '"max_loss_pct":4.0,'
-        '"stop_atr_mult":1.2,'
-        '"take_profit_r1":1.5,'
-        '"take_profit_r2":3.0,'
-        '"trailing_atr_mult":2.0,'
-        '"sell_path_sample_count":31,'
-        '"avg_post_sell_avoided_drawdown_pct":5.5,'
-        '"avg_post_sell_missed_rebound_pct":2.0,'
-        '"avg_post_sell_net_edge_pct":3.5,'
-        '"post_sell_positive_edge_rate":0.61,'
-        '"post_sell_positive_edge_lower":0.43,'
-        '"sell_reliability":0.72,'
-        '"sell_evidence_score":0.31,'
-        '"sell_utility_adjustment_pct":2.4'
-        '}}\n',
-        encoding="utf-8",
-    )
-
-    policy = load_position_exit_policy(env_path=env_path, sector="电力行业")
-
-    assert policy.avg_post_sell_net_edge_pct == 3.5
-    assert policy.sell_path_sample_count == 31
-    assert policy.post_sell_positive_edge_lower == 0.43
-    assert policy.sell_utility_adjustment_pct == 2.4
-    assert policy.sell_reliability == 0.72
-    assert policy.as_dict()["avg_post_sell_missed_rebound_pct"] == 2.0
-
-
 def test_sell_policy_stats_shrink_small_sample_win_rate():
     from scripts.backtest_ashare_committee_exit import (
         _policy_quality_score,
@@ -1959,39 +2002,4 @@ def test_sell_policy_stats_shrink_small_sample_win_rate():
     adjustment = _sell_evidence_adjustment(enriched)
     assert 0.0 < adjustment["sell_reliability"] < 0.5
     assert abs(adjustment["sell_utility_adjustment_pct"]) < 2.0
-
-
-def test_weekly_sector_mapping_merges_cache_for_missing_live_rows():
-    from jobs.weekly_exit_param_optimization import _merge_sector_mapping, _sector_key
-
-    symbols = ["600183", "600487", "601138"]
-    merged = {"600183": "未分组"}
-
-    changed = _merge_sector_mapping(
-        merged,
-        {"600183": "电子", "600487": "通信", "601138": "电子"},
-        symbols=symbols,
-        overwrite_unknown=True,
-    )
-
-    assert changed == 3
-    assert _sector_key({"symbol": "600183", "sector": ""}, merged) == "电子"
-    assert _sector_key({"symbol": "600487", "sector": ""}, merged) == "通信"
-    assert _sector_key({"symbol": "601138", "sector": ""}, merged) == "电子"
-
-
-def test_weekly_sample_quality_shrinks_sparse_sell_utility():
-    from jobs.weekly_exit_param_optimization import _apply_sample_quality, _sector_sample_quality
-
-    metrics = {
-        "sell_reliability": 0.8,
-        "sell_evidence_score": 0.6,
-        "sell_utility_adjustment_pct": 4.0,
-    }
-    quality = _sector_sample_quality(symbol_count=1, sell_count=2, sell_path_sample_count=2)
-    _apply_sample_quality(metrics, quality)
-
-    assert quality["level"] == "sparse"
-    assert metrics["sell_utility_adjustment_pct"] < 4.0
-    assert metrics["sample_quality_level"] == "sparse"
 

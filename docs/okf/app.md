@@ -28,4 +28,4 @@ To improve codebase maintainability and readability, the app is split into funct
 ## Synchronization & Cache
 - **Local JSON Cache**: Persists snapshots (`resolved_snapshot.json`), Daily Selection results (`selection_cache.json`), and debate logs (`committee_results_cache.json`) using secure app-private storage.
 - **Auto-Refresh Service**: Implements a background Android `Service` (`AutoRefreshService`) polling the backend server at user-defined intervals to fetch pricing, news, and screening updates.
-- **Trading Mode Propagation**: `SettingsDialog.kt` stores `active_profit`, `cash_recovery`, or `risk_off`; `LocalCommitteeRunner.kt` passes it as the optional tail argument of `utils.phone_committee.run_committee_local`, preserving older Python interface compatibility through the default value.
+- **Trading Mode Propagation**: `SettingsDialog.kt` stores `active_profit` or `cash_recovery`; `LocalCommitteeRunner.kt` passes it as the optional tail argument of `utils.phone_committee.run_committee_local`, preserving older Python interface compatibility through the default value. Legacy `risk_off` preferences are normalized to `cash_recovery`.

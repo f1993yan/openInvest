@@ -600,56 +600,9 @@ object NetworkClient {
         })
     }
 
-    fun uploadExitParams(jsonContent: String, onResult: (Result<Boolean>) -> Unit) {
-        val body = jsonContent.toRequestBody(JSON_MEDIA_TYPE)
-        val request = Request.Builder()
-            .url("$baseUrl/api/config/exit_params")
-            .post(body)
-            .build()
-        client.newCall(request).enqueue(object : Callback {
-            override fun onFailure(call: Call, e: IOException) {
-                runOnMain(onResult, Result.failure(e))
-            }
-            override fun onResponse(call: Call, response: Response) {
-                if (response.isSuccessful) {
-                    runOnMain(onResult, Result.success(true))
-                } else {
-                    runOnMain(onResult, Result.failure(IOException("Server error: ${response.code}")))
-                }
-                response.close()
-            }
-        })
-    }
-
     fun downloadMonitorConfig(onResult: (Result<String>) -> Unit) {
         val request = Request.Builder()
             .url("$baseUrl/api/config/monitor_config")
-            .get()
-            .build()
-        client.newCall(request).enqueue(object : Callback {
-            override fun onFailure(call: Call, e: IOException) {
-                runOnMain(onResult, Result.failure(e))
-            }
-            override fun onResponse(call: Call, response: Response) {
-                try {
-                    if (response.isSuccessful) {
-                        val bodyString = response.body?.string() ?: ""
-                        runOnMain(onResult, Result.success(bodyString))
-                    } else {
-                        runOnMain(onResult, Result.failure(IOException("Server error: ${response.code}")))
-                    }
-                } catch (e: Exception) {
-                    runOnMain(onResult, Result.failure(e))
-                } finally {
-                    response.close()
-                }
-            }
-        })
-    }
-
-    fun downloadExitParams(onResult: (Result<String>) -> Unit) {
-        val request = Request.Builder()
-            .url("$baseUrl/api/config/exit_params")
             .get()
             .build()
         client.newCall(request).enqueue(object : Callback {
@@ -697,53 +650,6 @@ object NetworkClient {
     fun downloadSectorCache(onResult: (Result<String>) -> Unit) {
         val request = Request.Builder()
             .url("$baseUrl/api/config/sector_cache")
-            .get()
-            .build()
-        client.newCall(request).enqueue(object : Callback {
-            override fun onFailure(call: Call, e: IOException) {
-                runOnMain(onResult, Result.failure(e))
-            }
-            override fun onResponse(call: Call, response: Response) {
-                try {
-                    if (response.isSuccessful) {
-                        val bodyString = response.body?.string() ?: ""
-                        runOnMain(onResult, Result.success(bodyString))
-                    } else {
-                        runOnMain(onResult, Result.failure(IOException("Server error: ${response.code}")))
-                    }
-                } catch (e: Exception) {
-                    runOnMain(onResult, Result.failure(e))
-                } finally {
-                    response.close()
-                }
-            }
-        })
-    }
-
-    fun uploadEnvPolicies(policies: String, onResult: (Result<Boolean>) -> Unit) {
-        val requestBody = gson.toJson(mapOf("policies" to policies)).toRequestBody(JSON_MEDIA_TYPE)
-        val request = Request.Builder()
-            .url("$baseUrl/api/config/env_policies")
-            .post(requestBody)
-            .build()
-        client.newCall(request).enqueue(object : Callback {
-            override fun onFailure(call: Call, e: IOException) {
-                runOnMain(onResult, Result.failure(e))
-            }
-            override fun onResponse(call: Call, response: Response) {
-                if (response.isSuccessful) {
-                    runOnMain(onResult, Result.success(true))
-                } else {
-                    runOnMain(onResult, Result.failure(IOException("Server error: ${response.code}")))
-                }
-                response.close()
-            }
-        })
-    }
-
-    fun downloadEnvPolicies(onResult: (Result<String>) -> Unit) {
-        val request = Request.Builder()
-            .url("$baseUrl/api/config/env_policies")
             .get()
             .build()
         client.newCall(request).enqueue(object : Callback {
@@ -868,4 +774,3 @@ object NetworkClient {
         })
     }
 }
-

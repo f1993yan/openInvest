@@ -79,9 +79,6 @@ class OptimizedDecision:
             f"fundamental_model={self.fundamental_model} score={self.fundamental_score:.1f} "
             f"anchor_multiplier={self.fundamental_anchor_multiplier:.3f} "
             f"return_adj_30d={self.fundamental_return_adjustment_pct:+.2f}%\n"
-            f"exit_policy_adjustment_30d={self.exit_policy_adjustment_pct:+.2f}% "
-            f"exit_policy_reliability={self.exit_policy_reliability:.2f} "
-            f"exit_policy_evidence={self.exit_policy_evidence_score:+.2f}\n"
             f"behavioral_model={self.behavioral_model} score={self.behavioral_factor_score:.2f} "
             f"selected={str(self.behavioral_selected).lower()} "
             f"target_weight={self.behavioral_target_weight_pct:.2f}% "
@@ -221,34 +218,6 @@ def _estimate_expected_return_pct(
     )
 
 
-def _exit_policy_adjustment_pct(
-    *,
-    position_exit_policy: Optional[Any],
-    holding_value: float,
-    total: float,
-) -> tuple[float, float, float]:
-    """Return a conservative 30d holding-return adjustment from sell evidence.
-
-    The weekly optimizer computes this from two-month sector samples using
-    Wilson-lower sell win rates and post-sell path edge.  We only apply it to
-    existing positions; sparse or weak evidence shrinks to zero in
-    ``PositionExitPolicy`` before it reaches this function.
-    """
-    if position_exit_policy is None or holding_value <= 0 or total <= 0:
-        return 0.0, 0.0, 0.0
-    raw = _clamp(_safe_float(getattr(position_exit_policy, "sell_utility_adjustment_pct", 0.0)), -8.0, 8.0)
-    reliability = _clamp(_safe_float(getattr(position_exit_policy, "sell_reliability", 0.0)), 0.0, 1.0)
-    evidence = _clamp(_safe_float(getattr(position_exit_policy, "sell_evidence_score", 0.0)), -1.0, 1.0)
-    if reliability <= 0.0 or abs(raw) < 0.01:
-        return 0.0, reliability, evidence
-    exposure = _clamp(holding_value / total, 0.0, 1.0)
-    # A tiny position should not dominate the whole optimizer.  The adjustment
-    # is applied to the held asset's expected return and scaled by exposure
-    # when that position is below a normal 20% sleeve.
-    exposure_scale = _clamp(exposure / 0.20, 0.25, 1.0)
-    return _clamp(raw * exposure_scale, -8.0, 8.0), reliability, evidence
-
-
 def _sigma_30d_pct(metrics: Dict[str, Any]) -> float:
     # 30 个日历日的前瞻窗口 ≈ 21 个交易日。波动按 sqrt(交易日数) 缩放。
     # 用 21 而非 30：年化波动率本身以 252 个交易日为基，sqrt(21/252) 才是
@@ -326,6 +295,7 @@ def optimize_committee_decision(
     fundamental_assessment: Optional[Any] = None,
     position_exit_policy: Optional[Any] = None,
     behavioral_assessment: Optional[Any] = None,
+    require_a_share_behavioral: bool = False,
 ) -> OptimizedDecision:
     """Choose the executable action with maximum expected utility vs HOLD.
 
@@ -338,8 +308,10 @@ def optimize_committee_decision(
     lot_size = max(int(min_lot_size or 0), 1)
     hand_cost = price * lot_size if price > 0 else 0.0
     holding_value = max(total * _safe_float(position_pct, 0.0) / 100.0, 0.0)
+    _ = position_exit_policy  # Deprecated compatibility argument.
+    is_a_share = (market or "a").lower() == "a"
     use_behavioral = (
-        (market or "a").lower() == "a"
+        is_a_share
         and behavioral_assessment is not None
         and not getattr(behavioral_assessment, "low_confidence", True)
     )
@@ -395,10 +367,39 @@ def optimize_committee_decision(
             exit_policy_evidence_score=0.0,
         )
 
+    if require_a_share_behavioral and is_a_share and not use_behavioral:
+        return OptimizedDecision(
+            verdict="WAIT",
+            alloc_cny=0,
+            confidence=0.35,
+            lots=0,
+            hand_cost=hand_cost,
+            edge_cny=0.0,
+            expected_return_pct=0.0,
+            sigma_30d_pct=_sigma_30d_pct(metrics),
+            p_directional=0.5,
+            odds=0.0,
+            kelly_fraction=0.0,
+            target_position_pct=_safe_float(position_pct, 0.0),
+            cvar_95_loss_pct=0.0,
+            reason="a_share_behavioral_factor_unavailable",
+            fundamental_score=fundamental_score,
+            fundamental_model=fundamental_model,
+            fundamental_anchor_multiplier=fundamental_anchor_multiplier,
+            fundamental_return_adjustment_pct=fundamental_return_adj,
+            behavioral_factor_score=_safe_float(getattr(behavioral_assessment, "score", 0.0), 0.0),
+            behavioral_target_weight_pct=_safe_float(
+                getattr(behavioral_assessment, "target_weight_pct", 0.0), 0.0,
+            ),
+            behavioral_selected=bool(getattr(behavioral_assessment, "selected", False)),
+            behavioral_low_confidence=True,
+            behavioral_model=str(getattr(behavioral_assessment, "model_key", "none")),
+        )
+
     if use_behavioral:
         # For A shares the validated cross-sectional factor replaces the old
         # momentum/RSI/regime fallback. Fundamentals remain a bounded overlay;
-        # stop/take-profit evidence is applied separately below.
+        # cost-anchored position discipline is intentionally not applied.
         mu_pct = _clamp(
             _safe_float(getattr(behavioral_assessment, "expected_return_pct", 0.0))
             + fundamental_return_adj,
@@ -412,12 +413,9 @@ def optimize_committee_decision(
             conditional_return_stats=conditional_return_stats,
             fundamental_assessment=fundamental_assessment,
         )
-    exit_policy_adj, exit_policy_reliability, exit_policy_evidence = _exit_policy_adjustment_pct(
-        position_exit_policy=position_exit_policy,
-        holding_value=holding_value,
-        total=total,
-    )
-    mu_pct = _clamp(mu_pct - exit_policy_adj, -15.0, 15.0)
+    exit_policy_adj = 0.0
+    exit_policy_reliability = 0.0
+    exit_policy_evidence = 0.0
     sigma_pct = _sigma_30d_pct(metrics)
     mu = mu_pct / 100.0
     sigma = sigma_pct / 100.0

@@ -97,12 +97,6 @@ AUTO_TRADE_REPEAT_COOLDOWN_MINUTES = max(
     0,
     int(os.getenv("INVEST_AUTO_TRADE_REPEAT_COOLDOWN_MINUTES", "60")),
 )
-COST_STOP_LOSS_PCT = max(
-    0.0,
-    float(os.getenv("INVEST_MONITOR_COST_STOP_LOSS_PCT", "12")),
-)
-POSITION_EXIT_PLAN_VERSION = 1
-
 def _safe_num(value: Any, default: float = 0.0) -> float:
     try:
         if value is None:
@@ -129,6 +123,6 @@ __all__ = [
     "LUNCH_END", "TRADING_END", "INTERVAL_MINUTES", "ENTRY_EXIT_ALERT_STATE_PATH",
     "LATEST_WINDOW_PATH", "ACTION_EMAIL_STATE_PATH", "MONITOR_POPUPS_ENABLED",
     "MONITOR_ACTION_EMAILS_ENABLED", "AUTO_TRADE_REPEAT_COOLDOWN_MINUTES",
-    "COST_STOP_LOSS_PCT", "POSITION_EXIT_PLAN_VERSION", "log", "_safe_num", "_clamp",
+    "log", "_safe_num", "_clamp",
     "_fmt_price", "_round_trade_price",
 ]

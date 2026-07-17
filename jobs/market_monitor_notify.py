@@ -63,11 +63,6 @@ def _action_lots(action: Dict[str, Any], *, prices: Dict[str, Dict[str, Any]], s
 
 def _trigger_summary(action: Dict[str, Any]) -> str:
     triggers = action.get("alert_triggers") or []
-    if not triggers and action.get("discipline_review"):
-        review = action.get("discipline_review") or {}
-        kind = review.get("trigger_kind")
-        if kind:
-            return str(kind)
     parts = []
     for trigger in triggers:
         kind = str(trigger.get("kind") or trigger.get("side") or "")
@@ -93,8 +88,7 @@ def _action_email_key(action: Dict[str, Any], *, lots: int, trigger_text: str, t
     symbol = str(action.get("symbol") or "").upper()
     direction = _action_direction(action)
     alert_source = str(action.get("alert_source") or "")
-    review = action.get("discipline_review") or {}
-    trigger_kind = str(review.get("trigger_kind") or trigger_text or "")
+    trigger_kind = str(trigger_text or "")
     return "|".join([trade_date, symbol, direction, str(lots), alert_source, trigger_kind])
 
 

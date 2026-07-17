@@ -66,7 +66,8 @@ def synthesize_decision(
     parsed = parsed or {}
     entry_exit_points = entry_exit_points or {}
     right_side_gate = right_side_gate or {}
-    position_exit_policy = position_exit_policy or {}
+    _ = position_exit_policy
+    position_exit_policy = {}
     optimizer_action = str(getattr(optimizer, "verdict", "") or "").upper()
     parsed_action = str(parsed.get("verdict") or "").upper()
     final_action = parsed_action or optimizer_action or "HOLD"
@@ -113,9 +114,6 @@ def synthesize_decision(
         gate_text = "右侧趋势通过" if right_side_gate.get("allow") else "右侧趋势未通过"
         reason = str(right_side_gate.get("reason") or "")
         evidence.append(f"{gate_text}{f'({reason})' if reason else ''}")
-    policy_score = _safe_float(position_exit_policy.get("policy_quality_score"), None)
-    if policy_score is not None:
-        evidence.append(f"止盈止损策略质量 {policy_score:+.1f}")
     if llm_one_line:
         evidence.append(f"LLM审核: {llm_one_line}")
 
@@ -136,9 +134,6 @@ def synthesize_decision(
     risk_warnings.extend(llm_flags[:3])
     if not right_side_gate.get("allow") and final_action in {"BUY", "ACCUMULATE"}:
         risk_warnings.append("右侧趋势尚未确认，买入必须等待触发价")
-    if is_holding and final_action in {"TRIM", "SELL"} and position_exit_policy:
-        risk_warnings.append("卖出以持仓纪律线为准，盘中不随意重算止盈止损")
-
     primary_reason = _primary_reason(final_action, level, evidence, risk_warnings)
     strategy = _strategy_text(
         final_action=final_action,

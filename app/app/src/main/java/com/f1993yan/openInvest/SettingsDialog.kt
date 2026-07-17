@@ -38,6 +38,21 @@ import com.f1993yan.openInvest.network.CrawlerSettings
 import com.f1993yan.openInvest.network.NetworkClient
 import com.f1993yan.openInvest.ui.theme.*
 
+private fun normalizeTradingMode(value: String?): String {
+    val text = value?.trim()?.lowercase().orEmpty()
+    return when (text) {
+        "cash_recovery", "cash", "现金回收", "主动避险", "risk_off", "bear", "defensive" -> "cash_recovery"
+        else -> "active_profit"
+    }
+}
+
+private fun tradingModeLabel(value: String?): String {
+    return when (normalizeTradingMode(value)) {
+        "cash_recovery" -> "现金回收"
+        else -> "主动盈利"
+    }
+}
+
 @Composable
 fun SettingsDialog(
     currentUrl: String,
@@ -53,7 +68,7 @@ fun SettingsDialog(
     var apiKey by remember { mutableStateOf(prefs.getString("llm_api_key", "") ?: "") }
     var llmBaseUrl by remember { mutableStateOf(prefs.getString("llm_base_url", "") ?: "") }
     var model by remember { mutableStateOf(prefs.getString("llm_model", "gemini-2.5-pro") ?: "gemini-2.5-pro") }
-    var tradingMode by remember { mutableStateOf(prefs.getString("trading_mode", "active_profit") ?: "active_profit") }
+    var tradingMode by remember { mutableStateOf(normalizeTradingMode(prefs.getString("trading_mode", "active_profit"))) }
     var autoRefresh by remember { mutableStateOf(prefs.getBoolean("auto_refresh_enabled", false)) }
     var interval by remember { mutableStateOf(prefs.getInt("auto_refresh_interval", 30).toString()) }
     var refreshNews by remember { mutableStateOf(prefs.getBoolean("auto_refresh_news_enabled", true)) }
@@ -101,9 +116,9 @@ fun SettingsDialog(
                 t2CashStr = t2.toString()
                 val tm = json.opt("trading_mode")
                 if (tm is String) {
-                    tradingMode = tm
+                    tradingMode = normalizeTradingMode(tm)
                 } else if (tm is org.json.JSONObject) {
-                    tradingMode = tm.optString("mode", "active_profit")
+                    tradingMode = normalizeTradingMode(tm.optString("mode", "active_profit"))
                 }
             } catch (e: Exception) {
                 Log.e("SettingsDialog", "Failed to parse config values", e)
@@ -120,30 +135,6 @@ fun SettingsDialog(
         }
     }
 
-
-    val exitParamsPicker = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.GetContent()
-    ) { uri ->
-        uri?.let {
-            val content = readTextFromUri(context, it)
-            if (content != null) {
-                saveLocalFile(context, "weekly_exit_param_optimization.json", content)
-                NetworkClient.uploadExitParams(content) { res ->
-                    res.fold(
-                        onSuccess = {
-                            Toast.makeText(context, "每周止盈参数导入且上传成功！", Toast.LENGTH_LONG).show()
-                            onRefresh()
-                        },
-                        onFailure = { err ->
-                            Toast.makeText(context, "参数配置已保存至本地，但上传失败: ${err.message}", Toast.LENGTH_LONG).show()
-                        }
-                    )
-                }
-            } else {
-                Toast.makeText(context, "读取每周止盈参数 file 失败", Toast.LENGTH_SHORT).show()
-            }
-        }
-    }
 
     Dialog(onDismissRequest = onClose) {
         Card(
@@ -344,14 +335,12 @@ fun SettingsDialog(
                     ) {
                         listOf(
                             "active_profit" to "主动盈利",
-                            "cash_recovery" to "现金回收",
-                            "risk_off" to "主动避险"
+                            "cash_recovery" to "现金回收"
                         ).forEach { (mode, label) ->
                             val isSelected = tradingMode == mode
                             val activeBgColor = when(mode) {
                                 "active_profit" -> Color(0xFF6366F1)
                                 "cash_recovery" -> Color(0xFFD97706)
-                                "risk_off" -> Color(0xFFEF4444)
                                 else -> Color(0xFF6366F1)
                             }
                             Box(
@@ -586,25 +575,6 @@ fun SettingsDialog(
                         )
                     )
 
-                    Spacer(modifier = Modifier.height(12.dp))
-                    HorizontalDivider(color = SlateBorder, thickness = 1.dp)
-                    Spacer(modifier = Modifier.height(16.dp))
-
-                    Text("导入配置文件", fontSize = 13.sp, fontWeight = FontWeight.Bold, color = IndigoPrimary)
-                    Spacer(modifier = Modifier.height(6.dp))
-                    Button(
-                        onClick = {
-                            exitParamsPicker.launch("application/json")
-                        },
-                        colors = ButtonDefaults.buttonColors(containerColor = IndigoPrimary),
-                        shape = RoundedCornerShape(10.dp),
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .height(40.dp)
-                    ) {
-                        Text("导入每周止盈配置", color = Color.White, fontSize = 11.sp, fontWeight = FontWeight.Bold)
-                    }
-
                     Spacer(modifier = Modifier.height(14.dp))
                     HorizontalDivider(color = SlateBorder, thickness = 1.dp)
                     Spacer(modifier = Modifier.height(14.dp))
@@ -618,13 +588,10 @@ fun SettingsDialog(
                         Button(
                             onClick = {
                                 val configContent = readLocalFile(context, "market_monitor_config.json")
-                                val exitContent = readLocalFile(context, "weekly_exit_param_optimization.json")
                                 val sectorContent = readLocalFile(context, "sector_cache.json")
-                                val prefs = context.getSharedPreferences("open_invest_prefs", Context.MODE_PRIVATE)
-                                val envPolicies = prefs.getString("invest_a_share_sector_exit_policies", "") ?: ""
                                 val ledgerBytes = readLocalBinaryFile(context, "account_ledger.sqlite")
 
-                                if (configContent == null && exitContent == null && sectorContent == null && envPolicies.isEmpty() && ledgerBytes == null) {
+                                if (configContent == null && sectorContent == null && ledgerBytes == null) {
                                     Toast.makeText(context, "没有本地数据可上传，请先导入配置", Toast.LENGTH_LONG).show()
                                     return@Button
                                 }
@@ -632,9 +599,7 @@ fun SettingsDialog(
                                 var completedCount = 0
                                 var totalToUpload = 0
                                 if (configContent != null) totalToUpload++
-                                if (exitContent != null) totalToUpload++
                                 if (sectorContent != null) totalToUpload++
-                                if (envPolicies.isNotEmpty()) totalToUpload++
                                 if (ledgerBytes != null) totalToUpload++
 
                                 fun checkComplete() {
@@ -655,34 +620,12 @@ fun SettingsDialog(
                                     }
                                 }
 
-                                exitContent?.let {
-                                    NetworkClient.uploadExitParams(it) { res ->
-                                        res.fold(
-                                            onSuccess = { checkComplete() },
-                                            onFailure = { err ->
-                                                Toast.makeText(context, "上传参数配置失败: ${err.message}", Toast.LENGTH_LONG).show()
-                                            }
-                                        )
-                                    }
-                                }
-
                                 sectorContent?.let {
                                     NetworkClient.uploadSectorCache(it) { res ->
                                         res.fold(
                                             onSuccess = { checkComplete() },
                                             onFailure = { err ->
                                                 Toast.makeText(context, "上传板块缓存失败: ${err.message}", Toast.LENGTH_LONG).show()
-                                            }
-                                        )
-                                    }
-                                }
-
-                                if (envPolicies.isNotEmpty()) {
-                                    NetworkClient.uploadEnvPolicies(envPolicies) { res ->
-                                        res.fold(
-                                            onSuccess = { checkComplete() },
-                                            onFailure = { err ->
-                                                Toast.makeText(context, "上传环境变量失败: ${err.message}", Toast.LENGTH_LONG).show()
                                             }
                                         )
                                     }
@@ -719,7 +662,7 @@ fun SettingsDialog(
                                         onClick = {
                                             showSyncConfirmDialog = false
                                             var syncCount = 0
-                                            val totalToSync = 5
+                                            val totalToSync = 3
                                             fun onSyncComplete() {
                                                 syncCount++
                                                 if (syncCount == totalToSync) {
@@ -740,41 +683,10 @@ fun SettingsDialog(
                                                     }
                                                 )
                                             }
-                                            NetworkClient.downloadExitParams { res ->
-                                                res.fold(
-                                                    onSuccess = { content ->
-                                                        saveLocalFile(context, "weekly_exit_param_optimization.json", content)
-                                                        onSyncComplete()
-                                                    },
-                                                    onFailure = { err ->
-                                                        Toast.makeText(context, "同步参数配置失败: ${err.message}", Toast.LENGTH_LONG).show()
-                                                        onSyncComplete()
-                                                    }
-                                                )
-                                            }
                                             NetworkClient.downloadSectorCache { res ->
                                                 res.fold(
                                                     onSuccess = { content ->
                                                         saveLocalFile(context, "sector_cache.json", content)
-                                                        onSyncComplete()
-                                                    },
-                                                    onFailure = { err ->
-                                                        onSyncComplete()
-                                                    }
-                                                )
-                                            }
-                                            NetworkClient.downloadEnvPolicies { res ->
-                                                res.fold(
-                                                    onSuccess = { content ->
-                                                        try {
-                                                            val gson = com.google.gson.Gson()
-                                                            val map = gson.fromJson(content, Map::class.java)
-                                                            val policies = map["policies"] as? String ?: ""
-                                                            val prefs = context.getSharedPreferences("open_invest_prefs", Context.MODE_PRIVATE)
-                                                            prefs.edit().putString("invest_a_share_sector_exit_policies", policies).apply()
-                                                        } catch (e: Exception) {
-                                                            Log.e("Settings", "Failed to parse env policies", e)
-                                                        }
                                                         onSyncComplete()
                                                     },
                                                     onFailure = { err ->
@@ -962,13 +874,14 @@ fun SettingsDialog(
                             val intervalVal = interval.toIntOrNull() ?: 30
                             val limitMonths = retentionLimit.toIntOrNull() ?: 2
                             val remoteFreq = remoteCrawlerInterval.toIntOrNull() ?: 60
+                            val normalizedTradingMode = normalizeTradingMode(tradingMode)
 
                             prefs.edit()
                                 .putString("server_url", url)
                                 .putString("llm_api_key", apiKey)
                                 .putString("llm_base_url", llmBaseUrl)
                                 .putString("llm_model", model)
-                                .putString("trading_mode", tradingMode)
+                                .putString("trading_mode", normalizedTradingMode)
                                 .putBoolean("auto_refresh_enabled", autoRefresh)
                                 .putInt("auto_refresh_interval", intervalVal)
                                 .putBoolean("auto_refresh_news_enabled", refreshNews)
@@ -989,13 +902,8 @@ fun SettingsDialog(
                                 try {
                                     val json = org.json.JSONObject(configStr)
                                     val modeObj = org.json.JSONObject().apply {
-                                        put("mode", tradingMode)
-                                        put("label", when(tradingMode) {
-                                            "active_profit" -> "主动盈利"
-                                            "cash_recovery" -> "现金回收"
-                                            "risk_off" -> "主动避险"
-                                            else -> "主动盈利"
-                                        })
+                                        put("mode", normalizedTradingMode)
+                                        put("label", tradingModeLabel(normalizedTradingMode))
                                     }
                                     json.put("trading_mode", modeObj)
                                     saveLocalFile(context, "market_monitor_config.json", json.toString(2))

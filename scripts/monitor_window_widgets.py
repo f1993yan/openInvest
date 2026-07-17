@@ -335,12 +335,7 @@ class ModeSlider(tk.Canvas):
             arc_bot = dist_to_segment(px, py, hi * 0.38, hi * 0.62, hi * 0.62, hi * 0.62) <= hi * 0.040
             return (inner_radius * 0.58 <= outer <= inner_radius * 0.86) or bar or arc_top or arc_mid or arc_bot
 
-        def in_risk(px: float, py: float) -> bool:
-            stem = abs(px - center) <= hi * 0.040 and hi * 0.28 <= py <= hi * 0.57
-            dot = ((px - center) ** 2 + (py - hi * 0.70) ** 2) ** 0.5 <= hi * 0.055
-            return stem or dot
-
-        icon_test = {"active_profit": in_profit, "cash_recovery": in_cash, "risk_off": in_risk}.get(key, in_risk)
+        icon_test = {"active_profit": in_profit, "cash_recovery": in_cash}.get(key, in_profit)
         image = tk.PhotoImage(width=size, height=size)
         for y in range(size):
             row = []
@@ -395,7 +390,6 @@ class ModeSlider(tk.Canvas):
         colors = {
             "active_profit": "#12b76a",
             "cash_recovery": "#f79009",
-            "risk_off": "#f04438",
         }
         active_color = colors.get(self.active, BLUE)
         active_x = track_x1 + active_idx * dot_step
