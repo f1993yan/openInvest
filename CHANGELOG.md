@@ -4,6 +4,7 @@
 
 ### Improvements
 
+* **desktop-tray:** 桌面监控新增 Windows 系统托盘，直接复用 APK 的高分辨率 `ic_launcher.webp`；关闭按钮隐藏到托盘，单击托盘图标恢复并临时置顶，右键菜单可显式退出并停止后台服务，托盘线程通过队列回到 Tk 主线程执行 UI 操作。
 * **event-provenance:** `events.db` 在线新增可选 `ingested_by` 溯源字段，区分“新闻发布来源”和“由哪个任务/代理投喂”；`event_watch` 入库自动标记来源，便于从异常委员会结论反查输入链路。
 * **macro-recall:** 事件任务不再只用单条 Fed 查询兜底；无论持仓内容都常驻检索中国 CPI/PPI/PMI/LPR/MLF 与 FOMC/CPI/非农等高影响宏观发布，减少按标的搜索漏掉数据发布本身的问题。
 * **sqlite-lifecycle:** 账本、行情、事件、交易和洞察库统一使用 WAL 生命周期工具；连接启动/关闭做非阻塞 checkpoint，仅在 WAL 超过可配置阈值且无活跃读者时截断，关闭前回滚未提交事务。

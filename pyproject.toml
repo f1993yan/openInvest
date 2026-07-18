@@ -30,6 +30,8 @@ dependencies = [
     "playwright>=1.40",    # 国内新闻源 headless 浏览器抓取
     "sqlite-vec>=0.1.6",   # 事件层向量精排（SQLite 扩展，不需要独立向量库）
     "python-multipart>=0.0.32",
+    "pillow>=11.0.0",
+    "pystray>=0.19.5",
 ]
 
 [dependency-groups]

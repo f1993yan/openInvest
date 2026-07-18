@@ -33,6 +33,7 @@ from scripts.monitor_window_analysis import MonitorAnalysisMixin
 from scripts.monitor_window_news import MonitorNewsMixin
 from scripts.monitor_window_selection import MonitorSelectionMixin
 from scripts.monitor_window_trade import MonitorTradeMixin
+from scripts.monitor_window_tray import TrayController
 
 
 def _account_ledger_db_path() -> Path:
@@ -102,9 +103,12 @@ class MonitorWindow(MonitorNewsMixin, MonitorSelectionMixin, MonitorTradeMixin, 
         self.card_widgets: Dict[str, tk.Frame] = {}
         self.dialogs: Dict[str, tk.Toplevel] = {}
         self.analysis_queue: queue.Queue[tuple[str, str, Optional[Dict[str, Any]]]] = queue.Queue()
+        self.tray_commands: queue.Queue[str] = queue.Queue()
+        self.tray_controller: Optional[TrayController] = None
         load_dotenv(ROOT / ".env")
         self.remote_server_url = os.getenv("INVEST_REMOTE_SERVER_URL")
         self._build_ui()
+        self._setup_tray_icon()
 
     def _set_initial_geometry(self) -> None:
         screen_w = self.root.winfo_screenwidth()
@@ -205,7 +209,7 @@ class MonitorWindow(MonitorNewsMixin, MonitorSelectionMixin, MonitorTradeMixin, 
             cursor="hand2",
         )
         self.action_email_btn.pack(side=tk.RIGHT, fill=tk.Y, padx=(0, 2), pady=5)
-        close_btn.bind("<Button-1>", lambda _event: self._on_close())
+        close_btn.bind("<Button-1>", lambda _event: self._hide_to_tray())
         min_btn.bind("<Button-1>", lambda _event: self._minimize())
         self.pin_btn.bind("<Button-1>", lambda _event: self._toggle_pin())
         self.action_email_btn.bind("<Button-1>", lambda _event: self._toggle_action_email_enabled())
@@ -385,16 +389,56 @@ class MonitorWindow(MonitorNewsMixin, MonitorSelectionMixin, MonitorTradeMixin, 
         self.pin_btn.configure(fg=BLUE if self.pinned else MUTED)
 
     def start(self) -> None:
-        self.root.protocol("WM_DELETE_WINDOW", self._on_close)
+        self.root.protocol("WM_DELETE_WINDOW", self._hide_to_tray)
         self.refresh()
         self._watch_snapshot_changes()
         self._poll_analysis_queue()
+        self._poll_tray_commands()
         self.root.mainloop()
+
+    def _hide_to_tray(self) -> None:
+        if self.closing:
+            return
+        if self.tray_controller is None or not self.tray_controller.active:
+            self._on_close()
+            return
+        self.root.withdraw()
+
+    def _show_from_tray(self) -> None:
+        if self.closing:
+            return
+        self.root.deiconify()
+        self.root.lift()
+        self.root.attributes("-topmost", True)
+        try:
+            self.root.focus_force()
+        except tk.TclError:
+            pass
+        self.root.after(
+            250,
+            lambda: self.root.attributes("-topmost", self.pinned) if not self.closing else None,
+        )
+
+    def _poll_tray_commands(self) -> None:
+        while True:
+            try:
+                command = self.tray_commands.get_nowait()
+            except queue.Empty:
+                break
+            if command == "show":
+                self._show_from_tray()
+            elif command == "quit":
+                self._on_close()
+                return
+        if not self.closing:
+            self.root.after(100, self._poll_tray_commands)
 
     def _on_close(self) -> None:
         if self.closing:
             return
         self.closing = True
+        if self.tray_controller is not None:
+            self.tray_controller.stop()
         self.status_text.set("正在停止后台任务...")
         if not self.demo:
             threading.Thread(target=self._shutdown_and_destroy, daemon=True).start()
@@ -407,6 +451,11 @@ class MonitorWindow(MonitorNewsMixin, MonitorSelectionMixin, MonitorTradeMixin, 
             self.root.after(0, self.root.destroy)
         except Exception:
             pass
+
+    def _setup_tray_icon(self) -> None:
+        self.tray_controller = TrayController(ROOT, self.tray_commands.put)
+        if not self.tray_controller.start():
+            self.tray_controller = None
 
     def _watch_snapshot_changes(self) -> None:
         if self.closing:
