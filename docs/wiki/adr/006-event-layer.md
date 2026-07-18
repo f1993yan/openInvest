@@ -14,7 +14,8 @@ openInvest 在本次提交前是**纯定时驱动**：`daily_report` 10:00、`we
 加一个事件层，两条腿共享同一个 sqlite event store：
 
 1. **Trigger 路径**（盘中实时）—— `jobs/event_watch.py` cron `*/30`：
-   - 多源拉新闻（DDGS news / RSS / yfinance.Ticker.news）
+   - 多源拉新闻（DDGS / RSS / 东方财富 / 财联社 / 新浪 / 华尔街见闻 / 百度热榜，浏览器源可选）
+   - 除持仓和关注标的查询外，每轮固定加入中国 CPI/PPI/PMI/LPR/MLF 与 FOMC/CPI/非农查询，避免宏观数据发布被按标的搜索漏掉
    - flash LLM 归一化为结构化事件（一次批调用）
    - 维度命中（severity ≥ mid + 影响到 holdings/target_assets + stance ≠ neutral）→ 发 digest 邮件 + POST `/api/committee/run`
 2. **RAG 路径**（committee 召回）—— `core/committee_runner.py` 准备 macro 前：
@@ -28,8 +29,10 @@ openInvest 在本次提交前是**纯定时驱动**：`daily_report` 10:00、`we
 通用 RAG 假设语料静态、独立、语义重复度低。新闻反过来 —— 时效是第一维，多源报道是噪音，事件 > 文档。我们：
 
 - **入库时不 embed 原文**，先 flash 抽事件结构 + claim 文本，**对 claim 哈希做 event_id**，同一事件多源 merge 到 sources 子表
+- `events.ingested_by` 记录投喂任务/代理，`sources.src_name` 记录新闻发布来源；两者分离后可以从异常 verdict 反查输入链路
 - 检索：维度过滤先于向量精排（向量只是 marginal 精排）
 - 召回结果显式标注 `supersedes` —— 同实体新事件覆盖旧事件
+- `opportunity` 仅代表“潜在催化剂，值得核验”，不代表未来收益为正，也不能单独触发买入结论
 
 ## Embedding 提供方
 

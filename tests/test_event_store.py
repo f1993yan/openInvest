@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import os
+import sqlite3
 import tempfile
 from datetime import datetime, timedelta, timezone
 
@@ -69,6 +70,50 @@ def test_upsert_new_then_dup_merges(store):
     assert eid == eid2
     e = store.get_event(eid)
     assert e["severity"] == "high"  # bumped
+
+
+def test_ingested_by_persists_and_reads_back(store):
+    was_new, eid = store.upsert_event({
+        "one_line_claim": "PBOC reduces reserve requirement ratio",
+        "stance": "opportunity",
+        "severity": "high",
+        "ts": _utc_iso(),
+        "affected_symbols": ["000001"],
+        "ingested_by": "event_watch",
+    })
+
+    assert was_new is True
+    assert store.get_event(eid)["ingested_by"] == "event_watch"
+
+
+def test_ingested_by_online_migration_is_idempotent(tmp_path):
+    path = tmp_path / "legacy-events.db"
+    with sqlite3.connect(path) as conn:
+        conn.execute("""
+            CREATE TABLE events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                event_id TEXT UNIQUE NOT NULL,
+                one_line_claim TEXT NOT NULL,
+                event_type TEXT,
+                stance TEXT NOT NULL,
+                severity INTEGER NOT NULL,
+                source_reliability TEXT,
+                ts TEXT NOT NULL,
+                entities_json TEXT,
+                affected_symbols_json TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                committee_task_id TEXT
+            )
+        """)
+
+    first = EventStore(db_path=str(path), embedding_dim=4)
+    first.close()
+    second = EventStore(db_path=str(path), embedding_dim=4)
+    columns = {
+        row[1] for row in second.conn.execute("PRAGMA table_info(events)").fetchall()
+    }
+    assert "ingested_by" in columns
+    second.close()
 
 
 def test_add_source_dedup(store):

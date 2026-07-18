@@ -2,6 +2,8 @@ import os
 import sqlite3
 import threading
 
+from utils.sqlite_lifecycle import close_wal_connection, configure_wal_connection, maintain_wal
+
 DB_PATH = os.path.join(os.path.dirname(__file__), "market_data.db")
 
 
@@ -17,22 +19,28 @@ class MarketStore:
 
     def __init__(self):
         os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
+        self.db_path = os.path.abspath(DB_PATH)
         # 允许跨线程使用（配合下面的 _lock）
         self.conn = sqlite3.connect(
-            DB_PATH,
+            self.db_path,
             check_same_thread=False,
             timeout=5.0,  # busy_timeout fallback for older sqlite versions
         )
         # 跨进程并发：WAL 让 reader / writer 不再互相 block
         # busy_timeout 让被 lock 时等 5s 而不是立刻抛 OperationalError
-        cur = self.conn.cursor()
-        cur.execute("PRAGMA journal_mode=WAL")
-        cur.execute("PRAGMA busy_timeout=5000")
-        cur.execute("PRAGMA synchronous=NORMAL")  # WAL + NORMAL 是推荐组合
-        self.conn.commit()
+        configure_wal_connection(self.conn)
 
         self._lock = threading.RLock()
         self._init_db()
+        maintain_wal(self.conn, self.db_path)
+
+    def close(self) -> None:
+        with self._lock:
+            conn = getattr(self, "conn", None)
+            if conn is None:
+                return
+            close_wal_connection(conn, self.db_path)
+            self.conn = None
 
     def _init_db(self):
         cursor = self.conn.cursor()

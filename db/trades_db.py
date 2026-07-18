@@ -22,6 +22,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from utils.sqlite_lifecycle import close_wal_connection, configure_wal_connection, maintain_wal
+
 # trades.db 存放在 db/ 目录下，与 market_data.db 同级
 DB_PATH = os.path.join(os.path.dirname(__file__), "trades.db")
 
@@ -36,23 +38,28 @@ class TradesDB:
     def __init__(self, db_path: Optional[str] = None) -> None:
         # 允许测试注入临时路径，默认用 db/trades.db
         path = db_path or DB_PATH
+        self.db_path = os.path.abspath(path)
         os.makedirs(os.path.dirname(path), exist_ok=True)
         self.conn = sqlite3.connect(
-            path,
+            self.db_path,
             check_same_thread=False,
             timeout=5.0,
         )
         self.conn.row_factory = sqlite3.Row  # 让 fetchall 返回 dict-like 对象
 
-        cur = self.conn.cursor()
-        # WAL 模式：reader/writer 不互相 block；NORMAL 是 WAL 下推荐的 sync 级别
-        cur.execute("PRAGMA journal_mode=WAL")
-        cur.execute("PRAGMA busy_timeout=5000")
-        cur.execute("PRAGMA synchronous=NORMAL")
-        self.conn.commit()
+        configure_wal_connection(self.conn)
 
         self._lock = threading.RLock()
         self._init_db()
+        maintain_wal(self.conn, self.db_path)
+
+    def close(self) -> None:
+        with self._lock:
+            conn = getattr(self, "conn", None)
+            if conn is None:
+                return
+            close_wal_connection(conn, self.db_path)
+            self.conn = None
 
     def _init_db(self) -> None:
         """建表 + 索引 + schema 迁移（全部幂等）"""

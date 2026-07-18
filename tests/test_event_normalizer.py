@@ -82,6 +82,26 @@ def test_normalize_calls_llm_and_attaches_raw_items(monkeypatch):
     assert fake_client.chat.completions.create.call_count == 1
 
 
+def test_normalize_telemetry_uses_configured_provider(monkeypatch):
+    monkeypatch.setenv("LLM_API_KEY", "test-key")
+    monkeypatch.setenv("LLM_PROVIDER", "dashscope")
+    item = RawNewsItem(src_name="x", title="t", url="u", snippet="s")
+    fake_resp = _make_resp({
+        "events": [{"idx": 0, "one_line_claim": "claim", "stance": "neutral", "severity": "low"}]
+    })
+    fake_client = MagicMock()
+    fake_client.chat.completions.create.return_value = fake_resp
+    recorded = []
+
+    with patch("openai.OpenAI", return_value=fake_client), patch(
+        "services.event_normalizer.record_llm_call",
+        side_effect=lambda meta, **kwargs: recorded.append(meta),
+    ):
+        normalize([item], skip_embedding=True)
+
+    assert recorded and recorded[0].provider == "dashscope"
+
+
 def test_normalize_skips_when_no_api_key(monkeypatch):
     monkeypatch.delenv("LLM_API_KEY", raising=False)
     monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)

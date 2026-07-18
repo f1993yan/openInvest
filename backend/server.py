@@ -426,7 +426,7 @@ def _close_account_ledger() -> None:
     global _account_ledger
     if _account_ledger is not None:
         try:
-            _account_ledger.conn.close()
+            _account_ledger.close()
         except Exception:
             pass
     _account_ledger = None

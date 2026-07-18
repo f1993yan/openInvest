@@ -58,6 +58,7 @@ class SDKAgent:
         max_tool_iterations: int = 4,
         provider: str = "deepseek",
         telemetry_meta: Optional[TelemetryMeta] = None,
+        telemetry_provider: Optional[str] = None,
     ):
         # caller 不传 model → 走 utils.llm.get_llm_config（默认 DeepSeek，可通过 LLM_MODEL 换千问/智谱）
         if model is None:
@@ -72,10 +73,13 @@ class SDKAgent:
         self.last_tool_calls: List[ToolCallTrace] = []
         # v3 透明化：LLM 调用元数据；caller 不传则用默认匿名
         self.telemetry_meta = telemetry_meta or TelemetryMeta(
-            provider=provider, model=model,
+            provider=telemetry_provider or provider, model=model,
         )
-        # 让 telemetry meta 与运行时字段同步
-        self.telemetry_meta.provider = provider
+        # Client transport and configured vendor are different concepts. For
+        # example, Qwen and Zhipu use the OpenAI-compatible transport but must
+        # not be recorded as DeepSeek in audit telemetry.
+        if telemetry_provider:
+            self.telemetry_meta.provider = telemetry_provider
         self.telemetry_meta.model = model
 
         if provider == "deepseek":

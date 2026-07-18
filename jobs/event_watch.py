@@ -39,6 +39,20 @@ log = logging.getLogger(__name__)
 
 _SEVERITY_RANK = {"low": 1, "mid": 2, "high": 3}
 
+# Per-symbol searches mostly return market commentary and routinely miss the
+# scheduled macro release itself. These queries are deliberately independent
+# of holdings so the event layer can see catalysts before they are mentioned
+# in a watched-stock article. China releases are included because this fork's
+# production universe is A shares.
+_MACRO_STANDING_QUERIES = [
+    "中国 CPI PPI 数据 发布",
+    "中国 PMI 数据 发布",
+    "中国 央行 LPR MLF 降准 降息",
+    "Fed FOMC rate decision",
+    "US CPI inflation report",
+    "US non-farm payrolls jobs report",
+]
+
 
 def _load_user_context() -> Dict[str, Any]:
     """从 PortfolioManager 抓 holdings / target_assets / wealth_context tags
@@ -64,8 +78,7 @@ def _load_user_context() -> Dict[str, Any]:
     for sym in (set(holdings) | set(watching)):
         queries.append(f"{sym} news")
     queries.extend([f"{tag} markets" for tag in macro_tags])
-    if not any("fed" in q.lower() for q in queries):
-        queries.append("Fed rate decision")  # 默认抓宏观
+    queries.extend(_MACRO_STANDING_QUERIES)
 
     return {
         "holdings": holdings,
@@ -144,6 +157,7 @@ def run(
     *,
     dry_run: bool = False,
     custom_rss_feeds: Optional[List[Dict[str, str]]] = None,
+    ingested_by: str = "event_watch",
 ) -> Dict[str, Any]:
     """job entry。返回汇总 dict。"""
     if os.getenv("INVEST_EVENT_DRY_RUN"):
@@ -185,6 +199,10 @@ def run(
 
     triggerable_events: List[Dict[str, Any]] = []
     for ne in normalized:
+        # Source identifies the publisher; ingested_by identifies the pipeline
+        # that admitted the event, which is what operators need when tracing a
+        # bad downstream committee verdict.
+        ne.event["ingested_by"] = str(ingested_by or "event_watch")[:80]
         was_new, eid = store.upsert_event(ne.event, embedding=ne.embedding)
         if ne.raw_item:
             store.add_source(

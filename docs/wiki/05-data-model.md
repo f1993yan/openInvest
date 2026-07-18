@@ -322,6 +322,10 @@ memory/
 
 账本 schema 当前写入 `PRAGMA user_version=2`。上传恢复必须经过 `utils.safe_persistence.restore_sqlite_bytes()`；下载使用 SQLite online backup，把已提交 WAL 页合并进一致导出文件。
 
+`accounts.db`、`market_data.db`、`events.db`、`trades.db` 和 `insights.db` 共用 `utils.sqlite_lifecycle`：打开连接统一设置 WAL / busy timeout / NORMAL synchronous，启动和关闭执行不等待读者的 `PASSIVE` checkpoint。只有 `-wal` 达到 `INVEST_SQLITE_WAL_TRUNCATE_BYTES`（默认 64 MiB）且 checkpoint 未被活跃读者阻塞时才执行 `TRUNCATE`；因此不能用“直接删除 `-wal` 文件”替代该流程。
+
+事件表的 `ingested_by` 与 `sources.src_name` 含义不同：前者记录投喂管道或代理（例如 `event_watch`），后者记录原始新闻发布来源。旧 `events.db` 首次打开时通过 `PRAGMA table_info` + `ALTER TABLE` 幂等补列，不需要删除或重建事件库。
+
 ---
 
 ## 下一步

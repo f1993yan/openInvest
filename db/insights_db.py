@@ -19,6 +19,8 @@ import threading
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
+from utils.sqlite_lifecycle import close_wal_connection, configure_wal_connection, maintain_wal
+
 # 默认路径与 market_store.py 同目录
 DEFAULT_DB_PATH = os.path.join(os.path.dirname(__file__), "insights.db")
 
@@ -32,23 +34,21 @@ class InsightsDB:
     """
 
     def __init__(self, db_path: str = DEFAULT_DB_PATH):
+        self.db_path = os.path.abspath(db_path)
         os.makedirs(os.path.dirname(db_path), exist_ok=True)
         # 允许跨线程访问，配合 _lock 保证安全
         self.conn = sqlite3.connect(
-            db_path,
+            self.db_path,
             check_same_thread=False,
             timeout=5.0,
         )
         self.conn.row_factory = sqlite3.Row  # 返回可按列名访问的 Row 对象
 
-        cur = self.conn.cursor()
-        cur.execute("PRAGMA journal_mode=WAL")
-        cur.execute("PRAGMA busy_timeout=5000")
-        cur.execute("PRAGMA synchronous=NORMAL")  # WAL + NORMAL 是推荐组合
-        self.conn.commit()
+        configure_wal_connection(self.conn)
 
         self._lock = threading.RLock()
         self._init_schema()
+        maintain_wal(self.conn, self.db_path)
 
     def _init_schema(self) -> None:
         """初始化 schema（幂等）"""
@@ -189,5 +189,10 @@ class InsightsDB:
             return cursor.rowcount > 0
 
     def close(self) -> None:
-        """关闭连接（测试用）"""
-        self.conn.close()
+        """关闭连接并治理过大的 WAL。"""
+        with self._lock:
+            conn = getattr(self, "conn", None)
+            if conn is None:
+                return
+            close_wal_connection(conn, self.db_path)
+            self.conn = None

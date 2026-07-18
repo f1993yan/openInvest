@@ -21,6 +21,7 @@ schema：
     affected_symbols_json TEXT NOT NULL                       JSON list yfinance symbols
     created_at        TEXT NOT NULL                           入库 ISO timestamp
     committee_task_id TEXT                                    trigger 触发的 committee task
+    ingested_by       TEXT                                    ingestion task/agent identity
 
   sources(id, event_id FK, src_name, url, title, snippet, fetched_at)
   events_vec USING vec0(embedding float[N])                   N 维由 caller 传入决定
@@ -38,6 +39,8 @@ import threading
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
+
+from utils.sqlite_lifecycle import close_wal_connection, configure_wal_connection, maintain_wal
 
 log = logging.getLogger(__name__)
 
@@ -91,10 +94,11 @@ class EventStore:
         embedding_dim: int = 1024,
     ) -> None:
         path = db_path or DB_PATH
+        self.db_path = os.path.abspath(path)
         os.makedirs(os.path.dirname(path), exist_ok=True)
         self.embedding_dim = embedding_dim
 
-        self.conn = sqlite3.connect(path, check_same_thread=False, timeout=5.0)
+        self.conn = sqlite3.connect(self.db_path, check_same_thread=False, timeout=5.0)
         self.conn.row_factory = sqlite3.Row
 
         # sqlite-vec 是动态扩展，需要先 enable_load_extension 再 sqlite_vec.load
@@ -108,14 +112,11 @@ class EventStore:
             log.warning(f"sqlite-vec 加载失败，向量精排将降级为纯 SQL: {e}")
             self._vec_loaded = False
 
-        cur = self.conn.cursor()
-        cur.execute("PRAGMA journal_mode=WAL")
-        cur.execute("PRAGMA busy_timeout=5000")
-        cur.execute("PRAGMA synchronous=NORMAL")
-        self.conn.commit()
+        configure_wal_connection(self.conn)
 
         self._lock = threading.RLock()
         self._init_db()
+        maintain_wal(self.conn, self.db_path)
 
     @property
     def vec_loaded(self) -> bool:
@@ -127,12 +128,7 @@ class EventStore:
             conn = getattr(self, "conn", None)
             if conn is None:
                 return
-            try:
-                conn.execute("PRAGMA wal_checkpoint(PASSIVE)")
-                conn.commit()
-            except Exception:
-                pass
-            conn.close()
+            close_wal_connection(conn, self.db_path)
             self.conn = None
 
     def _init_db(self) -> None:
@@ -151,7 +147,8 @@ class EventStore:
                     entities_json         TEXT,
                     affected_symbols_json TEXT NOT NULL,
                     created_at            TEXT NOT NULL,
-                    committee_task_id     TEXT
+                    committee_task_id     TEXT,
+                    ingested_by           TEXT
                 )
             """)
             cur.execute("""
@@ -166,6 +163,11 @@ class EventStore:
                     UNIQUE(event_id, url)
                 )
             """)
+            existing_columns = {
+                row[1] for row in cur.execute("PRAGMA table_info(events)").fetchall()
+            }
+            if "ingested_by" not in existing_columns:
+                cur.execute("ALTER TABLE events ADD COLUMN ingested_by TEXT")
             cur.execute("CREATE INDEX IF NOT EXISTS idx_events_ts ON events(ts DESC)")
             cur.execute("CREATE INDEX IF NOT EXISTS idx_events_severity ON events(severity)")
             cur.execute("CREATE INDEX IF NOT EXISTS idx_sources_event ON sources(event_id)")
@@ -192,7 +194,7 @@ class EventStore:
         event 必须含字段：
           one_line_claim, stance, severity (low/mid/high or 1/2/3), ts,
           affected_symbols (List[str])
-        可选：event_type, source_reliability, entities (List[str])
+        可选：event_type, source_reliability, entities (List[str]), ingested_by
 
         event_id 由 one_line_claim 自动算出；同 event_id 已存在则**只更新
         severity / stance / 元数据**，不重写 ts（保留最早出现时刻）。
@@ -230,14 +232,15 @@ class EventStore:
                     INSERT INTO events
                         (event_id, one_line_claim, event_type, stance, severity,
                          source_reliability, ts, entities_json,
-                         affected_symbols_json, created_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                         affected_symbols_json, created_at, ingested_by)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """, (
                     eid, claim, event.get("event_type"), stance, sev_int,
                     event.get("source_reliability"), ts,
                     json.dumps(entities, ensure_ascii=False),
                     json.dumps(affected, ensure_ascii=False),
                     created_at,
+                    str(event.get("ingested_by") or "unknown")[:80],
                 ))
                 new_id = cur.lastrowid
                 if self._vec_loaded and embedding is not None:
@@ -278,13 +281,15 @@ class EventStore:
                 cur.execute("""
                     UPDATE events
                        SET severity = ?, stance = ?,
-                           affected_symbols_json = ?, entities_json = ?
+                           affected_symbols_json = ?, entities_json = ?,
+                           ingested_by = COALESCE(ingested_by, ?)
                      WHERE event_id = ?
                 """, (
                     max(old_sev, sev_int),
                     stance,
                     json.dumps(merged_affected, ensure_ascii=False),
                     json.dumps(merged_entities, ensure_ascii=False),
+                    str(event.get("ingested_by") or "unknown")[:80],
                     eid,
                 ))
             self.conn.commit()
@@ -510,6 +515,7 @@ def _row_to_event(row: sqlite3.Row) -> Dict[str, Any]:
         "entities": json.loads(row["entities_json"] or "[]"),
         "affected_symbols": json.loads(row["affected_symbols_json"] or "[]"),
         "committee_task_id": row["committee_task_id"],
+        "ingested_by": row["ingested_by"] if "ingested_by" in row.keys() else None,
         "supersedes": None,
         "distance": None,
     }

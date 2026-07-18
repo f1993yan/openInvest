@@ -61,7 +61,9 @@ For each input item, return a JSON object with these EXACT fields:
 - ts: ISO 8601 timestamp from the input's "published" field; if missing, copy "fetched_at"
 
 Rules:
-- A "risk" event creates probable downside for the listed symbols; "opportunity" creates upside.
+- "risk" means credible downside evidence for the listed symbols.
+- "opportunity" means a potentially investable catalyst that deserves analysis; it does NOT
+  assert positive forward return and must never be treated as a standalone buy signal.
 - "neutral" means routine reporting (e.g. analyst restate, generic market summary). Use it liberally — most news is neutral.
 - Severity reflects MAGNITUDE of expected price impact, not news drama.
 - If a headline is pure clickbait (no concrete entity / event), set severity="low", stance="neutral".
@@ -100,6 +102,7 @@ def normalize(
                 model=model or _m,
                 api_key=api_key,
                 base_url=base_url or _bu,
+                provider=_p,
             )
         except Exception as e:
             log.warning(f"normalize batch starting idx={i} 失败: {type(e).__name__}: {e}")
@@ -121,6 +124,7 @@ def _call_flash_batch(
     model: str,
     api_key: str,
     base_url: str,
+    provider: str = "openai",
 ) -> List[NormalizedEvent]:
     """单批调用 flash，返回 NormalizedEvent 列表（embedding 暂为空，由 normalize 加）"""
     from openai import OpenAI
@@ -144,7 +148,7 @@ def _call_flash_batch(
     client = OpenAI(api_key=api_key, base_url=base_url)
     meta = TelemetryMeta(
         agent_role="event_normalizer",
-        provider="deepseek",
+        provider=provider,
         model=model,
     )
     t0 = time.time()

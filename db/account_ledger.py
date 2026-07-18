@@ -23,6 +23,8 @@ from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
 
+from utils.sqlite_lifecycle import close_wal_connection, configure_wal_connection, maintain_wal
+
 DB_PATH = os.path.join(os.path.dirname(__file__), "accounts.db")
 
 REAL_ACCOUNT = "real"
@@ -55,12 +57,24 @@ class AccountLedger:
         self.conn = sqlite3.connect(path, check_same_thread=False, timeout=5.0)
         self.conn.row_factory = sqlite3.Row
         self._lock = threading.RLock()
-        cur = self.conn.cursor()
-        cur.execute("PRAGMA journal_mode=WAL")
-        cur.execute("PRAGMA busy_timeout=5000")
-        cur.execute("PRAGMA synchronous=NORMAL")
-        self.conn.commit()
+        configure_wal_connection(self.conn)
         self._init_db()
+        maintain_wal(self.conn, self.db_path)
+
+    def close(self) -> None:
+        """Release the ledger handle and checkpoint an oversized idle WAL."""
+        with self._lock:
+            conn = getattr(self, "conn", None)
+            if conn is None:
+                return
+            close_wal_connection(conn, self.db_path)
+            self.conn = None
+
+    def __enter__(self) -> "AccountLedger":
+        return self
+
+    def __exit__(self, exc_type, exc, traceback) -> None:
+        self.close()
 
     def _init_db(self) -> None:
         with self._lock:

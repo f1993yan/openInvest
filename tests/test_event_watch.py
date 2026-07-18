@@ -45,6 +45,18 @@ def _ne(idx, claim, stance, severity, affected, entities=None):
     )
 
 
+def test_macro_standing_queries_are_independent_of_holdings(monkeypatch):
+    fake_pm = MagicMock()
+    fake_pm.holdings.all.return_value = []
+    fake_pm.strategy = {"target_assets": []}
+    fake_pm.user = {}
+    monkeypatch.setattr("core.portfolio_manager.PortfolioManager", lambda: fake_pm)
+
+    ctx = event_watch._load_user_context()
+
+    assert set(event_watch._MACRO_STANDING_QUERIES) <= set(ctx["queries"])
+
+
 def test_run_no_trigger_when_neutral_or_low(tmp_event_db, monkeypatch):
     ctx = {
         "holdings": ["NDQ.AX"],
@@ -125,6 +137,22 @@ def test_run_dry_run_skips_email_and_committee(tmp_event_db, monkeypatch):
     assert out["dry_run"] is True
     trigger.assert_not_called()
     send.assert_not_called()
+
+
+def test_run_records_ingestion_pipeline(tmp_event_db, monkeypatch):
+    monkeypatch.setattr(event_watch, "_load_user_context", lambda: {
+        "holdings": [], "watching": [], "macro_tags": [], "queries": ["x"],
+    })
+    monkeypatch.setattr(event_watch, "fetch_all", lambda **kw: [
+        RawNewsItem(src_name="r", title="t", url="https://r.co/ingest", snippet="s"),
+    ])
+    monkeypatch.setattr(event_watch, "load_default_feeds", lambda: [])
+    normalized = _ne(0, "traceable event", "neutral", "low", [])
+    monkeypatch.setattr(event_watch, "normalize", lambda items: [normalized])
+
+    event_watch.run(dry_run=True, ingested_by="desktop-monitor")
+
+    assert normalized.event["ingested_by"] == "desktop-monitor"
 
 
 def test_run_skips_duplicated_urls(tmp_event_db, monkeypatch):

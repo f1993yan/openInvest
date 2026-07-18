@@ -161,7 +161,7 @@ def _create_agent(
         agent_role=role,
         asset=asset,
         round=round_label,
-        provider="deepseek",
+        provider=provider_litellm,
         model=model_name,
     )
     return SDKAgent(
@@ -174,6 +174,7 @@ def _create_agent(
         max_tool_iterations=4,
         provider="deepseek",
         telemetry_meta=meta,
+        telemetry_provider=provider_litellm,
     )
 
 

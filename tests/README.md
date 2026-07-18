@@ -9,6 +9,8 @@ pytest 测试套件。`conftest.py` 把仓库根加进 `sys.path`，无需安装
 - `test_schemas.py` — Pydantic v2 schema 校验（v2 含 cash dict + holdings list + Holding 枚举）
 - `test_web_api.py` — FastAPI 全端点 TestClient 跑通（GET 读、POST 写、DELETE，schema rollback 验证）
 - `test_committee_parser.py` — 委员会 LLM 输出解析（verdict / confidence 提取）
+- `test_event_store.py` / `test_event_watch.py` — 事件溯源在线迁移、宏观常驻查询和触发链路
+- `test_sqlite_lifecycle.py` — WAL checkpoint/truncate 与未提交事务回滚
 - `test_commsec.py` — CommSec 邮件解析（mock IMAP）
 - `test_gold_price.py` — 金价快照 + DB 兜底逻辑
 - `test_pnl_snapshot.py` — PnL 计算 + SVG 渲染

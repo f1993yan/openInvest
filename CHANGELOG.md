@@ -4,12 +4,17 @@
 
 ### Improvements
 
+* **event-provenance:** `events.db` 在线新增可选 `ingested_by` 溯源字段，区分“新闻发布来源”和“由哪个任务/代理投喂”；`event_watch` 入库自动标记来源，便于从异常委员会结论反查输入链路。
+* **macro-recall:** 事件任务不再只用单条 Fed 查询兜底；无论持仓内容都常驻检索中国 CPI/PPI/PMI/LPR/MLF 与 FOMC/CPI/非农等高影响宏观发布，减少按标的搜索漏掉数据发布本身的问题。
+* **sqlite-lifecycle:** 账本、行情、事件、交易和洞察库统一使用 WAL 生命周期工具；连接启动/关闭做非阻塞 checkpoint，仅在 WAL 超过可配置阈值且无活跃读者时截断，关闭前回滚未提交事务。
+* **llm-audit:** LLM 客户端传输协议和审计 provider 解耦，千问、智谱等 OpenAI 兼容服务不再被遥测硬标为 DeepSeek。
 * **sell-decisions:** 生产卖出提醒统一由 A 股行为因子、委员会/确定性优化器方向、负向建议金额、卖出评分、可卖手数、A 股 T+1 和重复成交冷却决定；删除成本锚定持仓策略模块与周度调度，`position_exit_policy` 仅保留空接口对象。
 * **factor-repair:** A 股请求缺少有效行为因子时，自动合并目标标的、真实持仓和关注列表，补拉两年历史并重建横截面及五日目标；仍无法形成可靠因子时返回 `WAIT/无法判断`，桌面卡片显示灰色且禁止操作，不再伪装成 `HOLD` 或回退旧技术收益模型。
 * **trading-mode:** 桌面端与 Android 只保留主动盈利、现金回收两种模式；旧 `risk_off`、`bear`、`defensive` 及“主动避险”配置统一迁移为 `cash_recovery`，避免旧配置静默回落成主动盈利。
 
 ### Bug Fixes
 
+* **event-semantics:** `opportunity` 只表示值得进一步核验的潜在催化剂，不再声明未来收益方向或单独构成买入信号；通知图标改为中性检查语义，避免视觉上暗示必涨。
 * **sell-guard:** 修复停用持仓纪律线后，重复交易护栏仍要求已持仓卖出命中旧价格线，导致委员会 `SELL/TRIM` 被永久降级为 `HOLD` 的问题；卖出保留同方向冷却和下游 T+1/可卖手数约束，买回仍须出现新的回调、再入场或突破触发。
 * **app-parity:** 手机 Chaquopy 本地委员会与后端直连保持相同的持仓纪律停用口径，并继续返回空的 `position_exit_policy` 兼容对象；App/桌面不再导入、上传或同步旧止盈参数与板块纪律环境变量。
 

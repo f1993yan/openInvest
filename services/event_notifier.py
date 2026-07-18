@@ -18,7 +18,10 @@ from services.notifier import (
 log = logging.getLogger(__name__)
 
 
-_STANCE_ICON = {"risk": "🚨", "opportunity": "🎯", "neutral": "📰"}
+# Opportunity means "inspect this catalyst", not "the price will rise". Avoid
+# target/bullseye imagery that makes a probabilistic news label look like a buy
+# instruction.
+_STANCE_ICON = {"risk": "🚨", "opportunity": "🔎", "neutral": "📰"}
 
 
 def send_event_alert(
@@ -63,7 +66,7 @@ def _build_subject(events: List[Dict[str, Any]]) -> str:
         icon = "🚨"
         label = "Risk"
     elif stances == {"opportunity"}:
-        icon = "🎯"
+        icon = "🔎"
         label = "Opportunity"
     else:
         icon = "📰"
