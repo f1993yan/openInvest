@@ -120,7 +120,7 @@ object LocalCommitteeRunner {
 
                 // Map python response to CommitteeStatusResponse format so that the UI dialog can display it
                 // We create a finished "done" response
-                val symbolSummary = mapOf(
+                val symbolSummary = mapOf<String, Any?>(
                     "verdict" to map["verdict"],
                     "suggested_alloc_cny" to (map["suggested_alloc_cny"] ?: 0.0),
                     "cio_memo" to map["cio_memo"],
