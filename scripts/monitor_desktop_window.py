@@ -660,13 +660,13 @@ class MonitorWindow(MonitorNewsMixin, MonitorSelectionMixin, MonitorTradeMixin, 
             try:
                 from db.account_ledger import AccountLedger
 
-                ledger = AccountLedger()
-                ledger.sync_to_config_and_snapshot()
-                try:
-                    ledger.conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
-                    ledger.conn.commit()
-                except Exception as checkpoint_err:
-                    print(f"Failed to checkpoint account ledger before upload: {checkpoint_err}")
+                with AccountLedger() as ledger:
+                    ledger.sync_to_config_and_snapshot()
+                    try:
+                        ledger.conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+                        ledger.conn.commit()
+                    except Exception as checkpoint_err:
+                        print(f"Failed to checkpoint account ledger before upload: {checkpoint_err}")
             except Exception as ledger_err:
                 print(f"Failed to refresh config from ledger before upload: {ledger_err}")
 
@@ -826,10 +826,11 @@ class MonitorWindow(MonitorNewsMixin, MonitorSelectionMixin, MonitorTradeMixin, 
                             reason="desktop-remote-account-ledger-sync",
                             required_tables=("accounts", "holdings", "trades", "daily_pnl"),
                             nonempty_tables=("accounts", "holdings"),
+                            live=True,
                         )
                         ledger_synced = True
                     except Exception as replace_err:
-                        ledger_error_msg = f"无法覆盖账本数据库文件，该文件已被其他进程锁定。\n详细错误: {replace_err}"
+                        ledger_error_msg = f"账本数据库同步失败。\n详细错误: {replace_err}"
                         raise
             except Exception as db_err:
                 print(f"Failed to sync account ledger: {db_err}")
@@ -839,9 +840,9 @@ class MonitorWindow(MonitorNewsMixin, MonitorSelectionMixin, MonitorTradeMixin, 
             try:
                 from db.account_ledger import AccountLedger
 
-                ledger = AccountLedger()
-                if ledger_synced:
-                    if config_received and not _config_has_targets(config_data) and not config_path.exists():
+                with AccountLedger() as ledger:
+                    if ledger_synced:
+                        if config_received and not _config_has_targets(config_data) and not config_path.exists():
                             from utils.safe_persistence import backup_and_atomic_write_json
 
                             backup_and_atomic_write_json(
@@ -849,12 +850,12 @@ class MonitorWindow(MonitorNewsMixin, MonitorSelectionMixin, MonitorTradeMixin, 
                                 config_data,
                                 reason="desktop-ledger-empty-config-sync",
                             )
-                    ledger.sync_to_config_and_snapshot()
-                elif _config_has_targets(config_data):
-                    ledger.ensure_initialized(config_data)
-                    ledger.sync_to_config_and_snapshot()
-                elif config_data:
-                    print("Remote monitor config has no targets and no ledger was synced; keeping local target list unchanged.")
+                        ledger.sync_to_config_and_snapshot()
+                    elif _config_has_targets(config_data):
+                        ledger.ensure_initialized(config_data)
+                        ledger.sync_to_config_and_snapshot()
+                    elif config_data:
+                        print("Remote monitor config has no targets and no ledger was synced; keeping local target list unchanged.")
             except Exception as le:
                 print(f"Failed to refresh ledger/config after sync: {le}")
 

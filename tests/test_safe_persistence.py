@@ -116,3 +116,34 @@ def test_valid_sqlite_restore_keeps_pre_restore_backup(tmp_path):
     backup_db = tmp_path / "backups" / result["backup_id"] / "target.db"
     with closing(sqlite3.connect(backup_db)) as conn:
         assert conn.execute("SELECT value FROM accounts").fetchone()[0] == "old"
+
+
+def test_live_sqlite_restore_works_while_target_wal_is_open(tmp_path):
+    target = tmp_path / "target.db"
+    incoming = tmp_path / "incoming.db"
+    _make_db(target, "old")
+    _make_db(incoming, "new")
+    export = create_sqlite_export(incoming, export_root=tmp_path / "exports")
+
+    with closing(sqlite3.connect(target)) as held:
+        held.execute("PRAGMA journal_mode=WAL")
+        assert held.execute("SELECT value FROM accounts").fetchone()[0] == "old"
+        assert Path(f"{target}-wal").exists()
+
+        result = restore_sqlite_bytes(
+            target,
+            export.read_bytes(),
+            reason="live-valid",
+            required_tables=("accounts", "holdings", "trades", "daily_pnl"),
+            nonempty_tables=("accounts", "holdings"),
+            live=True,
+            backup_root=tmp_path / "backups",
+        )
+
+        assert result["restore_method"] == "sqlite_backup"
+        assert held.execute("SELECT value FROM accounts").fetchone()[0] == "new"
+
+    backup_db = tmp_path / "backups" / result["backup_id"] / "target.db"
+    with closing(sqlite3.connect(backup_db)) as conn:
+        assert conn.execute("SELECT value FROM accounts").fetchone()[0] == "old"
+    assert not list(tmp_path.glob(".target.db.*.incoming*"))

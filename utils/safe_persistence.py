@@ -72,6 +72,34 @@ def sqlite_online_backup(source: Path, destination: Path) -> None:
             tmp.unlink()
 
 
+def sqlite_online_restore(source: Path, destination: Path) -> None:
+    """Transactionally copy a validated database into an open destination.
+
+    SQLite's backup API writes through the destination connection, so this
+    works on Windows even when another process has the destination WAL/SHM
+    files open. Existing readers keep a consistent view and observe the new
+    pages after their current transaction ends.
+    """
+    source = Path(source).resolve()
+    destination = Path(destination).resolve()
+    if not source.exists():
+        raise FileNotFoundError(source)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    uri = f"{source.as_uri()}?mode=ro"
+    with closing(sqlite3.connect(uri, uri=True, timeout=10.0)) as src:
+        with closing(sqlite3.connect(destination, timeout=10.0)) as dst:
+            dst.execute("PRAGMA busy_timeout=10000")
+            src.backup(dst, sleep=0.05)
+            dst.commit()
+
+
+def _remove_sqlite_sidecars(path: Path) -> None:
+    for suffix in ("-wal", "-shm"):
+        sidecar = Path(f"{path}{suffix}")
+        if sidecar.exists():
+            sidecar.unlink()
+
+
 def inspect_sqlite(
     path: Path,
     *,
@@ -203,9 +231,15 @@ def restore_sqlite_bytes(
     required_tables: Sequence[str],
     nonempty_tables: Sequence[str] = (),
     force: bool = False,
+    live: bool = False,
     backup_root: Optional[Path] = None,
 ) -> Dict[str, Any]:
-    """Validate an upload, back up the old DB, then atomically replace it."""
+    """Validate an upload, back up the old DB, then restore it safely.
+
+    ``live=True`` uses SQLite's backup API instead of replacing files. Use it
+    when the destination may still have WAL readers, such as the desktop
+    process synchronizing its own account ledger on Windows.
+    """
     target = Path(target)
     target.parent.mkdir(parents=True, exist_ok=True)
     candidate = target.with_name(f".{target.name}.{uuid.uuid4().hex}.incoming")
@@ -217,11 +251,13 @@ def restore_sqlite_bytes(
             nonempty_tables=() if force else nonempty_tables,
         )
         backup = create_backup_manifest([target], reason=reason, backup_root=backup_root)
-        for suffix in ("-wal", "-shm"):
-            sidecar = Path(f"{target}{suffix}")
-            if sidecar.exists():
-                sidecar.unlink()
-        os.replace(candidate, target)
+        if live and target.exists():
+            sqlite_online_restore(candidate, target)
+            restore_method = "sqlite_backup"
+        else:
+            _remove_sqlite_sidecars(target)
+            os.replace(candidate, target)
+            restore_method = "atomic_replace"
         try:
             final = inspect_sqlite(
                 target,
@@ -231,18 +267,23 @@ def restore_sqlite_bytes(
         except Exception:
             backup_file = Path(backup["directory"]) / target.name
             if backup_file.exists():
-                rollback = target.with_name(f".{target.name}.{uuid.uuid4().hex}.rollback")
-                shutil.copy2(backup_file, rollback)
-                os.replace(rollback, target)
+                if live and target.exists():
+                    sqlite_online_restore(backup_file, target)
+                else:
+                    rollback = target.with_name(f".{target.name}.{uuid.uuid4().hex}.rollback")
+                    shutil.copy2(backup_file, rollback)
+                    os.replace(rollback, target)
             raise
         return {
             "backup_id": backup["backup_id"],
+            "restore_method": restore_method,
             "incoming": inspection,
             "restored": final,
         }
     finally:
         if candidate.exists():
             candidate.unlink()
+        _remove_sqlite_sidecars(candidate)
 
 
 def create_sqlite_export(

@@ -28,6 +28,7 @@ db/*.db
 db/*.sqlite-journal
 db/*.db-shm
 db/*.db-wal
+db/.*.incoming*
 
 # fcntl 文件锁
 *.lock
