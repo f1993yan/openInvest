@@ -736,8 +736,10 @@ def main():
     log.info(f"交易时间: {TRADING_START}-{LUNCH_START}, {LUNCH_END}-{TRADING_END}, 间隔: {INTERVAL_MINUTES}分钟")
     log.info("委员会分析: 直接 Python 调用（无需后端端口）")
 
-    # 立即执行第一轮
-    if is_trading_time():
+    # 交易时段启动时立即执行一轮；主循环随后必须等待下一个间隔，
+    # 不能再把同一次启动误判为“刚开盘”而连续执行第二轮。
+    started_in_trading = is_trading_time()
+    if started_in_trading:
         log.info("当前在交易时段，立即执行首轮...")
         try:
             run_monitor_round()
@@ -747,7 +749,7 @@ def main():
         log.info("当前非交易时段，等待开盘...")
 
     # 主循环
-    just_entered_trading = True
+    just_entered_trading = not started_in_trading
     while True:
         try:
             if not is_trading_time():

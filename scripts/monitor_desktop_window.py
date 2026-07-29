@@ -740,18 +740,6 @@ class MonitorWindow(MonitorNewsMixin, MonitorSelectionMixin, MonitorTradeMixin, 
             return
 
         import requests
-        import socket
-        import time
-        import subprocess
-        import sys
-
-        # Check if local backend is running (so we can restart it afterwards)
-        local_backend_was_running = False
-        try:
-            with socket.create_connection(("127.0.0.1", 8765), timeout=0.5):
-                local_backend_was_running = True
-        except Exception:
-            pass
         try:
             config_path = ROOT / "jobs" / "market_monitor_config.json"
             config_received = False
@@ -794,11 +782,6 @@ class MonitorWindow(MonitorNewsMixin, MonitorSelectionMixin, MonitorTradeMixin, 
             # 2. 同步真实双账户账本 db/accounts.db，再由账本回写 config/snapshot
             ledger_synced = False
             ledger_error_msg = None
-
-            # Stop local background services first to release file lock on Windows
-            print("Stopping local services before database sync to avoid file lock...")
-            _stop_background_services()
-            time.sleep(1.0)  # Allow file handles to release
 
             try:
                 url_ledger = f"{self.remote_server_url.rstrip('/')}/api/config/account_ledger"
@@ -858,21 +841,6 @@ class MonitorWindow(MonitorNewsMixin, MonitorSelectionMixin, MonitorTradeMixin, 
                         print("Remote monitor config has no targets and no ledger was synced; keeping local target list unchanged.")
             except Exception as le:
                 print(f"Failed to refresh ledger/config after sync: {le}")
-
-            # Restart local backend services if they were running before
-            if local_backend_was_running:
-                print("Restarting local background services...")
-                try:
-                    subprocess.Popen(
-                        [sys.executable, "scripts/start_invest_backend.py", "--no-window", "--with-backend"],
-                        cwd=str(ROOT),
-                        stdin=subprocess.DEVNULL,
-                        stdout=subprocess.DEVNULL,
-                        stderr=subprocess.DEVNULL,
-                        creationflags=subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0
-                    )
-                except Exception as restart_err:
-                    print(f"Failed to restart background services: {restart_err}")
 
             if ledger_error_msg:
                 messagebox.showwarning("部分成功", f"配置文件同步成功，但账本数据库同步失败！\n\n原因: {ledger_error_msg}")
