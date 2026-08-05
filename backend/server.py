@@ -1117,9 +1117,10 @@ async def run_committee_api(req: CommitteeRequest):
 async def get_monitor_snapshot():
     """获取标的监控快照数据"""
     try:
+        from core.behavioral_snapshot import enrich_snapshot_with_behavioral_targets
         from scripts.monitor_window_services import _load_snapshot
         from scripts.monitor_window_constants import DEFAULT_SNAPSHOT
-        return _load_snapshot(DEFAULT_SNAPSHOT)
+        return enrich_snapshot_with_behavioral_targets(_load_snapshot(DEFAULT_SNAPSHOT))
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to load snapshot: {str(e)}")
 
