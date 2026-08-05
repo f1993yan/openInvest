@@ -15,7 +15,31 @@ from scripts.monitor_window_text import *
 from scripts.monitor_window_widgets import *
 
 
+def _news_leader_query(leader: Dict[str, Any]) -> str:
+    return str(leader.get("symbol") or leader.get("code") or leader.get("name") or "").strip()
+
+
+def _news_leader_label(leader: Dict[str, Any]) -> str:
+    symbol = str(leader.get("symbol") or leader.get("code") or "").strip()
+    name = str(leader.get("name") or symbol or "未知标的").strip()
+    return f"{name} ({symbol})" if symbol and symbol != name else name
+
+
 class MonitorNewsMixin:
+    def _weekend_news_files_signature(self) -> tuple[Any, ...]:
+        candidates = [
+            *self.weekend_news_dir.glob("summary_*.json"),
+            *self.weekend_news_dir.glob("report_*.json"),
+        ]
+        signatures = []
+        for path in candidates:
+            try:
+                stat = path.stat()
+            except OSError:
+                continue
+            signatures.append((stat.st_mtime_ns, path.name, stat.st_size))
+        return max(signatures, default=())
+
     def _wheel_news_stack(self, event: tk.Event) -> str:
         if self.news_scroll_canvas is not None:
             self._scroll_canvas(self.news_scroll_canvas, event)
@@ -95,6 +119,38 @@ class MonitorNewsMixin:
         self.news_pager_overlay = None
         self.news_cards = []
         self.news_source = ""
+
+    def _open_news_leader_analysis(self, leader: Dict[str, Any]) -> None:
+        query = _news_leader_query(leader)
+        if not query:
+            self.status_text.set("新闻龙头缺少标的代码或名称")
+            return
+        symbol = str(leader.get("symbol") or leader.get("code") or "").strip().upper()
+        name = str(leader.get("name") or "").strip()
+        row = next(
+            (
+                item
+                for item in self.current_rows
+                if (symbol and str(item.get("symbol") or "").strip().upper() == symbol)
+                or (name and str(item.get("name") or "").strip() == name)
+            ),
+            None,
+        )
+        self._close_news_popover()
+        if row is not None:
+            self._open_analysis_dialog(str(row.get("symbol") or query), row)
+            return
+        loading_row = {
+            "symbol": symbol or query,
+            "name": name or query,
+            "market": "hk" if symbol.isdigit() and len(symbol) == 5 else "a",
+            "state": "watch",
+            "operation": {"verdict": "HOLD"},
+            "price": {"current": 0.0, "change_pct": 0.0},
+            "fundamental": {"score": 50},
+            "_is_resolving": True,
+        }
+        self._open_analysis_dialog(symbol or query, loading_row)
 
     def _change_news_page(self, step: int) -> None:
         if not self.news_popover or not self.news_popover.winfo_exists():
@@ -205,13 +261,37 @@ class MonitorNewsMixin:
         logic_label.pack(fill=tk.X, pady=(8, 0))
         wrapping_labels.append(logic_label)
         leaders = card_data.get("leaders") or []
-        leader_text = "  ".join(
-            f"{leader.get('name') or leader.get('symbol')}({leader.get('symbol', '-')})"
-            for leader in leaders
-        ) or "-"
-        leader_label = tk.Label(content, text=f"龙头  {leader_text}", bg=PANEL_BG, fg=BLUE, font=("Microsoft YaHei UI", 9, "bold"), justify=tk.LEFT, anchor="w", wraplength=300)
-        leader_label.pack(fill=tk.X, pady=(12, 0))
-        wrapping_labels.append(leader_label)
+        tk.Label(
+            content,
+            text="龙头",
+            bg=PANEL_BG,
+            fg=MUTED,
+            font=("Microsoft YaHei UI", 9, "bold"),
+            anchor="w",
+        ).pack(fill=tk.X, pady=(12, 2))
+        if leaders:
+            for leader in leaders:
+                leader_label = tk.Label(
+                    content,
+                    text=_news_leader_label(leader),
+                    bg=SOFT_BLUE,
+                    fg=BLUE,
+                    font=("Microsoft YaHei UI", 9, "bold"),
+                    justify=tk.LEFT,
+                    anchor="w",
+                    wraplength=300,
+                    padx=8,
+                    pady=4,
+                    cursor="hand2",
+                )
+                leader_label.pack(fill=tk.X, pady=2)
+                leader_label.bind("<Button-1>", lambda _event, item=leader: self._open_news_leader_analysis(item))
+                leader_label.bind("<Enter>", lambda _event, widget=leader_label: widget.configure(bg="#dbeafe"))
+                leader_label.bind("<Leave>", lambda _event, widget=leader_label: widget.configure(bg=SOFT_BLUE))
+                leader_label.bind("<MouseWheel>", lambda event: self._wheel_news_stack(event))
+                wrapping_labels.append(leader_label)
+        else:
+            tk.Label(content, text="-", bg=PANEL_BG, fg=MUTED, font=("Microsoft YaHei UI", 9), anchor="w").pack(fill=tk.X)
         risk_label = tk.Label(content, text=f"风险  {card_data.get('risk_note') or '-'}", bg=PANEL_BG, fg=DOWN_FG, font=("Microsoft YaHei UI", 8), justify=tk.LEFT, anchor="w", wraplength=300)
         risk_label.pack(fill=tk.X, pady=(10, 0))
         wrapping_labels.append(risk_label)

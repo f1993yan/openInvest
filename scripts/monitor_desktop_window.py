@@ -483,6 +483,7 @@ class MonitorWindow(MonitorNewsMixin, MonitorSelectionMixin, MonitorTradeMixin, 
             _path_mtime(self.snapshot_path),
             _path_mtime(ROOT / "jobs" / "market_monitor_config.json"),
             _path_mtime(DAILY_SELECTION_LATEST),
+            self._weekend_news_files_signature(),
         )
 
     def refresh(self) -> None:

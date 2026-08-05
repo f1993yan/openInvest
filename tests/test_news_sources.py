@@ -110,10 +110,12 @@ def test_fetch_all_domestic_includes_hot_news_and_enrichment():
     assert out[0].raw_meta["sectors"][0]["sector"] == "机器人"
 
 
-def test_weekend_llm_summary_discovers_a_share_hot_opportunities(monkeypatch):
+def test_weekend_llm_summary_discovers_a_share_hot_opportunities(monkeypatch, tmp_path):
     from types import SimpleNamespace
 
     from jobs import weekend_news_crawl as mod
+
+    monkeypatch.setattr(mod, "CACHE_DIR", tmp_path)
 
     payload = {
         "key_themes": ["商业航天"],
@@ -197,6 +199,7 @@ def test_weekend_llm_summary_discovers_a_share_hot_opportunities(monkeypatch):
     assert out["watchlist_symbols"] == ["603308"]
     assert out["need_committee_rerun"] == []
     assert "stock_impact" not in out
+    assert out["_source_date_range"] == "2026-06-07"
 
 
 def test_weekend_committee_on_leaders_uses_direct_backend_call(monkeypatch):

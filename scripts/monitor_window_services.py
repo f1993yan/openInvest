@@ -1020,7 +1020,9 @@ def _load_weekend_news_cards(news_dir: Path = WEEKEND_NEWS_DIR) -> tuple[List[Di
                     }
                 )
         if cards:
-            return _sort_news_cards(cards), path.name
+            source_range = str(summary.get("_source_date_range") or "").strip()
+            source = f"{source_range} 新闻 · {path.name}" if source_range else path.name
+            return _sort_news_cards(cards), source
     return [], "暂无包含板块与龙头股的周末新闻总结"
 
 

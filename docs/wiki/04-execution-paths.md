@@ -163,6 +163,8 @@ start-invest-backend.bat
 - `jobs.market_price_sentinel.IntradayPriceSentinel` 在行情拉取后记录新鲜 10 分钟样本；按标的优先、板块回退并按交易时段估计 99.5% 双尾残差阈值。样本不足 200 或行情陈旧时明确 unavailable；触发只把上下文注入当前 Direct 委员会并写快照，不调用旧 HTTP 端口、不自动成交。
 - `scripts/monitor_desktop_window.py` 只消费 `data/market_monitor/latest_window.json`，窗口跟随委员会/选股/新闻输出文件变化刷新，不再单独定义业务刷新频率。
 - 桌面和 Android 主界面的行为因子目标前四同样只消费快照行的可选 `behavioral_factor`：筛选 `selected=true`、按 `target_weight_pct` 降序取四只。该展示不触发因子重算、不写账本，也不把模型目标成员解释成真实持仓；旧快照缺少字段时仅隐藏该区域。
+- 周末新闻龙头点击复用现有单标的委员会入口：桌面由 `MonitorNewsMixin._open_news_leader_analysis()` 关闭新闻悬浮层并调用 `_open_analysis_dialog()`；Android `NewsDialog` 直接回调 `MainScreen` 的 `activeCommitteeSymbol/activeCommitteeRow`。不在监控快照中的标的使用 `_is_resolving` 进度状态补全代码与行情，接口结构保持不变。
+- 周末摘要保存 `_source_date_range`，桌面来源栏同时显示“新闻日期 · summary/report 文件名”；测试必须把 `CACHE_DIR` 重定向到 `tmp_path`，禁止用测试样本覆盖真实周末摘要。
 - 桌面窗口通过 `scripts/monitor_window_tray.py` 接入系统托盘，图标读取 Android APK 的 `mipmap-xxxhdpi/ic_launcher.webp` 并按密度降级。标题栏关闭按钮和系统关闭事件只隐藏窗口；单击托盘默认菜单项恢复并临时置顶，右键“退出 OpenInvest”才进入 `_on_close()`，停止托盘与后台服务。托盘回调只写线程安全队列，所有 Tk 操作仍在主线程执行。
 - 桌面端远程下载配置时，普通 JSON/.env 先走备份原子写；替换 `db/accounts.db` 前调用 `_stop_background_services()` 停止同项目的 `backend.server`、`uvicorn` 和监控任务以释放 Windows 文件锁，账本校验恢复后调用 `AccountLedger.sync_to_config_and_snapshot()`。只有同步前后端端口确实可用时才通过统一启动器静默恢复后端。
 - 桌面窗口里双击单标的会走 `scripts.monitor_window_services._run_latest_committee_for_row()` 直接跑最新委员会；成功后由 `scripts.monitor_window_analysis._dialog_row_from_committee_result()` 合成行状态，再通过 `scripts.monitor_desktop_window.MonitorWindow._apply_committee_row_update()` 回写内存行和 `latest_window.json`。

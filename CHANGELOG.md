@@ -5,10 +5,13 @@
 ### Features
 
 * **factor-target-overview:** 桌面主窗口和 Android 主界面新增 A 股行为因子目标前四总览，按 `target_weight_pct` 降序展示；桌面点击后切换到对应监控卡片，Android 点击后打开该标的委员会分析。入选卡片同步展示模型目标仓位，并明确标注“模型目标，不是持仓”。
+* **weekend-news-analysis:** 桌面与 Android 周末新闻中的龙头标的改为直接进入现有委员会分析界面；已监控标的复用当前快照，未关注标的先展示分析进度并解析代码、最新行情，不再经过 Android 中间信息气泡。
 
 ### Improvements
 
 * **factor-semantics:** Kotlin 网络模型和缓存解析器透传可选 `selection_scope` / `represents_account_holding`，主界面只把 `selected=true` 解释为因子目标组合成员，不据此修改或描述真实账户持仓；旧快照和旧客户端可继续忽略新增字段。
+* **weekend-news-refresh:** 桌面文件监听加入最新周末 `summary/report` 的文件名、修改时间和大小签名，新闻任务重写摘要后会主动刷新已打开的新闻悬浮层。
+* **weekend-news-provenance:** 周末摘要记录原始缓存的新闻日期区间，桌面来源栏区分新闻日期与摘要生成文件；新闻源测试改用临时缓存目录，避免商业航天测试样本覆盖真实 `data/weekend_news/summary_*.json`。
 
 ## Unreleased (2026-07-17)
 

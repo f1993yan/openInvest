@@ -357,6 +357,23 @@ def _empty_summary(message: str) -> Dict[str, Any]:
     }
 
 
+def _cache_source_date_range(caches: List[Dict[str, Any]]) -> str:
+    dates = set()
+    for cache in caches:
+        for field in ("slot", "timestamp", "generated_at"):
+            candidate = str(cache.get(field) or "").strip()[:10]
+            try:
+                datetime.strptime(candidate, "%Y-%m-%d")
+            except ValueError:
+                continue
+            dates.add(candidate)
+            break
+    ordered = sorted(dates)
+    if not ordered:
+        return ""
+    return ordered[0] if len(ordered) == 1 else f"{ordered[0]} ~ {ordered[-1]}"
+
+
 def summarize_and_evaluate(caches: List[Dict[str, Any]],
                            config: Dict[str, Any]) -> Dict[str, Any]:
     """LLM 总结周末新闻，并发现 A 股板块/龙头机会。
@@ -374,7 +391,7 @@ def summarize_and_evaluate(caches: List[Dict[str, Any]],
     news_text = _build_news_text(caches)
 
     prompt = _SUMMARIZE_PROMPT.format(
-        news_text=news_text[:12000],  # 截断防 token 超限
+        news_text=news_text[:24000],  # 截断防 token 超限
     )
 
     # 调 LLM
@@ -396,7 +413,7 @@ def summarize_and_evaluate(caches: List[Dict[str, Any]],
                 {"role": "user", "content": prompt},
             ],
             temperature=0.2,
-            max_tokens=8000,
+            max_tokens=16000,
             response_format={"type": "json_object"},
         )
         content = resp.choices[0].message.content or ""
@@ -404,17 +421,51 @@ def summarize_and_evaluate(caches: List[Dict[str, Any]],
         log.error(f"LLM 调用失败: {e}")
         return _empty_summary(f"LLM 调用失败: {e}")
 
-    # 解析 JSON
-    try:
-        # 提取 JSON 块
+    # 解析 JSON（逐级降级：裸 JSON → {} 提取 → ```json 提取 → fallback）
+    def _extract_json(text: str):
+        """Extract a JSON object from LLM response using layered strategies."""
         import re
-        match = re.search(r'```(?:json)?\s*([\s\S]*?)```', content)
-        if match:
-            content = match.group(1).strip()
-        result = json.loads(content)
-    except json.JSONDecodeError:
-        log.warning(f"LLM 返回非 JSON，尝试兼容解析: {content[:500]}")
-        # 兼容：尝试从文本中提取关键信息
+
+        text = text.strip()
+
+        # Level 1: direct parse (works with response_format=json_object)
+        if text:
+            yield "level1_direct", text
+
+        # Level 2: extract outermost { ... } pair
+        first_brace = text.find("{")
+        last_brace = text.rfind("}")
+        if first_brace >= 0 and last_brace > first_brace:
+            yield "level2_braces", text[first_brace: last_brace + 1]
+
+        # Level 3: extract markdown ```json ... ``` block
+        m = re.search(r'```(?:json)?\s*([\s\S]*?)```', text)
+        if m:
+            inner = m.group(1).strip()
+            yield "level3_markdown", inner
+            # also try extracting braces inside the markdown block
+            fb = inner.find("{")
+            lb = inner.rfind("}")
+            if fb >= 0 and lb > fb:
+                yield "level3b_markdown_braces", inner[fb: lb + 1]
+
+    result = None
+    parse_error = None
+    for strategy, candidate in _extract_json(content):
+        try:
+            result = json.loads(candidate)
+            log.info(f"JSON 解析成功 (strategy={strategy}, len={len(candidate)})")
+            break
+        except json.JSONDecodeError as e:
+            parse_error = e
+            log.debug(f"JSON 解析失败 (strategy={strategy}): {e}")
+            continue
+
+    if result is None or not isinstance(result, dict):
+        log.warning(
+            f"所有 JSON 解析策略均失败 (last_error={parse_error}), "
+            f"content preview: {content[:300]}"
+        )
         result = {
             "key_themes": [],
             "theme_detail": {},
@@ -430,7 +481,8 @@ def summarize_and_evaluate(caches: List[Dict[str, Any]],
     result = _normalize_opportunity_summary(result)
     result["_total_news"] = total_items
     result["_cache_count"] = len(caches)
-    result["_raw_response"] = content[:500]
+    result["_source_date_range"] = _cache_source_date_range(caches)
+    result["_raw_response"] = content
 
     # 保存 summary
     summary_file = CACHE_DIR / f"summary_{_now_local().strftime('%Y-%m-%d')}.json"

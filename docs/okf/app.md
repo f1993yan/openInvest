@@ -18,7 +18,7 @@ To improve codebase maintainability and readability, the app is split into funct
 - **`Helpers.kt`**: Houses global utility functions, extension functions, file I/O caching, and system notification handlers.
 - **`StockCard.kt`**: Contains holding/watchlist cards and the behavioral-factor top-four target bar. Targets are sorted by model weight and explicitly remain separate from real account holdings.
 - **`SettingsDialog.kt`**: Manages server connection settings, crawler schedules, auto-refresh triggers, account cash/T+2 cash corrections, and exit parameter optimizations backup imports.
-- **`NewsDialog.kt`**: Renders weekend news summaries fetched from the backend server.
+- **`NewsDialog.kt`**: Renders weekend news summaries and routes a leader-name tap directly to the existing committee analysis flow without an intermediate detail bubble.
 - **`SelectionStockDialog.kt`**: Lists daily screened candidates with options to track or buy.
 - **`CommitteeAnalysisDialog.kt`**: Visualizes local or remote multi-agent debate tabs (Macro, Quant, Risk, CIO) and triggers live Server-Sent Events (SSE) updates.
 - **`TradeExecutionDialog.kt`**: Quick accounting interface to log transactions to the ledger.

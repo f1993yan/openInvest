@@ -24,14 +24,13 @@ import com.f1993yan.openInvest.network.SnapshotResponse
 import com.f1993yan.openInvest.network.WeekendNewsResponse
 
 @Composable
+@Suppress("UNUSED_PARAMETER")
 fun NewsDialog(
     news: WeekendNewsResponse?,
     snapshot: SnapshotResponse?,
     onClose: () -> Unit,
     onViewDetails: (NewsLeader) -> Unit
 ) {
-    var activeLeaderBubble by remember { mutableStateOf<NewsLeader?>(null) }
-
     Dialog(
         onDismissRequest = onClose,
         properties = DialogProperties(usePlatformDefaultWidth = false)
@@ -157,7 +156,7 @@ fun NewsDialog(
                                                             color = Color(0xFF4F46E5), // IndigoPrimary
                                                             modifier = Modifier
                                                                 .clickable {
-                                                                    activeLeaderBubble = leader
+                                                                    onViewDetails(leader)
                                                                 }
                                                                 .padding(horizontal = 2.dp)
                                                         )
@@ -180,81 +179,5 @@ fun NewsDialog(
                 }
             }
         }
-    }
-
-    if (activeLeaderBubble != null) {
-        val bubble = activeLeaderBubble!!
-        val bubbleSymbol = bubble.symbol ?: bubble.code ?: ""
-        val match = snapshot?.rows?.find { it.symbol.uppercase() == bubbleSymbol.uppercase() || it.name == bubble.name }
-
-        AlertDialog(
-            onDismissRequest = { activeLeaderBubble = null },
-            title = {
-                Text(
-                    text = "${bubble.name ?: "未知标的"} (${bubbleSymbol})",
-                    fontWeight = FontWeight.Bold,
-                    fontSize = 16.sp,
-                    color = Color(0xFF0F172A)
-                )
-            },
-            text = {
-                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    if (match != null) {
-                        val isRise = match.price.change_pct >= 0
-                        val changeSign = if (isRise) "+" else ""
-                        val priceColor = if (isRise) Color(0xFFE53E3E) else Color(0xFF38A169)
-
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            Text("当前价格: ", fontSize = 12.sp, color = Color(0xFF64748B))
-                            Text(
-                                "¥${String.format("%.2f", match.price.current)}",
-                                fontSize = 13.sp,
-                                fontWeight = FontWeight.Bold,
-                                color = Color(0xFF0F172A)
-                            )
-                            Spacer(modifier = Modifier.width(6.dp))
-                            Text(
-                                "${changeSign}${String.format("%.2f", match.price.change_pct)}%",
-                                fontSize = 11.sp,
-                                fontWeight = FontWeight.Bold,
-                                color = priceColor
-                            )
-                        }
-                    } else {
-                        Text(
-                            text = "当前价格: 暂未在监视列表中（点击查看详情可自动搜索并运行本地分析）",
-                            fontSize = 12.sp,
-                            color = Color(0xFF64748B)
-                        )
-                    }
-
-                    if (!bubble.reason.isNullOrBlank()) {
-                        Text("研判原因: ", fontSize = 12.sp, color = Color(0xFF64748B))
-                        Text(
-                            text = bubble.reason ?: "",
-                            fontSize = 12.sp,
-                            color = Color(0xFF1E293B)
-                        )
-                    }
-                }
-            },
-            confirmButton = {
-                TextButton(
-                    onClick = {
-                        onViewDetails(bubble)
-                        activeLeaderBubble = null
-                    }
-                ) {
-                    Text("查看分析详情", color = Color(0xFF4F46E5), fontWeight = FontWeight.Bold)
-                }
-            },
-            dismissButton = {
-                TextButton(onClick = { activeLeaderBubble = null }) {
-                    Text("关闭", color = Color.Gray)
-                }
-            },
-            shape = RoundedCornerShape(12.dp),
-            containerColor = Color.White
-        )
     }
 }
