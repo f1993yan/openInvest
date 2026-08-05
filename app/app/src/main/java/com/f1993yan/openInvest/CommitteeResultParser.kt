@@ -60,10 +60,19 @@ fun parseCachedResult(symbol: String, rawJson: String): ParsedCommitteeFields? {
     }
     val behavioral = symbolObj.getAsJsonObject("behavioral_factor")?.let {
         BehavioralFactor(
-            it.text("model_key"), it.number("score"), it.number("expected_return_pct"), it.number("target_weight_pct"),
-            it.get("eligible")?.asBoolean, it.get("selected")?.asBoolean, it.get("low_confidence")?.asBoolean,
-            it.number("optimizer_weight"), it.number("trailing_3m_factor_return_pct"),
-            it.number("trailing_3m_hit_rate"), it.number("trailing_3m_sample_size")?.toInt()
+            model_key = it.text("model_key"),
+            score = it.number("score"),
+            expected_return_pct = it.number("expected_return_pct"),
+            target_weight_pct = it.number("target_weight_pct"),
+            eligible = it.get("eligible")?.asBoolean,
+            selected = it.get("selected")?.asBoolean,
+            low_confidence = it.get("low_confidence")?.asBoolean,
+            optimizer_weight = it.number("optimizer_weight"),
+            trailing_3m_factor_return_pct = it.number("trailing_3m_factor_return_pct"),
+            trailing_3m_hit_rate = it.number("trailing_3m_hit_rate"),
+            trailing_3m_sample_size = it.number("trailing_3m_sample_size")?.toInt(),
+            selection_scope = it.text("selection_scope"),
+            represents_account_holding = it.get("represents_account_holding")?.asBoolean,
         )
     }
         ParsedCommitteeFields(exitPoints, buyCriteria, operation, fundamental, review, behavioral)

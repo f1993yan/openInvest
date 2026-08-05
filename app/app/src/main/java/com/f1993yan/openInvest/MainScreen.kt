@@ -1216,6 +1216,18 @@ fun MainScreen(modifier: Modifier = Modifier, onSaveUrl: (String) -> Unit) {
 
             Spacer(modifier = Modifier.height(8.dp))
 
+            BehavioralFactorTargetBar(
+                rows = snapshot?.rows.orEmpty(),
+                onSelect = { row ->
+                    activeCommitteeSymbol = row.symbol
+                    activeCommitteeRow = row
+                }
+            )
+
+            if (snapshot?.rows.orEmpty().any { it.behavioral_factor?.selected == true }) {
+                Spacer(modifier = Modifier.height(8.dp))
+            }
+
             // --- Monitored List ---
             val filteredRows = remember(snapshot, searchQuery, isCommitteeUpdated) {
                 val rows = snapshot?.rows ?: emptyList()

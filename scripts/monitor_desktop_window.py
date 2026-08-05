@@ -285,6 +285,18 @@ class MonitorWindow(MonitorNewsMixin, MonitorSelectionMixin, MonitorTradeMixin, 
         tk.Label(section, textvariable=self.status_text, bg=BOARD_BG, fg=MUTED, font=("Microsoft YaHei UI", 8)).pack(side=tk.RIGHT)
         self.filter_text.trace_add("write", lambda *_: self._reset_stock_page())
 
+        self.factor_targets_bar = tk.Frame(self.root, bg=BOARD_BG, padx=14)
+        self.factor_targets_bar.pack(fill=tk.X, pady=(3, 0))
+        tk.Label(
+            self.factor_targets_bar,
+            text="因子目标前四",
+            bg=BOARD_BG,
+            fg=MUTED,
+            font=("Microsoft YaHei UI", 8, "bold"),
+        ).pack(side=tk.LEFT, padx=(0, 7))
+        self.factor_targets_frame = tk.Frame(self.factor_targets_bar, bg=BOARD_BG)
+        self.factor_targets_frame.pack(side=tk.LEFT, fill=tk.X, expand=True)
+
         self.selection_bar = tk.Frame(self.root, bg=BOARD_BG, padx=12)
         self.selection_bar.pack(side=tk.BOTTOM, fill=tk.X, pady=(0, 7))
         tk.Label(
@@ -520,6 +532,9 @@ class MonitorWindow(MonitorNewsMixin, MonitorSelectionMixin, MonitorTradeMixin, 
                 _safe_num((row.get("price") or {}).get("change_pct")),
                 _safe_num(row.get("position_pct")),
                 _safe_num(row.get("units")),
+                bool((row.get("behavioral_factor") or {}).get("selected")),
+                _safe_num((row.get("behavioral_factor") or {}).get("target_weight_pct")),
+                _safe_num((row.get("behavioral_factor") or {}).get("score")),
             )
             for row in rows
         )
@@ -563,6 +578,7 @@ class MonitorWindow(MonitorNewsMixin, MonitorSelectionMixin, MonitorTradeMixin, 
             payload.get("total_assets_cny"),
             payload.get("t2_pending_cash_cny", 0),
         )
+        self._render_factor_targets(rows)
         self._render_rows()
         self._resize_to_rows(len(self._filtered_rows()))
         self._place_refresh_fab()
@@ -630,6 +646,7 @@ class MonitorWindow(MonitorNewsMixin, MonitorSelectionMixin, MonitorTradeMixin, 
                 rows.append(row)
             self.current_rows = _sort_stock_rows(rows)
             self.stock_page_index = 0
+            self._render_factor_targets(self.current_rows)
             self._render_rows()
             self._resize_to_rows(len(self._filtered_rows()))
             self.status_text.set(
@@ -853,7 +870,8 @@ class MonitorWindow(MonitorNewsMixin, MonitorSelectionMixin, MonitorTradeMixin, 
     def _resize_to_rows(self, row_count: int) -> None:
         screen_h = self.root.winfo_screenheight()
         screen_w = self.root.winfo_screenwidth()
-        height = min(420 if row_count > 1 else 390, max(306, screen_h - 120))
+        # Keep the fixed-height stock card intact after adding the factor-target bar.
+        height = min(444 if row_count > 1 else 414, max(330, screen_h - 120))
         width = min(max(330, screen_w // 4), 420)
         x = self.root.winfo_x() if self.root.winfo_x() >= 0 else 24
         y = self.root.winfo_y() if self.root.winfo_y() >= 0 else 32
@@ -986,6 +1004,45 @@ class MonitorWindow(MonitorNewsMixin, MonitorSelectionMixin, MonitorTradeMixin, 
     def _reset_stock_page(self) -> None:
         self.stock_page_index = 0
         self._render_rows()
+
+    def _render_factor_targets(self, rows: List[Dict[str, Any]]) -> None:
+        for child in self.factor_targets_frame.winfo_children():
+            child.destroy()
+        targets = _behavioral_factor_targets(rows)
+        if not targets:
+            tk.Label(
+                self.factor_targets_frame,
+                text="暂无有效目标",
+                bg=BOARD_BG,
+                fg=MUTED,
+                font=("Microsoft YaHei UI", 8),
+            ).pack(side=tk.LEFT)
+            return
+        for row in targets:
+            symbol = str(row.get("symbol") or "")
+            name = _short(row.get("name") or symbol, 4)
+            label = tk.Label(
+                self.factor_targets_frame,
+                text=name,
+                bg="#e7f6ed",
+                fg=UP_FG,
+                font=("Microsoft YaHei UI", 8, "bold"),
+                padx=5,
+                pady=2,
+                cursor="hand2",
+            )
+            label.pack(side=tk.LEFT, padx=(0, 4))
+            label.bind("<Button-1>", lambda _event, value=symbol: self._show_factor_target(value))
+
+    def _show_factor_target(self, symbol: str) -> None:
+        if self.filter_text.get():
+            self.filter_text.set("")
+        rows = self._filtered_rows()
+        for index, row in enumerate(rows):
+            if str(row.get("symbol") or "").upper() == symbol.upper():
+                self.stock_page_index = index
+                self._render_rows()
+                return
 
     def _change_stock_page(self, step: int) -> None:
         rows = self._filtered_rows()
@@ -1233,6 +1290,16 @@ class MonitorWindow(MonitorNewsMixin, MonitorSelectionMixin, MonitorTradeMixin, 
         bottom_meta = tk.Frame(card, bg=bg)
         bottom_meta.pack(fill=tk.X, pady=(4, 0))
         tk.Label(bottom_meta, text=_sector_summary(row), bg=bg, fg=MUTED, font=("Microsoft YaHei UI", 8)).pack(side=tk.LEFT)
+        factor_badge = _behavioral_factor_badge(row)
+        if factor_badge:
+            tk.Label(
+                bottom_meta,
+                text=factor_badge,
+                bg="#e7f6ed",
+                fg=UP_FG,
+                font=("Microsoft YaHei UI", 8, "bold"),
+                padx=5,
+            ).pack(side=tk.LEFT, padx=(6, 0))
         tk.Label(bottom_meta, text=f"基 {float(_safe_num(fundamental.get('score'), 50)):.0f}", bg=bg, fg=MUTED, font=("Microsoft YaHei UI", 8)).pack(side=tk.RIGHT)
         tk.Label(bottom_meta, text=f"持 {_fmt_holding_lots(row)}", bg=bg, fg=MUTED, font=("Microsoft YaHei UI", 8)).pack(side=tk.RIGHT, padx=(0, 10))
 

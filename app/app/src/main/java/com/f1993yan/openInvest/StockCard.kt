@@ -3,8 +3,11 @@ package com.f1993yan.openInvest
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.lazy.LazyRow
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.*
 import androidx.compose.runtime.Composable
@@ -17,6 +20,71 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.f1993yan.openInvest.network.HoldingRow
 import com.f1993yan.openInvest.ui.theme.*
+
+@Composable
+fun BehavioralFactorTargetBar(rows: List<HoldingRow>, onSelect: (HoldingRow) -> Unit) {
+    val targets = rows
+        .filter { it.behavioral_factor?.selected == true }
+        .sortedByDescending { it.behavioral_factor?.target_weight_pct ?: 0.0 }
+        .take(4)
+    if (targets.isEmpty()) return
+
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(Color(0xFFF8FAFC))
+            .padding(vertical = 8.dp)
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 2.dp),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text(
+                text = "行为因子目标前四",
+                fontSize = 12.sp,
+                fontWeight = FontWeight.Bold,
+                color = TextPrimary
+            )
+            Text(
+                text = "模型目标，不是持仓",
+                fontSize = 10.sp,
+                color = TextSecondary
+            )
+        }
+        Spacer(modifier = Modifier.height(6.dp))
+        LazyRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+            items(targets, key = { it.symbol }) { row ->
+                val targetWeight = row.behavioral_factor?.target_weight_pct ?: 0.0
+                Row(
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(6.dp))
+                        .background(Color(0xFFE7F6ED))
+                        .clickable { onSelect(row) }
+                        .padding(horizontal = 9.dp, vertical = 5.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        text = row.name,
+                        fontSize = 11.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = Color(0xFF067647)
+                    )
+                    if (targetWeight > 0.0) {
+                        Spacer(modifier = Modifier.width(5.dp))
+                        Text(
+                            text = String.format("%.1f%%", targetWeight),
+                            fontSize = 10.sp,
+                            color = Color(0xFF067647)
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
 
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
@@ -178,6 +246,22 @@ fun StockCard(row: HoldingRow, onClick: () -> Unit, onLongClick: (() -> Unit)? =
             val hasBuyPoints = buyCriteria?.pullback_price != null || buyCriteria?.breakout_price != null || buyCriteria?.reentry_price != null
             val hasExitPoints = exitPoints?.stop_loss_price != null || exitPoints?.take_profit_price != null
             val hasTechnical = technical?.ma20 != null || technical?.ma120 != null || technical?.atr_pct != null
+
+            val behavioralFactor = row.behavioral_factor
+            if (behavioralFactor?.selected == true) {
+                val targetWeight = behavioralFactor.target_weight_pct ?: 0.0
+                Spacer(modifier = Modifier.height(7.dp))
+                Text(
+                    text = if (targetWeight > 0.0) {
+                        "行为因子目标前四 · 目标仓位 ${String.format("%.1f", targetWeight)}%"
+                    } else {
+                        "行为因子目标前四"
+                    },
+                    fontSize = 10.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = Color(0xFF067647)
+                )
+            }
  
             if (row._is_resolving) {
                 Spacer(modifier = Modifier.height(8.dp))

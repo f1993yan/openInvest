@@ -120,6 +120,8 @@ data class BehavioralFactor(
     val trailing_3m_factor_return_pct: Double? = null,
     val trailing_3m_hit_rate: Double? = null,
     val trailing_3m_sample_size: Int? = null,
+    val selection_scope: String? = null,
+    val represents_account_holding: Boolean? = null,
 )
 
 // Daily Stock Selection Models

@@ -62,7 +62,7 @@
 | 层 | 入口/模块 | 职责 |
 |----|-----------|------|
 | 启动 | `start-invest-backend.bat` → `start_invest_backend.py` | 读取 `.env`，清理旧进程，启动监控、调度器和桌面窗口 |
-| UI | `scripts/monitor_desktop_window.py` | 独立窗口主循环、卡片布局、悬浮窗协调 |
+| UI | `scripts/monitor_desktop_window.py` | 独立窗口主循环、卡片布局、行为因子目标前四总览、悬浮窗协调 |
 | UI 服务 | `scripts/monitor_window_services.py` | 读取监控快照、手动交易、关注列表、最新价；配置兜底快照只读本地技术指标，不触发行情同步 |
 | 行情中间层 | `utils.market_data_provider.py` / `utils.akshare_data.py` | 统一实时/历史行情路由；A 股历史优先东方财富/腾讯直连 HTTP，最后才走 AkShare/Sina |
 | 监控入口 | `jobs/market_monitor.py` | 仅保留 CLI 入口和兼容导出，旧导入仍可用 |
@@ -94,6 +94,8 @@ market_monitor_runtime.run_monitor_round()
 ```
 
 行为因子属于共享市场证据：同一轮真实账户和影子账户读取相同分数、期望收益与标的权重，但优化器分别读取两个账户自己的现金、仓位和可交易手数。因子不会把影子持仓注入真实账户，也不会改变 ledger 的账户隔离规则。详见 [16-A 股行为因子](16-ashare-behavioral-factor.md)。
+
+`build_monitor_window_snapshot()` 把每行可选 `behavioral_factor` 写入 `latest_window.json`。桌面窗口和 Android 主界面只筛选其中 `selected=true` 的行，按 `target_weight_pct` 降序取四只；桌面点击后切换卡片，Android 点击后打开委员会分析。`selection_scope=factor_model_target_portfolio` 与 `represents_account_holding=false` 明确该列表是模型目标，不是 `AccountLedger(real)` 持仓。
 
 桌面窗口的手动单标的分析是同一状态源的增量路径：双击卡片后，窗口直接调用最新委员会分析，成功结果会合成一行监控快照并回写 `data/market_monitor/latest_window.json`，随后主窗口重新排序和渲染。它不会修改真实持仓，只有用户点击“我已遵循买入/卖出”或手动交易面板执行时才写 `AccountLedger(real)`。
 

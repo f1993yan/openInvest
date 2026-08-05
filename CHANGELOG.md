@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased (2026-08-05)
+
+### Features
+
+* **factor-target-overview:** 桌面主窗口和 Android 主界面新增 A 股行为因子目标前四总览，按 `target_weight_pct` 降序展示；桌面点击后切换到对应监控卡片，Android 点击后打开该标的委员会分析。入选卡片同步展示模型目标仓位，并明确标注“模型目标，不是持仓”。
+
+### Improvements
+
+* **factor-semantics:** Kotlin 网络模型和缓存解析器透传可选 `selection_scope` / `represents_account_holding`，主界面只把 `selected=true` 解释为因子目标组合成员，不据此修改或描述真实账户持仓；旧快照和旧客户端可继续忽略新增字段。
+
 ## Unreleased (2026-07-17)
 
 ### Improvements

@@ -103,11 +103,13 @@ def run_committee_local(
 - `trading_mode` 是新增尾部可选参数，旧版 App 不传时仍按 `active_profit` 执行。该参数只进入手机本地 Python 的委员会上下文与提醒优化口径，不改变 `verdict`、`suggested_alloc_cny` 等既有字段语义。
 - `trading_mode` 当前规范值只有 `active_profit` 和 `cash_recovery`；历史 `risk_off`、`bear`、`defensive` 与“主动避险”输入会兼容归一化为 `cash_recovery`。
 - `behavioral_factor` 是 A 股生产基座新增的可选审计对象。旧 App 不需要新增必填入参，也可以忽略响应中的该对象；`verdict`、`confidence`、`suggested_alloc_cny` 和 `entry_exit_points` 的既有类型与含义不变。`position_exit_policy` 仅保留为空对象兼容旧客户端，不再影响生产决策。`optimizer_weight` 表示标的级因子可信权重，不是建议买入比例；`target_weight_pct` 才是因子目标仓位。
+- `behavioral_factor.selection_scope` 和 `behavioral_factor.represents_account_holding` 是尾部可选语义字段。当前前四目标使用 `selection_scope=factor_model_target_portfolio`、`represents_account_holding=false`；客户端不得把 `selected=true` 当作真实持仓。旧响应缺少这两个字段时仍按可选字段兼容，不改变其他字段解析。
 - A 股行为因子缺失或低置信度时，服务端会先使用监控配置中的持仓/关注标的补建横截面；仍失败时 `verdict=WAIT`、`suggested_alloc_cny=0`，监控快照写 `state=factor_unavailable`。客户端应显示“无法判断”并禁用交易，不得解释成 `HOLD`。
 - 旧 `/api/config/exit_params` 与 `/api/config/env_policies` 仅保留兼容响应：POST 忽略内容，GET 返回空对象/空策略，不再写报告或 `.env`。
 - 手机本地 `run_committee_local` 返回单标的根 JSON，部分远程任务返回 `result.by_asset.<symbol>`。Android 缓存解析器必须同时支持两种响应形状，并恢复 `entry_exit_points`、`behavioral_factor`、基本面和操作字段，不能假设本地缓存一定有 `by_asset` 包装层。
 - 委员会详情弹窗的价格线优先读取本轮 `symbolSummary.entry_exit_points`，只有本轮字段缺失时才回退 `HoldingRow.buy_criteria/exit_points`，避免 Python 已完成计算但 UI 仍显示分析前旧行数据。
 - Android 行为因子区展示 `score/selected/target_weight_pct/trailing_3m_factor_return_pct/trailing_3m_hit_rate/trailing_3m_sample_size/optimizer_weight`。字段均为可选项，缺失时应局部降级，不得隐藏已有入场/出场点或改变 verdict。
+- Android 主界面可从当前 `HoldingRow` 集合筛选 `behavioral_factor.selected=true`，按 `target_weight_pct` 降序显示最多四只。点击目标只打开对应委员会分析，不写持仓；没有有效目标时隐藏总览，不影响原监控列表。
 - 新生产快照不再生成 `alert_source="position_exit_discipline_review"` 或有效 `discipline_review`。旧缓存里如果还存在这些字段，客户端应忽略；服务端快照层也会把它们降级为空对象。
 - 监控快照的候选/抑制原因可能出现 `low_sell_score`、`recent_opposite_real_trade_without_new_entry_exit_trigger` 或 `recent_opposite_real_trade_without_price_progress`。前者表示卖出评分未达到当前模式阈值；后两者仅用于卖出后的重新买回，表示尚未出现新的回调、再入场或突破触发。持仓卖出不再要求旧纪律价格线。
 - 远端配置上传 `POST /api/config/monitor_config` 会先落盘配置并立即返回；账本重建和旧快照清理在服务端后台执行，避免大配置上传时客户端等待超时。Android 网络层应保留较长读超时用于 SSE，同时配置独立写超时用于上传配置 payload。

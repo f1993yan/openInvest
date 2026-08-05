@@ -149,6 +149,26 @@ def _sector_summary(row: Dict[str, Any]) -> str:
     return f"板块 {_short(sector, 12)}（分类）"
 
 
+def _behavioral_factor_badge(row: Dict[str, Any]) -> str:
+    """Describe model target membership without implying an account holding."""
+    factor = row.get("behavioral_factor") or {}
+    if factor.get("selected") is not True:
+        return ""
+    target = _safe_num(factor.get("target_weight_pct"))
+    return f"因子目标前四 {target:.1f}%" if target > 0 else "因子目标前四"
+
+
+def _behavioral_factor_targets(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    selected = [row for row in rows if _behavioral_factor_badge(row)]
+    return sorted(
+        selected,
+        key=lambda row: (
+            -_safe_num((row.get("behavioral_factor") or {}).get("target_weight_pct")),
+            str(row.get("symbol") or ""),
+        ),
+    )[:4]
+
+
 def _operation_summary(row: Dict[str, Any]) -> str:
     op = row.get("operation") or {}
     status = str(op.get("status") or row.get("state") or "")
@@ -655,6 +675,8 @@ __all__ = [
     "_buy_summary",
     "_exit_summary",
     "_sector_summary",
+    "_behavioral_factor_badge",
+    "_behavioral_factor_targets",
     "_operation_summary",
     "_llm_review_lots_hint",
     "_verdict_label",

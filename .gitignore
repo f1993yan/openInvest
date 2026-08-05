@@ -4,6 +4,7 @@ chroma.*
 
 # 隐私
 cache_data
+.qq_bot_token_cache
 user_profile.json
 user_profile.json.bak
 jobs/market_monitor_config.json

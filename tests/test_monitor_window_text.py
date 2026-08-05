@@ -2,7 +2,15 @@ import pandas as pd
 import numpy as np
 import sqlite3
 import pytest
-from scripts.monitor_window_text import _beginner_summary_lines, _card_bg, _detail_line_style, _operation_summary, _sector_summary
+from scripts.monitor_window_text import (
+    _behavioral_factor_badge,
+    _behavioral_factor_targets,
+    _beginner_summary_lines,
+    _card_bg,
+    _detail_line_style,
+    _operation_summary,
+    _sector_summary,
+)
 from scripts.monitor_window_services import (
     _compute_tech_from_local_history,
     _config_stock_row,
@@ -146,6 +154,34 @@ def test_sector_summary_ignores_retired_panic_guard_sector():
     }
 
     assert _sector_summary(row) == "板块 电子元件（分类）"
+
+
+def test_behavioral_factor_target_badge_is_not_described_as_holding():
+    row = {
+        "symbol": "301377",
+        "behavioral_factor": {"selected": True, "target_weight_pct": 25.5464},
+    }
+
+    assert _behavioral_factor_badge(row) == "因子目标前四 25.5%"
+    assert "持仓" not in _behavioral_factor_badge(row)
+    assert _behavioral_factor_badge({"behavioral_factor": {"selected": False}}) == ""
+
+
+def test_behavioral_factor_targets_are_sorted_by_model_target_weight():
+    rows = [
+        {"symbol": "600396", "behavioral_factor": {"selected": True, "target_weight_pct": 20.0}},
+        {"symbol": "000811", "behavioral_factor": {"selected": True, "target_weight_pct": 30.0}},
+        {"symbol": "301377", "behavioral_factor": {"selected": False, "target_weight_pct": 0.0}},
+    ]
+
+    assert [row["symbol"] for row in _behavioral_factor_targets(rows)] == ["000811", "600396"]
+
+
+def test_behavioral_factor_helpers_are_exported_for_desktop_wildcard_import():
+    import scripts.monitor_window_text as text_helpers
+
+    assert "_behavioral_factor_badge" in text_helpers.__all__
+    assert "_behavioral_factor_targets" in text_helpers.__all__
 
 
 def test_beginner_summary_lines_show_sector(monkeypatch):
