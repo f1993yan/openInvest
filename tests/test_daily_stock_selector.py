@@ -157,7 +157,7 @@ def test_entry_plan_uses_reclaim_trigger_for_weak_close_without_breakdown():
     assert plan.trigger_price == 13.23
 
 
-def test_daily_selection_ranks_hot_a_share_leaders_only(monkeypatch):
+def test_daily_selection_lists_only_behavioral_top_four(monkeypatch):
     monkeypatch.setattr(
         "core.daily_stock_selector.assess_behavioral_universe",
         lambda *_args, **_kwargs: {
@@ -218,8 +218,10 @@ def test_daily_selection_ranks_hot_a_share_leaders_only(monkeypatch):
     assert result.sectors[0].news_count == 2
     symbols = [row.symbol for row in result.stocks]
     assert "601138" in symbols
-    assert "300476" in symbols
+    assert "300476" not in symbols
     assert "00700" not in symbols
+    assert result.news_impact_summary["factor_not_selected_filtered"] == 1
+    assert all(row.behavioral_selected for row in result.stocks)
     assert result.stocks[0].symbol == "601138"
     assert result.stocks[0].attention in {"priority_watch", "watch"}
     assert result.news_impact_summary["negative"] == 1

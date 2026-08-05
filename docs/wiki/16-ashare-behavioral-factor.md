@@ -93,7 +93,9 @@ jobs.market_monitor_runtime.run_monitor_round
   -> core.decision_optimizer.optimize_committee_decision
 ```
 
-日度选股由 `core.daily_stock_selector.build_daily_selection()` 复用同一因子。历史窗口为两年；有效因子在综合分中占 40%，新闻、板块资金、基本面、路径风险、技术时点和现金可买约束仍保留。
+日度选股由 `core.daily_stock_selector.build_daily_selection()` 复用同一因子。新闻、板块资金和北向资金先生成候选池，行为因子再执行资格门与横截面排名；最终 `stocks`、`reference_pool` 和 `action_pool` 只包含 `behavioral_selected=true` 的前四成员。历史窗口为两年；综合分只负责排列这四只股票，因子占 40%，新闻、板块资金、基本面、路径风险、技术时点和现金可买约束仍保留，但不能把未进因子前四的标的重新加回结果。
+
+周日 `behavioral_factor_calculation` 仍在内部计算持仓与关注列表的完整横截面，以便委员会知道未入选标的的目标仓位为 0；面向用户的 `data/behavioral_factor_assessments.json` 只写入前四，并通过 `candidate_count` / `selected_count` 记录过滤规模。内部状态 `data/behavioral_factor_state.json` 保持完整，不作为选股名单展示。
 
 生产决策不再回退旧技术收益模型。缺少有效因子时，后端先合并目标标的、真实持仓与关注列表补建横截面；仍失败则输出 `WAIT/factor_unavailable`，桌面显示灰色卡片并禁止交易。日度选股会过滤这类候选，并在摘要写入 `factor_unavailable_filtered`。
 

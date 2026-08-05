@@ -10,6 +10,8 @@
 ### Improvements
 
 * **factor-semantics:** Kotlin 网络模型和缓存解析器透传可选 `selection_scope` / `represents_account_holding`，主界面只把 `selected=true` 解释为因子目标组合成员，不据此修改或描述真实账户持仓；旧快照和旧客户端可继续忽略新增字段。
+* **daily-selection:** 国内新闻、板块资金流和北向资金生成候选池后，行为因子前四改为最终成员硬约束；`stocks`、`reference_pool` 和 `action_pool` 不再列出 `behavioral_selected=false` 的候选，摘要新增 `factor_not_selected_filtered` 记录过滤数量。
+* **weekly-selection:** 周日行为因子任务继续用完整持仓/关注横截面维护委员会零目标，但面向用户的 `data/behavioral_factor_assessments.json` 只写入前四，并新增 `candidate_count`、`selected_count` 和 `selection_scope` 审计字段。
 * **weekend-news-refresh:** 桌面文件监听加入最新周末 `summary/report` 的文件名、修改时间和大小签名，新闻任务重写摘要后会主动刷新已打开的新闻悬浮层。
 * **weekend-news-provenance:** 周末摘要记录原始缓存的新闻日期区间，桌面来源栏区分新闻日期与摘要生成文件；新闻源测试改用临时缓存目录，避免商业航天测试样本覆盖真实 `data/weekend_news/summary_*.json`。
 

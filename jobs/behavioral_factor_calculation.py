@@ -1,7 +1,7 @@
 """Production A-share behavioral factor calculation task.
 
-Calculates A-share behavioral factor assessments for all symbols in the watchlist
-and holdings, and caches them to data/behavioral_factor_assessments.json.
+The full cross-section remains available internally for zero-weight targets;
+the public weekly selection cache lists only the selected top four.
 """
 from __future__ import annotations
 
@@ -16,6 +16,8 @@ from db.account_ledger import AccountLedger, REAL_ACCOUNT
 from jobs.market_monitor_quotes import build_behavioral_factor_context
 
 log = logging.getLogger("jobs.behavioral_factor_calculation")
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+ASSESSMENTS_FILE = PROJECT_ROOT / "data" / "behavioral_factor_assessments.json"
 
 
 def run() -> str:
@@ -79,22 +81,33 @@ def run() -> str:
         log.warning("Assessments failed to generate.")
         return "Assessments failed."
 
-    # Save full assessments to data/behavioral_factor_assessments.json
-    project_root = Path(__file__).resolve().parents[1]
-    assessments_file = project_root / "data" / "behavioral_factor_assessments.json"
+    # The committee still receives the full cross-section through the state
+    # update below.  This user-facing weekly selection cache contains only the
+    # model target members so non-selected candidates are never presented as
+    # weekly picks.
+    assessments_file = ASSESSMENTS_FILE
     assessments_file.parent.mkdir(parents=True, exist_ok=True)
 
     serializable = {
         symbol: assessment.as_dict()
         for symbol, assessment in assessments.items()
+        if assessment.selected
     }
 
     try:
         atomic_write_json(assessments_file, {
             "date": datetime.now().isoformat(),
+            "selection_scope": "factor_model_target_portfolio",
+            "candidate_count": len(assessments),
+            "selected_count": len(serializable),
             "assessments": serializable
         })
-        log.info(f"Saved {len(serializable)} assessments to {assessments_file}")
+        log.info(
+            "Saved %s selected assessments from %s candidates to %s",
+            len(serializable),
+            len(assessments),
+            assessments_file,
+        )
     except Exception as exc:
         log.error(f"Failed to save assessments file: {exc}")
         return f"Failed to save output: {exc}"
@@ -106,4 +119,4 @@ def run() -> str:
     except Exception as e:
         log.warning(f"Failed to update behavioral factor state: {e}")
 
-    return f"Calculated {len(serializable)} symbols."
+    return f"Selected {len(serializable)} of {len(assessments)} symbols."

@@ -264,17 +264,25 @@ def build_daily_selection(
     _tapes: Dict[str, Any] = {}
     affordability_filtered = 0
     factor_unavailable_filtered = 0
+    factor_not_selected_filtered = 0
     for symbol, bucket in stock_buckets.items():
         tape = analyze_daily_tape(history_by_symbol.get(symbol), trade_date=trade_date)
         if tape is None:
             continue
         _tapes[symbol] = tape
-        trend = analyze_multi_period_trend(history_by_symbol.get(symbol), trade_date=trade_date)
-        if trend is None:
-            continue
         affordability = build_affordability(tape.close, available_cash_cny=available_cash_cny, lot_size=lot_size)
         if affordability.affordable is False:
             affordability_filtered += 1
+            continue
+        behavioral = behavioral_assessments.get(symbol)
+        if behavioral is None or behavioral.low_confidence:
+            factor_unavailable_filtered += 1
+            continue
+        if not behavioral.selected:
+            factor_not_selected_filtered += 1
+            continue
+        trend = analyze_multi_period_trend(history_by_symbol.get(symbol), trade_date=trade_date)
+        if trend is None:
             continue
         news_score = _bounded(bucket["news_score"], 0.0, 100.0)
         risk_penalty = _bounded(bucket["risk_penalty"], 0.0, 100.0)
@@ -302,33 +310,26 @@ def build_daily_selection(
             0.0,
             100.0,
         )
-        behavioral = behavioral_assessments.get(symbol)
-        if behavioral is not None and not behavioral.low_confidence:
-            # The validated A-share factor is the deterministic ranking base.
-            # News, sector flow and fundamentals remain independent evidence;
-            # short-term tape has only a small timing role.
-            score = _bounded(
-                behavioral.score * 0.40
-                + news_score * 0.18
-                + fundamental_score * 0.14
-                + money_flow_score * 0.14
-                + model_edge_score * 0.08
-                + tape.tape_score * 0.06
-                - risk_penalty * 0.25
-                - risk_defense.risk_penalty * 0.10,
-                0.0,
-                100.0,
-            )
-        else:
-            factor_unavailable_filtered += 1
-            continue
+        # News and fund flow build the candidate universe.  The behavioral
+        # top four are the final membership gate; the remaining evidence only
+        # ranks and explains those four candidates.
+        score = _bounded(
+            behavioral.score * 0.40
+            + news_score * 0.18
+            + fundamental_score * 0.14
+            + money_flow_score * 0.14
+            + model_edge_score * 0.08
+            + tape.tape_score * 0.06
+            - risk_penalty * 0.25
+            - risk_defense.risk_penalty * 0.10,
+            0.0,
+            100.0,
+        )
         reasons = list(bucket["reasons"])
-        if behavioral is not None:
-            reasons.append(
-                f"A股行为因子{behavioral.score:.1f}分，"
-                f"{'入选目标组合' if behavioral.selected else '未进入前四'}，"
-                f"20日经验收益{behavioral.expected_return_pct:+.2f}%"
-            )
+        reasons.append(
+            f"A股行为因子{behavioral.score:.1f}分，入选目标组合，"
+            f"20日经验收益{behavioral.expected_return_pct:+.2f}%"
+        )
         reasons.append(tape.interpretation)
         reasons.append(trend.interpretation)
         if fundamental.get("reason"):
@@ -405,6 +406,7 @@ def build_daily_selection(
             **_summarize_news_impact(news_rows),
             "affordability_filtered": affordability_filtered,
             "factor_unavailable_filtered": factor_unavailable_filtered,
+            "factor_not_selected_filtered": factor_not_selected_filtered,
             "cash_constraint_enabled": available_cash_cny is not None,
             "fund_flow_sector_count": len(flow_rows),
         },
