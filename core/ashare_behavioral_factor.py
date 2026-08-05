@@ -32,6 +32,8 @@ class AShareBehavioralAssessment:
     trailing_3m_factor_return_pct: float = 0.0
     trailing_3m_hit_rate: float = 0.5
     trailing_3m_sample_size: int = 0
+    selection_scope: str = "factor_model_target_portfolio"
+    represents_account_holding: bool = False
 
     def as_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -54,6 +56,8 @@ class AShareBehavioralAssessment:
             f"trailing_3m_factor_return={self.trailing_3m_factor_return_pct:+.2f}% "
             f"trailing_3m_hit_rate={self.trailing_3m_hit_rate:.2%} "
             f"trailing_3m_n={self.trailing_3m_sample_size}\n"
+            f"selection_scope={self.selection_scope} "
+            f"represents_account_holding={str(self.represents_account_holding).lower()}\n"
             f"reason={self.reason}"
         )
 

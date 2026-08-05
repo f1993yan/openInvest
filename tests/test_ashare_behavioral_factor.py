@@ -91,7 +91,7 @@ def test_feature_table_accepts_lowercase_columns():
     assert np.isfinite(table.loc["600000", "ret252"])
 
 
-def test_monitor_target_membership_is_held_until_five_sessions(monkeypatch, tmp_path):
+def test_monitor_target_membership_is_frozen_until_five_sessions(monkeypatch, tmp_path):
     base = {str(600000 + i): _history(i, 0.0002 + i * 0.0002, periods=360) for i in range(6)}
     active = dict(base)
 
@@ -106,6 +106,10 @@ def test_monitor_target_membership_is_held_until_five_sessions(monkeypatch, tmp_
         symbol: (row["selected"], row["target_weight_pct"])
         for symbol, row in first.items()
     }
+    legacy_state = __import__("json").loads(state.read_text(encoding="utf-8"))
+    for key in ("selection_scope", "represents_account_holdings", "selection_semantics"):
+        legacy_state.pop(key, None)
+    state.write_text(__import__("json").dumps(legacy_state), encoding="utf-8")
 
     active = {
         symbol: pd.concat([
@@ -120,14 +124,19 @@ def test_monitor_target_membership_is_held_until_five_sessions(monkeypatch, tmp_
         ])
         for symbol, frame in base.items()
     }
-    held = build_behavioral_factor_context(stocks, state_path=state)
-    held_targets = {
+    frozen = build_behavioral_factor_context(stocks, state_path=state)
+    frozen_targets = {
         symbol: (row["selected"], row["target_weight_pct"])
-        for symbol, row in held.items()
+        for symbol, row in frozen.items()
     }
 
-    assert held_targets == first_targets
-    assert all("target_held_from_" in row["reason"] for row in held.values())
+    assert frozen_targets == first_targets
+    assert all("target_membership_frozen_from_" in row["reason"] for row in frozen.values())
+    assert all(row["selection_scope"] == "factor_model_target_portfolio" for row in frozen.values())
+    assert all(row["represents_account_holding"] is False for row in frozen.values())
+    migrated = __import__("json").loads(state.read_text(encoding="utf-8"))
+    assert migrated["selection_scope"] == "factor_model_target_portfolio"
+    assert migrated["represents_account_holdings"] is False
 
     active = {
         symbol: pd.concat([
@@ -147,4 +156,6 @@ def test_monitor_target_membership_is_held_until_five_sessions(monkeypatch, tmp_
 
     assert saved["rebalance_sessions"] == 5
     assert saved["rebalance_date"] == str(max(frame.index[-1] for frame in active.values()))[:10]
-    assert all("target_held_from_" not in row["reason"] for row in refreshed.values())
+    assert saved["selection_scope"] == "factor_model_target_portfolio"
+    assert saved["represents_account_holdings"] is False
+    assert all("target_membership_frozen_from_" not in row["reason"] for row in refreshed.values())

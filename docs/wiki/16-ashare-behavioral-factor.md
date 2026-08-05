@@ -77,7 +77,9 @@ expected_return_20d = (n * local_mean + 20 * prior_mean) / (n + 20)
 data/behavioral_factor_state.json
 ```
 
-该文件包含关注/持仓标的派生目标，属于本地生成数据，必须保持 git ignored。当前仓位距离目标不超过 5 个百分点时，因子动作降为 `HOLD`，降低十分钟委员会重复调仓。可靠的持仓风险卖出可以越过该免交易带。
+该文件包含关注/持仓标的派生出的**因子模型目标组合**，属于本地生成数据，必须保持 git ignored。`targets.<symbol>.selected=true` 只表示标的进入因子目标前四，不表示真实账户或委员会影子账户已经持有。真实持仓只能以 `accounts.db` 的 `real` 账户为准。状态文件和 API 评估同时通过 `selection_scope=factor_model_target_portfolio`、`represents_account_holdings=false`（单标的评估中为 `represents_account_holding=false`）明确这个边界。
+
+五个交易日内保持的是“目标组合成员资格”，审计原因为 `target_membership_frozen_from_...`，不能写成 `held` 或翻译成“仍持有”。当前真实仓位距离模型目标不超过 5 个百分点时，因子动作降为 `HOLD`，降低十分钟委员会重复调仓。可靠的持仓风险卖出可以越过该免交易带。
 
 ## 5. 调用链
 

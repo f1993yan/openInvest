@@ -129,6 +129,14 @@ def build_behavioral_factor_context(
     sessions_since = sum(1 for value in calendar if previous_date and value > previous_date)
     previous_targets = dict(previous.get("targets") or {})
     refresh_targets = not previous_targets or not previous_date or sessions_since >= 5
+    state_semantics = {
+        "selection_scope": "factor_model_target_portfolio",
+        "represents_account_holdings": False,
+        "selection_semantics": (
+            "selected means membership in the factor model target portfolio; "
+            "it never means a real or committee account holding"
+        ),
+    }
 
     if refresh_targets:
         targets = {
@@ -141,6 +149,7 @@ def build_behavioral_factor_context(
         try:
             atomic_write_json(state_file, {
                 "model": "a_share_behavioral_v1",
+                **state_semantics,
                 "rebalance_date": latest_date,
                 "rebalance_sessions": 5,
                 "targets": targets,
@@ -149,6 +158,11 @@ def build_behavioral_factor_context(
             log.warning(f"A股行为因子调仓状态写入失败，本轮结果仍可使用: {exc}")
     else:
         targets = previous_targets
+        if any(previous.get(key) != value for key, value in state_semantics.items()):
+            try:
+                atomic_write_json(state_file, {**previous, **state_semantics})
+            except Exception as exc:
+                log.warning(f"A股行为因子调仓状态语义迁移失败，本轮结果仍可使用: {exc}")
         assessments = {
             symbol: replace(
                 assessment,
@@ -156,7 +170,7 @@ def build_behavioral_factor_context(
                 target_weight_pct=float((targets.get(symbol) or {}).get("target_weight_pct", 0.0) or 0.0),
                 reason=(
                     assessment.reason
-                    + f";target_held_from_{previous_date}_{sessions_since}_of_5_sessions"
+                    + f";target_membership_frozen_from_{previous_date}_{sessions_since}_of_5_sessions"
                 ),
             )
             for symbol, assessment in assessments.items()
