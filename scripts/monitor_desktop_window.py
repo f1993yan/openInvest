@@ -307,16 +307,7 @@ class MonitorWindow(MonitorNewsMixin, MonitorSelectionMixin, MonitorTradeMixin, 
             font=("Microsoft YaHei UI", 8, "bold"),
         ).pack(side=tk.LEFT, padx=(0, 8))
 
-        # Pack FABs on the right of selection_bar for horizontal bottom-alignment
-        self.refresh_fab = CircleButton(
-            self.selection_bar,
-            text="↻",
-            command=self.refresh,
-            size=32,
-            font=("Segoe UI Symbol", 12, "bold"),
-        )
-        self.refresh_fab.pack(side=tk.RIGHT, padx=(6, 0))
-
+        # Pack actions on the right of selection_bar for horizontal bottom-alignment.
         self.upload_fab = CircleButton(
             self.selection_bar,
             text="↑",
@@ -555,7 +546,7 @@ class MonitorWindow(MonitorNewsMixin, MonitorSelectionMixin, MonitorTradeMixin, 
             stock_signature,
         )
         if payload_signature == self.last_payload_signature:
-            self._place_refresh_fab()
+            self._redraw_action_fabs()
             self._refresh_open_news_popover()
             self._render_selection_buttons()
             return
@@ -582,7 +573,7 @@ class MonitorWindow(MonitorNewsMixin, MonitorSelectionMixin, MonitorTradeMixin, 
         self._render_factor_targets(rows)
         self._render_rows()
         self._resize_to_rows(len(self._filtered_rows()))
-        self._place_refresh_fab()
+        self._redraw_action_fabs()
         self._maybe_alert(rows)
         self._refresh_open_news_popover()
         self._render_selection_buttons()
@@ -877,18 +868,18 @@ class MonitorWindow(MonitorNewsMixin, MonitorSelectionMixin, MonitorTradeMixin, 
         x = self.root.winfo_x() if self.root.winfo_x() >= 0 else 24
         y = self.root.winfo_y() if self.root.winfo_y() >= 0 else 32
         self.root.geometry(f"{width}x{height}+{x}+{y}")
-        self.root.after(10, self._place_refresh_fab)
+        self.root.after(10, self._redraw_action_fabs)
 
-    def _place_refresh_fab(self) -> None:
-        if hasattr(self, "refresh_fab"):
-            self.refresh_fab._draw(self.refresh_fab.color)
-        if hasattr(self, "trade_fab"):
-            self.trade_fab._draw(self.trade_fab.color)
+    def _redraw_action_fabs(self) -> None:
+        for attr in ("upload_fab", "sync_fab", "trade_fab"):
+            button = getattr(self, attr, None)
+            if button is not None:
+                button._draw(button.color)
 
     def _on_canvas_configure(self, event: tk.Event) -> None:
         self.canvas.itemconfigure(self.cards_window, width=event.width)
         self.canvas.configure(bg=BOARD_BG)
-        self._place_refresh_fab()
+        self._redraw_action_fabs()
 
     def _on_cards_configure(self, _event: tk.Event) -> None:
         self.canvas.configure(scrollregion=self.canvas.bbox("all"))
