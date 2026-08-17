@@ -180,6 +180,7 @@ data class NewsLeader(
 data class CommitteeRunRequest(
     val symbols: List<String> = emptyList(),
     val max_debate_rounds: Int = 4,
+    val decision_mode: String = "algorithm_only",
     val note: String = "android_client_trigger"
 )
 

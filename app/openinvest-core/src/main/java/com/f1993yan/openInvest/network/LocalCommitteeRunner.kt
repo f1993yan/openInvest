@@ -54,23 +54,19 @@ object LocalCommitteeRunner {
         val model = prefs.getString("llm_model", "gemini-2.5-pro") ?: "gemini-2.5-pro"
         val llmBaseUrl = prefs.getString("llm_base_url", "") ?: ""
         val tradingMode = normalizeTradingMode(prefs.getString("trading_mode", "active_profit"))
+        val decisionMode = prefs.getString("decision_mode", "algorithm_only") ?: "algorithm_only"
 
         // Extract server IP and port from backend URL to pass to python for macro/history queries
         val backendUrl = NetworkClient.getBaseUrl()
         val serverIp = extractIpOrHostname(backendUrl)
         val serverPort = extractPort(backendUrl)
 
-        if (apiKey.isEmpty()) {
-            onResult(Result.failure(Exception("LLM API Key is missing in settings. Please configure it.")))
-            return
-        }
-
         Thread {
             try {
                 val py = Python.getInstance()
                 val pyModule = py.getModule("utils.phone_committee")
 
-                Log.d(TAG, "Calling run_committee_local for $symbol ($name) with base_url: $llmBaseUrl and trading_mode: $tradingMode")
+                Log.d(TAG, "Calling run_committee_local for $symbol ($name) with mode: $decisionMode, trading_mode: $tradingMode")
 
                 val pyResult = pyModule.callAttr(
                     "run_committee_local",
@@ -102,7 +98,8 @@ object LocalCommitteeRunner {
                     tradingMode,
                     ma20,
                     ma120,
-                    atrPct
+                    atrPct,
+                    decisionMode
                 )
 
                 val jsonResult = pyResult.toString()
@@ -137,6 +134,7 @@ object LocalCommitteeRunner {
                     "position_exit_policy" to map["position_exit_policy"],
                     "right_side_trend_gate" to map["right_side_trend_gate"],
                     "optimizer_review" to map["optimizer_review"],
+                    "decision_mode" to map["decision_mode"],
                     "decision_synthesis" to map["decision_synthesis"],
                     "behavioral_factor" to map["behavioral_factor"]
                 )

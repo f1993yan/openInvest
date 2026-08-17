@@ -348,7 +348,11 @@ def test_run_committee_session_passes_all_shared_inputs_to_run_committee(
     monkeypatch.setattr("core.committee_runner.run_committee", fake_run_committee)
 
     from core.committee_runner import run_committee_session
-    result = run_committee_session(symbols=["TEST.AX"], max_debate_rounds=1)
+    result = run_committee_session(
+        symbols=["TEST.AX"],
+        max_debate_rounds=1,
+        decision_mode="llm",
+    )
 
     assert captured, "run_committee 未被调用 — session dispatch 失败"
     kw = captured[0]
@@ -365,6 +369,45 @@ def test_run_committee_session_passes_all_shared_inputs_to_run_committee(
     assert result["wealth_view"] == SENTINEL_W
     assert result["event_brief"] == SENTINEL_E
     assert result["macro_view"] == SENTINEL_M
+
+
+def test_run_committee_session_default_algorithm_skips_llm_shared_loaders(
+    monkeypatch, tmp_path,
+):
+    """默认 algorithm_only 不能调用 LLM shared loaders。"""
+    memory_dir = tmp_path / "memory"
+    memory_dir.mkdir()
+    _seed_minimal_memory(memory_dir)
+
+    from core import memory_store as ms
+    monkeypatch.setattr(ms, "MEMORY_ROOT", memory_dir)
+
+    def fail_loader(*args, **kwargs):
+        raise AssertionError("algorithm_only 默认模式不应调用 LLM shared loader")
+
+    monkeypatch.setattr("core.committee_runner.load_wealth_context_view", fail_loader)
+    monkeypatch.setattr("core.committee_runner.resolve_event_brief_multi", fail_loader)
+    monkeypatch.setattr("core.committee_runner.run_macro_view", fail_loader)
+    monkeypatch.setattr(
+        "core.committee_runner.run_committee_for_symbol",
+        lambda sym, **kw: {
+            "verdict": {
+                "verdict": "HOLD",
+                "confidence": 0.5,
+                "alloc_cny": 0,
+                "dominant_view": "algorithm",
+                "raw": "",
+            },
+            "decision_mode": "algorithm_only",
+        },
+    )
+
+    from core.committee_runner import run_committee_session
+    result = run_committee_session(symbols=["TEST.AX"], max_debate_rounds=1)
+
+    assert result["macro_view"].startswith("ALGORITHM_ONLY_MACRO")
+    assert result["wealth_view"].startswith("ALGORITHM_ONLY_WEALTH")
+    assert result["event_brief"] == ""
 
 
 def test_run_committee_session_continues_on_single_asset_error(
@@ -499,6 +542,7 @@ def test_run_committee_session_event_ids_translates_via_event_store(
         symbols=["TEST.AX"],
         event_ids=["ev_1"],
         max_debate_rounds=1,
+        decision_mode="llm",
     )
 
     assert "Fake event for test" in result["event_brief"], (

@@ -126,6 +126,14 @@ class CommitteeRequest(BaseModel):
     news_brief: str = Field("", description="当前新闻摘要，注入到宏观/CIO决策中")
     fundamentals: Dict[str, Any] = Field(default_factory=dict, description="基本面指标字典，如 roe/roic/revenue_growth/pe_ttm/pb 等")
     optimizer_review_enabled: bool = Field(True, description="是否让 LLM 对确定性优化器输出做审计评估")
+    decision_mode: str = Field(
+        "",
+        description=(
+            "决策引擎模式: algorithm_only=跳过LLM委员会; "
+            "llm_committee=旧多角色辩论; auto=A股算法/非A股LLM。"
+            "空值读取 INVEST_COMMITTEE_MODE，默认 algorithm_only"
+        ),
+    )
     behavioral_factor: Dict[str, Any] = Field(
         default_factory=dict,
         description="可选的A股行为因子横截面评估；不传时服务端使用单标的低置信度降级评估",
@@ -165,6 +173,7 @@ class CommitteeResponse(BaseModel):
     position_exit_policy: Dict[str, Any] = Field(default_factory=dict)
     right_side_trend_gate: Dict[str, Any] = Field(default_factory=dict)
     optimizer_review: str = ""
+    decision_mode: str = ""
     decision_synthesis: Dict[str, Any] = Field(default_factory=dict)
     buy_signal_backtest: Dict[str, Any] = Field(default_factory=dict)
     behavioral_factor: Dict[str, Any] = Field(default_factory=dict)
@@ -603,6 +612,7 @@ async def run_committee_get(
     available_cash: float = 0.0,
     t2_pending_cash: float = 0.0,
     optimizer_review_enabled: bool = True,
+    decision_mode: str = "",
 ):
     """GET 版本的委员会分析（方便 web_fetch 调用）"""
     req = CommitteeRequest(
@@ -623,6 +633,7 @@ async def run_committee_get(
         available_cash=available_cash,
         t2_pending_cash=t2_pending_cash,
         optimizer_review_enabled=optimizer_review_enabled,
+        decision_mode=decision_mode,
     )
     return await run_committee_api(req)
 
@@ -634,6 +645,10 @@ def run_committee_direct(req: CommitteeRequest) -> CommitteeResponse:
     只是不经过 FastAPI / uvicorn，不监听端口。
     """
     t0 = datetime.now()
+    from core.decision_mode import ALGORITHM_ONLY, normalize_decision_mode
+
+    decision_mode = normalize_decision_mode(req.decision_mode, market=req.market)
+    algorithm_only = decision_mode == ALGORITHM_ONLY
 
     try:
         # 0. 科创板自动检测：688xxx 首次买入最低200股
@@ -713,9 +728,17 @@ def run_committee_direct(req: CommitteeRequest) -> CommitteeResponse:
         macro_data = get_macro_data()
         if req.news_brief:
             macro_data += f"\n\n## 当前新闻\n{req.news_brief}"
-        from core.committee import run_macro_view
-        macro_view = run_macro_view(macro_data)
-        log.info(f"宏观: {macro_view[:120]}...")
+        if algorithm_only:
+            macro_view = (
+                "ALGORITHM_ONLY_MACRO: 未调用LLM宏观角色；"
+                "本轮只使用价格、行为因子、基本面、regime和交易约束。"
+            )
+            if req.news_brief:
+                macro_view += f"\nNEWS_BRIEF_USED_AS_TEXT_ONLY:\n{req.news_brief[:800]}"
+        else:
+            from core.committee import run_macro_view
+            macro_view = run_macro_view(macro_data)
+        log.info(f"宏观/模式: {decision_mode} {macro_view[:120]}...")
 
         # 5. 构建输入
         asset = {
@@ -778,6 +801,7 @@ def run_committee_direct(req: CommitteeRequest) -> CommitteeResponse:
                 news_brief=req.news_brief,
                 fundamentals=req.fundamentals,
                 optimizer_review_enabled=req.optimizer_review_enabled,
+                decision_mode=decision_mode,
                 behavioral_factor=req.behavioral_factor,
             )
             p_summary = _build_portfolio_summary(temp_req)
@@ -787,27 +811,74 @@ def run_committee_direct(req: CommitteeRequest) -> CommitteeResponse:
             from core.committee import run_wealth_context_view
             w_context = run_wealth_context_view(None, cash_val)
 
-            from core.committee import run_committee, parse_cio_memo
+            if algorithm_only:
+                from core.committee import CommitteeReport
 
-            res = run_committee(
-                asset=asset,
-                market_data=market_data,
-                macro_view=macro_view,
-                portfolio_summary=p_summary,
-                prior_insights="",
-                regime_brief=regime_brief,
-                wealth_context_view=w_context,
-                current_price=current_price or None,
-                persist_to_memory=False,
-                max_debate_rounds=min(req.max_debate_rounds, 4),
-            )
+                factor_line = "A股行为因子: unavailable"
+                if behavioral_assessment is not None:
+                    factor_score = float(getattr(behavioral_assessment, "score", 0.0) or 0.0)
+                    factor_target = float(getattr(behavioral_assessment, "target_weight_pct", 0.0) or 0.0)
+                    factor_line = (
+                        "A股行为因子: "
+                        f"score={factor_score:.2f} "
+                        f"selected={str(getattr(behavioral_assessment, 'selected', False)).lower()} "
+                        f"target_weight={factor_target:.2f}% "
+                        f"low_confidence={str(getattr(behavioral_assessment, 'low_confidence', True)).lower()}"
+                    )
+                report = CommitteeReport(
+                    asset=asset,
+                    macro_view=macro_view,
+                    wealth_context_view=w_context,
+                    quant_view=(
+                        "ALGORITHM_ONLY_QUANT: 未调用LLM量化角色。\n"
+                        f"{regime_brief}\n{factor_line}"
+                    ),
+                    risk_view=(
+                        "ALGORITHM_ONLY_RISK: 未调用LLM风控角色。\n"
+                        f"position_pct={position_pct_val:.2f}% available_cash={available_cash_val:.2f} "
+                        f"t2_pending={t2_pending_val:.2f}"
+                    ),
+                    cio_memo=(
+                        "[ALGORITHM_ONLY_MODE]\n"
+                        "VERDICT: HOLD\n"
+                        "CONFIDENCE: 0.50\n"
+                        "ALLOC_CNY: 0\n"
+                        "DOMINANT_VIEW: algorithm\n"
+                        "NOTE: 这是优化器输入占位，最终结论由确定性优化器覆盖；本轮未调用LLM委员会。"
+                    ),
+                    market_data=market_data,
+                    portfolio_summary=p_summary,
+                    prior_insights="",
+                )
+                c_memo = report.cio_memo or ""
+                parsed = {
+                    "verdict": "HOLD",
+                    "confidence": 0.50,
+                    "alloc_cny": 0,
+                    "dominant_view": "algorithm",
+                }
+            else:
+                from core.committee import run_committee, parse_cio_memo
 
-            report = res.get("report")
-            if report is None:
-                return {"success": False, "error": f"委员会返回空 report: {res.get('error', 'unknown')}"}
+                res = run_committee(
+                    asset=asset,
+                    market_data=market_data,
+                    macro_view=macro_view,
+                    portfolio_summary=p_summary,
+                    prior_insights="",
+                    regime_brief=regime_brief,
+                    wealth_context_view=w_context,
+                    current_price=current_price or None,
+                    persist_to_memory=False,
+                    max_debate_rounds=min(req.max_debate_rounds, 4),
+                )
 
-            c_memo = report.cio_memo or ""
-            parsed = parse_cio_memo(c_memo, current_price=current_price)
+                report = res.get("report")
+                if report is None:
+                    return {"success": False, "error": f"委员会返回空 report: {res.get('error', 'unknown')}"}
+
+                c_memo = report.cio_memo or ""
+                parsed = parse_cio_memo(c_memo, current_price=current_price)
 
             atr_pct = metrics.get("atr_pct") if metrics else None
             if atr_pct and current_price and current_price > 0:
@@ -873,7 +944,7 @@ def run_committee_direct(req: CommitteeRequest) -> CommitteeResponse:
             right_side_gate_text = right_side_gate.audit_text()
 
             optimizer_review = ""
-            if req.optimizer_review_enabled:
+            if req.optimizer_review_enabled and not algorithm_only:
                 try:
                     from core.committee import run_optimizer_review_view
                     optimizer_review = run_optimizer_review_view(
@@ -897,7 +968,7 @@ def run_committee_direct(req: CommitteeRequest) -> CommitteeResponse:
                 and current_price
                 and current_price < cost_val
             )
-            if has_loss and opt.verdict in ("SELL", "TRIM"):
+            if (not algorithm_only) and has_loss and opt.verdict in ("SELL", "TRIM"):
                 c_memo += (
                     f"\n[FLOATING_LOSS_PROTECT] 持仓浮亏({(current_price/cost_val-1)*100:.1f}%)，"
                     f"优化器{opt.verdict}→保留LLM裁决，需人工判断"
@@ -923,7 +994,13 @@ def run_committee_direct(req: CommitteeRequest) -> CommitteeResponse:
                     parsed["confidence"] = min(opt.confidence, 0.55)
                     parsed["alloc_cny"] = 0
                 else:
-                    if (
+                    if algorithm_only:
+                        c_memo += (
+                            f"\n[ALGORITHM_ONLY_DECISION] final={opt.verdict} "
+                            f"alloc={opt.alloc_cny} lots={opt.lots} "
+                            "llm_calls=0"
+                        )
+                    elif (
                         parsed.get("verdict") != opt.verdict
                         or int(parsed.get("alloc_cny", 0) or 0) != opt.alloc_cny
                     ):
@@ -965,13 +1042,19 @@ def run_committee_direct(req: CommitteeRequest) -> CommitteeResponse:
                 "position_exit_policy": {},
                 "right_side_gate": right_side_gate,
                 "optimizer_review": optimizer_review,
+                "decision_mode": decision_mode,
                 "decision_synthesis": decision_synthesis,
                 "buy_signal_backtest": buy_signal_backtest,
                 "behavioral_factor": behavioral_assessment,
             }
 
         # 6. 跑真实账户（Real）的评估
-        log.info(f"启动真实账户委员会辩论 (max rounds={req.max_debate_rounds})...")
+        log.info(
+            "启动真实账户%s (mode=%s, max rounds=%s)...",
+            "算法直出" if algorithm_only else "委员会辩论",
+            decision_mode,
+            req.max_debate_rounds,
+        )
         real_res = _evaluate_portfolio(
             cash_val=req.cash,
             available_cash_val=req.available_cash,
@@ -992,7 +1075,10 @@ def run_committee_direct(req: CommitteeRequest) -> CommitteeResponse:
         # 7. 跑影子账户（Shadow）的评估（若传入相关数据）
         shadow_result_dict = None
         if req.shadow_cash > 0 or req.shadow_position_pct > 0 or len(req.shadow_holdings) > 0 or req.shadow_available_cash > 0:
-            log.info("启动影子账户（Committee）的独立委员会辩论...")
+            log.info(
+                "启动影子账户（Committee）的独立%s...",
+                "算法直出" if algorithm_only else "委员会辩论",
+            )
             shadow_res = _evaluate_portfolio(
                 cash_val=req.shadow_cash,
                 available_cash_val=req.shadow_available_cash,
@@ -1019,6 +1105,7 @@ def run_committee_direct(req: CommitteeRequest) -> CommitteeResponse:
                     "position_exit_policy": {},
                     "right_side_trend_gate": shadow_res["right_side_gate"].as_dict(),
                     "optimizer_review": shadow_res["optimizer_review"],
+                    "decision_mode": shadow_res["decision_mode"],
                     "decision_synthesis": shadow_res["decision_synthesis"].as_dict(),
                     "buy_signal_backtest": shadow_res["buy_signal_backtest"].as_dict(),
                     "behavioral_factor": (
@@ -1046,11 +1133,18 @@ def run_committee_direct(req: CommitteeRequest) -> CommitteeResponse:
             position_exit_policy={},
             right_side_trend_gate=real_res["right_side_gate"].as_dict(),
             optimizer_review=real_res["optimizer_review"][:500],
+            decision_mode=real_res["decision_mode"],
             cio_note=real_res["cio_memo"][:500],
         )
 
         elapsed = (datetime.now() - t0).total_seconds()
-        log.info(f"委员会完成: verdict={real_res['verdict']} confidence={real_res['confidence']:.2f} elapsed={elapsed:.1f}s")
+        log.info(
+            "决策完成: mode=%s verdict=%s confidence=%.2f elapsed=%.1fs",
+            decision_mode,
+            real_res["verdict"],
+            real_res["confidence"],
+            elapsed,
+        )
 
         return CommitteeResponse(
             success=True,
@@ -1077,6 +1171,7 @@ def run_committee_direct(req: CommitteeRequest) -> CommitteeResponse:
             position_exit_policy={},
             right_side_trend_gate=real_res["right_side_gate"].as_dict(),
             optimizer_review=real_res["optimizer_review"],
+            decision_mode=real_res["decision_mode"],
             decision_synthesis=real_res["decision_synthesis"].as_dict(),
             buy_signal_backtest=real_res["buy_signal_backtest"].as_dict(),
             behavioral_factor=(

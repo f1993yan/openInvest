@@ -157,6 +157,7 @@ def build_mobile_recommendation_text(
     decision_synthesis: Optional[Dict[str, Any]] = None,
     buy_signal_backtest: Optional[Dict[str, Any]] = None,
     behavioral_factor: Optional[Dict[str, Any]] = None,
+    decision_mode: str = "",
 ) -> str:
     _ = position_exit_policy  # Deprecated compatibility argument.
     current = _safe_num(current_price)
@@ -198,10 +199,14 @@ def build_mobile_recommendation_text(
         f"5. 仓位建议: {_fmt_money(alloc)} 元；置信度 {int(confidence_val * 100)}%；当前{'已有持仓' if is_holding else '没有持仓'}。",
         "",
         "为什么这么判断:",
+    ]
+    if decision_mode == "algorithm_only":
+        lines.append("- 决策来源: 算法直出，本轮未调用LLM委员会或LLM审核。")
+    lines.extend([
         f"- 技术面: {_regime_label(regime_brief)}",
         f"- 右侧趋势闸门: {'通过' if right_side_trend_gate.get('allow') else '未通过'} ({right_side_trend_gate.get('reason') or '未提供'}) 。",
         f"- 基本面: {fundamental_score:.0f} 分，属于{'偏强' if fundamental_score >= 70 else '一般' if fundamental_score >= 45 else '偏弱'}。"
-    ]
+    ])
 
     if behavioral_factor:
         factor_score = _safe_num(behavioral_factor.get("score"))
@@ -301,10 +306,15 @@ def run_committee_local(
     trading_mode: str = "active_profit",
     ma20: Optional[float] = None,
     ma120: Optional[float] = None,
-    atr_pct: Optional[float] = None
+    atr_pct: Optional[float] = None,
+    decision_mode: str = "",
 ) -> str:
     """本地手机端执行投资委员会分析的入口"""
     t0 = datetime.now()
+    from core.decision_mode import ALGORITHM_ONLY, normalize_decision_mode
+
+    resolved_decision_mode = normalize_decision_mode(decision_mode, market=market)
+    algorithm_only = resolved_decision_mode == ALGORITHM_ONLY
 
     # Set up environment variables for the phone run
     os.environ["LLM_API_KEY"] = llm_api_key
@@ -318,6 +328,7 @@ def run_committee_local(
     os.environ["INVEST_SERVER_PORT"] = server_port
     os.environ["INVEST_RUNNING_ON_PHONE"] = "1"
     os.environ["INVEST_TRADING_MODE"] = trading_mode
+    os.environ["INVEST_COMMITTEE_MODE"] = resolved_decision_mode
 
     # Configure LLM provider
     if "gemini" in llm_model.lower():
@@ -458,8 +469,16 @@ def run_committee_local(
         macro_data_str = get_macro_data()
         if news_brief:
             macro_data_str += f"\n\n## 当前新闻\n{news_brief}"
-        from core.committee import run_macro_view
-        macro_view = run_macro_view(macro_data_str)
+        if algorithm_only:
+            macro_view = (
+                "ALGORITHM_ONLY_MACRO: 未调用LLM宏观角色；"
+                "本轮只使用价格、行为因子、基本面、regime和交易约束。"
+            )
+            if news_brief:
+                macro_view += f"\nNEWS_BRIEF_USED_AS_TEXT_ONLY:\n{news_brief[:800]}"
+        else:
+            from core.committee import run_macro_view
+            macro_view = run_macro_view(macro_data_str)
 
         # 5. 构建输入
         # Replicate _build_portfolio_summary
@@ -521,41 +540,89 @@ def run_committee_local(
         from core.committee import run_wealth_context_view
         wealth_context = run_wealth_context_view(None, cash)
 
-        # 6. 跑委员会
-        log.info(f"启动本地手机端委员会辩论...")
-        from core.committee import run_committee, parse_cio_memo
-
         asset = {
             "symbol": symbol,
             "display_name": name or symbol,
         }
 
-        result = run_committee(
-            asset=asset,
-            market_data=market_data,
-            macro_view=macro_view,
-            portfolio_summary=portfolio_summary,
-            prior_insights="",
-            regime_brief=regime_brief,
-            wealth_context_view=wealth_context,
-            current_price=current_price or None,
-            persist_to_memory=False,
-            max_debate_rounds=max_debate_rounds,
-        )
+        if algorithm_only:
+            log.info("启动本地手机端算法直出...")
+            from core.committee import CommitteeReport
 
-        report = result.get("report")
-        if report is None:
-            return json.dumps({
-                "success": False,
-                "symbol": symbol,
-                "name": name,
-                "error": f"本地委员会返回空 report: {result.get('error', 'unknown')}",
-                "elapsed_sec": (datetime.now() - t0).total_seconds(),
-            }, ensure_ascii=False)
+            factor_line = "A股行为因子: unavailable"
+            if behavioral_assessment is not None:
+                factor_score = float(getattr(behavioral_assessment, "score", 0.0) or 0.0)
+                factor_target = float(getattr(behavioral_assessment, "target_weight_pct", 0.0) or 0.0)
+                factor_line = (
+                    "A股行为因子: "
+                    f"score={factor_score:.2f} "
+                    f"selected={str(getattr(behavioral_assessment, 'selected', False)).lower()} "
+                    f"target_weight={factor_target:.2f}% "
+                    f"low_confidence={str(getattr(behavioral_assessment, 'low_confidence', True)).lower()}"
+                )
+            report = CommitteeReport(
+                asset=asset,
+                macro_view=macro_view,
+                wealth_context_view=wealth_context,
+                quant_view=(
+                    "ALGORITHM_ONLY_QUANT: 未调用LLM量化角色。\n"
+                    f"{regime_brief}\n{factor_line}"
+                ),
+                risk_view=(
+                    "ALGORITHM_ONLY_RISK: 未调用LLM风控角色。\n"
+                    f"position_pct={position_pct:.2f}% available_cash={available_cash:.2f} "
+                    f"t2_pending={t2_pending_cash:.2f}"
+                ),
+                cio_memo=(
+                    "[ALGORITHM_ONLY_MODE]\n"
+                    "VERDICT: HOLD\n"
+                    "CONFIDENCE: 0.50\n"
+                    "ALLOC_CNY: 0\n"
+                    "DOMINANT_VIEW: algorithm\n"
+                    "NOTE: 这是优化器输入占位，最终结论由确定性优化器覆盖；本轮未调用LLM委员会。"
+                ),
+                market_data=market_data,
+                portfolio_summary=portfolio_summary,
+                prior_insights="",
+            )
+            cio_memo = report.cio_memo or ""
+            parsed = {
+                "verdict": "HOLD",
+                "confidence": 0.50,
+                "alloc_cny": 0,
+                "dominant_view": "algorithm",
+            }
+        else:
+            # 6. 跑委员会
+            log.info("启动本地手机端委员会辩论...")
+            from core.committee import run_committee
 
-        cio_memo = report.cio_memo or ""
-        from core.committee import parse_cio_memo as server_parse_cio_memo
-        parsed = server_parse_cio_memo(cio_memo, current_price=current_price)
+            result = run_committee(
+                asset=asset,
+                market_data=market_data,
+                macro_view=macro_view,
+                portfolio_summary=portfolio_summary,
+                prior_insights="",
+                regime_brief=regime_brief,
+                wealth_context_view=wealth_context,
+                current_price=current_price or None,
+                persist_to_memory=False,
+                max_debate_rounds=max_debate_rounds,
+            )
+
+            report = result.get("report")
+            if report is None:
+                return json.dumps({
+                    "success": False,
+                    "symbol": symbol,
+                    "name": name,
+                    "error": f"本地委员会返回空 report: {result.get('error', 'unknown')}",
+                    "elapsed_sec": (datetime.now() - t0).total_seconds(),
+                }, ensure_ascii=False)
+
+            cio_memo = report.cio_memo or ""
+            from core.committee import parse_cio_memo as server_parse_cio_memo
+            parsed = server_parse_cio_memo(cio_memo, current_price=current_price)
 
         atr_pct = metrics.get("atr_pct") if metrics else None
         if atr_pct and current_price and current_price > 0:
@@ -643,7 +710,7 @@ def run_committee_local(
         right_side_gate_text = right_side_gate.audit_text()
 
         optimizer_review = ""
-        if optimizer_review_enabled:
+        if optimizer_review_enabled and not algorithm_only:
             try:
                 from core.committee import run_optimizer_review_view
                 optimizer_review = run_optimizer_review_view(
@@ -664,7 +731,7 @@ def run_committee_local(
             and current_price
             and current_price < cost
         )
-        if has_loss and opt.verdict in ("SELL", "TRIM"):
+        if (not algorithm_only) and has_loss and opt.verdict in ("SELL", "TRIM"):
             cio_memo += (
                 f"\n[FLOATING_LOSS_PROTECT] 持仓浮亏({(current_price/cost-1)*100:.1f}%)，"
                 f"优化器{opt.verdict}→保留LLM裁决，需人工判断"
@@ -690,7 +757,13 @@ def run_committee_local(
                 parsed["confidence"] = min(opt.confidence, 0.55)
                 parsed["alloc_cny"] = 0
             else:
-                if (
+                if algorithm_only:
+                    cio_memo += (
+                        f"\n[ALGORITHM_ONLY_DECISION] final={opt.verdict} "
+                        f"alloc={opt.alloc_cny} lots={opt.lots} "
+                        "llm_calls=0"
+                    )
+                elif (
                     parsed.get("verdict") != opt.verdict
                     or int(parsed.get("alloc_cny", 0) or 0) != opt.alloc_cny
                 ):
@@ -701,7 +774,9 @@ def run_committee_local(
                 parsed["verdict"] = opt.verdict
                 parsed["confidence"] = opt.confidence
                 parsed["alloc_cny"] = opt.alloc_cny
-            cio_memo += opt_audit_text
+        cio_memo += opt_audit_text
+        cio_memo += entry_exit_audit_text
+        cio_memo += right_side_gate_text
 
         from core.buy_signal_miner import mine_historical_buy_signals
         buy_signal_backtest = mine_historical_buy_signals(symbol, df_2y)
@@ -722,7 +797,13 @@ def run_committee_local(
         cio_memo += decision_synthesis.audit_text()
 
         elapsed = (datetime.now() - t0).total_seconds()
-        log.info(f"本地委员会完成: verdict={parsed['verdict']} confidence={parsed['confidence']:.2f} elapsed={elapsed:.1f}s")
+        log.info(
+            "本地决策完成: mode=%s verdict=%s confidence=%.2f elapsed=%.1fs",
+            resolved_decision_mode,
+            parsed["verdict"],
+            parsed["confidence"],
+            elapsed,
+        )
 
         # 缓存到本地
         _save_committee_cache(
@@ -740,6 +821,7 @@ def run_committee_local(
             position_exit_policy={},
             right_side_trend_gate=right_side_gate.as_dict(),
             optimizer_review=optimizer_review[:500],
+            decision_mode=resolved_decision_mode,
             cio_note=cio_memo[:500],
         )
 
@@ -763,6 +845,7 @@ def run_committee_local(
             decision_synthesis=decision_synthesis.as_dict(),
             buy_signal_backtest=buy_signal_backtest.as_dict(),
             behavioral_factor=behavioral_assessment.as_dict() if behavioral_assessment is not None else {},
+            decision_mode=resolved_decision_mode,
         )
 
         response = {
@@ -791,6 +874,7 @@ def run_committee_local(
             "position_exit_policy": {},
             "right_side_trend_gate": right_side_gate.as_dict(),
             "optimizer_review": optimizer_review,
+            "decision_mode": resolved_decision_mode,
             "decision_synthesis": decision_synthesis.as_dict(),
             "buy_signal_backtest": buy_signal_backtest.as_dict(),
             "behavioral_factor": behavioral_assessment.as_dict() if behavioral_assessment is not None else {},

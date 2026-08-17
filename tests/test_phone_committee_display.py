@@ -33,8 +33,10 @@ def test_mobile_recommendation_displays_behavioral_factor_parameters():
             "selected": True,
             "low_confidence": False,
         },
+        decision_mode="algorithm_only",
     )
 
+    assert "决策来源: 算法直出，本轮未调用LLM委员会或LLM审核。" in text
     assert "A股行为因子: 82.4分，入选前四，目标仓位 24.6%" in text
     assert "近3月 +6.2%，命中 57% (n=63)，优化权重 0.81" in text
     assert "回调 27.20" in text

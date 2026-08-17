@@ -16,6 +16,7 @@ from core.committee import (
     run_committee,
     run_macro_view,
 )
+from core.decision_mode import ALGORITHM_ONLY, normalize_decision_mode
 from core.portfolio_manager import PortfolioManager
 from core.regime import format_regime_brief
 from core.regime_probability import (
@@ -308,10 +309,120 @@ def _extract_regime_label(regime_brief: str) -> str:
     return ""
 
 
+def _safe_float(value: Any, default: float = 0.0) -> float:
+    try:
+        if value is None:
+            return default
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _infer_market(symbol: str, target: Dict[str, Any]) -> str:
+    market = str(target.get("market") or target.get("market_type") or "").strip().lower()
+    if market:
+        return market
+    code = str(symbol or "").strip().upper()
+    if code.isdigit() and len(code) == 6:
+        return "a"
+    if code.endswith(".HK") or (code.isdigit() and len(code) == 5):
+        return "hk"
+    return "global"
+
+
+def _run_algorithm_only_direct(
+    *,
+    symbol: str,
+    target: Dict[str, Any],
+    pm: PortfolioManager,
+    metrics: Dict[str, Any],
+    current_price: Any,
+) -> Dict[str, Any]:
+    """Reuse the backend direct optimizer path for no-LLM session runs."""
+    from backend.server import CommitteeRequest, Holding as BackendHolding, run_committee_direct
+
+    market = _infer_market(symbol, target)
+    cash_cny = pm.cash_amount("CNY")
+    holdings_raw = [h for h in pm.holdings if not h.get("is_tracking_only")]
+    holding = next((h for h in holdings_raw if str(h.get("symbol") or "").upper() == symbol.upper()), None)
+    price = _safe_float(current_price or metrics.get("current_price"))
+    total_assets = max(cash_cny, 1.0)
+    holding_values: Dict[str, float] = {}
+    for h in holdings_raw:
+        sym = str(h.get("symbol") or "")
+        units = _safe_float(h.get("units"))
+        avg_cost = _safe_float(h.get("avg_cost") or h.get("cost"))
+        h_price = price if sym.upper() == symbol.upper() and price > 0 else avg_cost
+        value = max(0.0, units * h_price)
+        holding_values[sym] = value
+        total_assets += value
+
+    position_pct = 0.0
+    cost = 0.0
+    if holding is not None:
+        cost = _safe_float(holding.get("avg_cost") or holding.get("cost"))
+        position_pct = holding_values.get(str(holding.get("symbol") or ""), 0.0) / total_assets * 100.0
+
+    other_holdings = []
+    for h in holdings_raw:
+        sym = str(h.get("symbol") or "")
+        if not sym or sym.upper() == symbol.upper():
+            continue
+        other_holdings.append(BackendHolding(
+            symbol=sym,
+            name=str(h.get("display_name") or h.get("name") or sym),
+            weight_pct=holding_values.get(sym, 0.0) / total_assets * 100.0,
+            cost=_safe_float(h.get("avg_cost") or h.get("cost")),
+            current_price=None,
+        ))
+
+    req = CommitteeRequest(
+        symbol=symbol,
+        name=str(target.get("display_name") or target.get("name") or symbol),
+        market=market,
+        sector=str(target.get("sector") or ""),
+        industry=str(target.get("industry") or ""),
+        position_pct=position_pct,
+        target_position_pct=target.get("target_position_pct", target.get("target_pct")),
+        cost=cost,
+        current_price=price if price > 0 else None,
+        total_assets=total_assets,
+        cash=cash_cny,
+        holdings=other_holdings,
+        min_lot_size=100,
+        t_plus_1=market == "a",
+        available_cash=cash_cny,
+        optimizer_review_enabled=False,
+        decision_mode=ALGORITHM_ONLY,
+    )
+    response = run_committee_direct(req)
+    payload = response.model_dump()
+    from types import SimpleNamespace
+
+    payload["verdict"] = {
+        "verdict": response.verdict,
+        "confidence": response.confidence,
+        "alloc_cny": response.suggested_alloc_cny,
+        "dominant_view": response.dominant_view or "algorithm",
+        "raw": response.cio_memo,
+    }
+    payload["report"] = SimpleNamespace(
+        cio_memo=response.cio_memo,
+        quant_view=response.quant_view,
+        risk_view=response.risk_view,
+        macro_view=response.macro_view,
+        quant_adjusted=response.quant_adjusted,
+        risk_adjusted=response.risk_adjusted,
+    )
+    payload["decision_mode"] = response.decision_mode
+    return payload
+
+
 def run_committee_for_symbol(
     symbol: str,
     *,
     max_debate_rounds: int = 4,
+    decision_mode: str = "",
     progress_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
     shared_macro_view: Optional[str] = None,
     event_brief: Optional[str] = None,
@@ -377,6 +488,18 @@ def run_committee_for_symbol(
     # P1-2: 传 symbol 让 regime 用 per-asset 阈值（黄金/纳指/加密各异）
     regime_brief = format_regime_brief(metrics, symbol=symbol)
     emit("data_ready", regime_brief=regime_brief[:240])
+    resolved_decision_mode = normalize_decision_mode(decision_mode, market=_infer_market(symbol, target))
+    if resolved_decision_mode == ALGORITHM_ONLY:
+        emit("algorithm_only_start", mode=resolved_decision_mode)
+        result = _run_algorithm_only_direct(
+            symbol=symbol,
+            target=target,
+            pm=pm,
+            metrics=metrics,
+            current_price=metrics.get("current_price"),
+        )
+        emit("algorithm_only_done", verdict=result.get("verdict"))
+        return result
 
     # 3. 事件 RAG 召回（事件层第二条腿；env feature flag 默认关）
     effective_event_brief = _resolve_event_brief(symbol, event_brief)
@@ -502,6 +625,7 @@ def run_committee_session(
     symbols: Optional[List[str]] = None,
     *,
     max_debate_rounds: int = 4,
+    decision_mode: str = "",
     progress_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
     event_brief_override: Optional[str] = None,
     event_ids: Optional[List[str]] = None,
@@ -563,10 +687,29 @@ def run_committee_session(
     if not symbols:
         raise RuntimeError("run_committee_session: 没有可跑的 symbol "
                            "（symbols 参数空 + strategy.target_assets 也空）")
-    emit("session_start", symbols=symbols, max_debate_rounds=max_debate_rounds)
+    target_map = {
+        str(a.get("symbol")): dict(a)
+        for a in pm.strategy.get("target_assets", [])
+        if a.get("symbol")
+    }
+    all_algorithm_only = all(
+        normalize_decision_mode(
+            decision_mode,
+            market=_infer_market(sym, target_map.get(sym, {"symbol": sym})),
+        ) == ALGORITHM_ONLY
+        for sym in symbols
+    )
+    emit(
+        "session_start",
+        symbols=symbols,
+        max_debate_rounds=max_debate_rounds,
+        decision_mode=ALGORITHM_ONLY if all_algorithm_only else "mixed_or_llm",
+    )
 
     # ---- Step 2: shared wealth_view ----
-    if wealth_view_override is not None:
+    if all_algorithm_only:
+        wealth_view = "ALGORITHM_ONLY_WEALTH: 未调用LLM财富上下文角色。"
+    elif wealth_view_override is not None:
         wealth_view = wealth_view_override
     else:
         wealth_view = load_wealth_context_view()
@@ -578,6 +721,9 @@ def run_committee_session(
     if event_brief_override is not None:
         event_brief = event_brief_override
         event_brief_source = "override"
+    elif all_algorithm_only:
+        event_brief = ""
+        event_brief_source = "algorithm_only_skipped"
     elif event_ids:
         # Web event-trigger 路径：caller 已知具体 event_ids，反查 + format
         event_brief = ""
@@ -605,7 +751,11 @@ def run_committee_session(
              preview=event_brief[:240])
 
     # ---- Step 4: shared macro_view ----
-    if macro_view_override is not None:
+    if all_algorithm_only:
+        macro_view = "ALGORITHM_ONLY_MACRO: 未调用LLM宏观角色。"
+        emit("macro_done", macro_preview=macro_view[:240], shared=True,
+             algorithm_only=True)
+    elif macro_view_override is not None:
         macro_view = macro_view_override
         emit("macro_done", macro_preview=macro_view[:240], shared=True,
              from_override=True)
@@ -643,6 +793,7 @@ def run_committee_session(
         return run_committee_for_symbol(
             sym,
             max_debate_rounds=max_debate_rounds,
+            decision_mode=decision_mode,
             progress_callback=progress_callback,
             shared_macro_view=macro_view,
             event_brief=event_brief,
@@ -713,6 +864,7 @@ def run_committee_session(
             "event_brief_attached": bool(event_brief),
             "wealth_view_attached": bool(wealth_view),
             "max_debate_rounds": max_debate_rounds,
+            "decision_mode": ALGORITHM_ONLY if all_algorithm_only else "mixed_or_llm",
             "max_workers": effective_workers,
             "started_at": started_at,
             "ended_at": ended_at,

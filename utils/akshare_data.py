@@ -358,8 +358,15 @@ def _fetch_tencent_daily(symbol: str, period: str, adjust: str = "qfq") -> pd.Da
         import requests
 
         days = _period_to_days(period)
-        prefix = _a_share_prefix(symbol)  # e.g. "sz002185"
-        param = f"{prefix},day,,,{days},qfq"
+        if _is_index(symbol):
+            # 腾讯指数也要求 qfq 参数位（虽然指数本身不除权），返回 day key
+            prefix = _KNOWN_INDICES.get(symbol, _a_share_prefix(symbol))
+            param = f"{prefix},day,,,{days},qfq"
+            fq_mode = False
+        else:
+            prefix = _a_share_prefix(symbol)  # e.g. "sz002185"
+            param = f"{prefix},day,,,{days},qfq"
+            fq_mode = True
         url = "https://web.ifzq.gtimg.cn/appstock/app/fqkline/get"
         resp = requests.get(
             url,
@@ -374,8 +381,11 @@ def _fetch_tencent_daily(symbol: str, period: str, adjust: str = "qfq") -> pd.Da
             return pd.DataFrame()
 
         stock_data = (payload.get("data") or {}).get(prefix) or {}
-        # qfqday key contains forward-adjusted daily bars
-        klines = stock_data.get("qfqday") or stock_data.get("day") or []
+        # qfqday key contains forward-adjusted daily bars; day key for index
+        if fq_mode:
+            klines = stock_data.get("qfqday") or stock_data.get("day") or []
+        else:
+            klines = stock_data.get("day") or []
 
         if not klines:
             log.warning(f"tencent K线 {symbol} 返回空K线数据")
@@ -474,7 +484,10 @@ def _is_index(symbol: str) -> bool:
 
 
 def _fetch_index(symbol: str, period: str) -> pd.DataFrame:
-    """拉指数数据（使用新浪源 stock_zh_a_daily，指数不支持前复权）"""
+    """拉指数数据：腾讯直连优先（快），eastmoney 兜底，akshare 最后"""
+    df = _fetch_tencent_daily(symbol, period, adjust="none")
+    if not df.empty:
+        return df
     df = _fetch_eastmoney_daily(symbol, period, adjust="none")
     if not df.empty:
         return df

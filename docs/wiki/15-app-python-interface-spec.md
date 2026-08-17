@@ -20,7 +20,7 @@
 
 ### 2.1 接口 1: 本地委员会决策 (`run_committee_local`)
 
-Android 客户端通过调用该函数，在手机本地执行多 Agent 闭门辩论并得出投资结论。
+Android 客户端通过调用该函数，在手机本地得出投资结论。默认 `decision_mode=algorithm_only` 时不再执行多 Agent LLM 辩论，也不要求 LLM API Key；只有显式切到 `llm_committee` / `llm` 时才走旧委员会链路。
 
 #### 2.1.1 函数签名
 ```python
@@ -50,7 +50,11 @@ def run_committee_local(
     max_debate_rounds: int = 4,         # 多 Agent 最大辩论轮数
     server_port: str = "8765",          # 远程服务器端口
     change_pct: float = 0.0,            # 今日涨跌幅百分比 (如 5.3 代表 +5.3%)
-    trading_mode: str = "active_profit" # 可选交易模式: active_profit/cash_recovery
+    trading_mode: str = "active_profit",# 可选交易模式: active_profit/cash_recovery
+    ma20: Optional[float] = None,        # 可选：快照传入20日均线
+    ma120: Optional[float] = None,       # 可选：快照传入120日均线
+    atr_pct: Optional[float] = None,     # 可选：快照传入ATR百分比
+    decision_mode: str = ""             # 可选：algorithm_only / llm_committee / auto
 ) -> str:                               # 返回结果 JSON 字符串
 ```
 
@@ -89,7 +93,8 @@ def run_committee_local(
     "gate_passed": true,
     "rationale": "..."
   },
-  "optimizer_review": "...",            // CIO 决策审查优化记录
+  "optimizer_review": "...",            // LLM 审核文本；algorithm_only 模式为空
+  "decision_mode": "algorithm_only",     // 实际决策引擎
   "elapsed_sec": 12.4                   // 本次决策耗时(秒)
 }
 ```
@@ -102,6 +107,8 @@ def run_committee_local(
 - App 本地 wrapper 可使用 `resolved_snapshot` 作为展示兜底：当最新委员会结果缺少技术指标时，优先复用监控快照或最近缓存中的 `technical/entry_exit_points`。该兜底只补展示字段，不代表重新运行委员会，也不应触发行情同步。
 - `trading_mode` 是新增尾部可选参数，旧版 App 不传时仍按 `active_profit` 执行。该参数只进入手机本地 Python 的委员会上下文与提醒优化口径，不改变 `verdict`、`suggested_alloc_cny` 等既有字段语义。
 - `trading_mode` 当前规范值只有 `active_profit` 和 `cash_recovery`；历史 `risk_off`、`bear`、`defensive` 与“主动避险”输入会兼容归一化为 `cash_recovery`。
+- `decision_mode` 为空时读取 `INVEST_COMMITTEE_MODE`，仍为空则默认 `algorithm_only`。`algorithm_only` 跳过 `run_macro_view`、`run_committee` 和 `run_optimizer_review_view`，不会消耗 LLM；`llm` / `llm_committee` 恢复旧多角色辩论；`auto` 表示 A 股算法直出、非 A 股使用 LLM 委员会。
+- Android 本地 wrapper 不再强制要求 LLM API Key；在算法模式下，Key 为空也可以完成 A 股分析。
 - `behavioral_factor` 是 A 股生产基座新增的可选审计对象。旧 App 不需要新增必填入参，也可以忽略响应中的该对象；`verdict`、`confidence`、`suggested_alloc_cny` 和 `entry_exit_points` 的既有类型与含义不变。`position_exit_policy` 仅保留为空对象兼容旧客户端，不再影响生产决策。`optimizer_weight` 表示标的级因子可信权重，不是建议买入比例；`target_weight_pct` 才是因子目标仓位。
 - `behavioral_factor.selection_scope` 和 `behavioral_factor.represents_account_holding` 是尾部可选语义字段。当前前四目标使用 `selection_scope=factor_model_target_portfolio`、`represents_account_holding=false`；客户端不得把 `selected=true` 当作真实持仓。旧响应缺少这两个字段时仍按可选字段兼容，不改变其他字段解析。
 - A 股行为因子缺失或低置信度时，服务端会先使用监控配置中的持仓/关注标的补建横截面；仍失败时 `verdict=WAIT`、`suggested_alloc_cny=0`，监控快照写 `state=factor_unavailable`。客户端应显示“无法判断”并禁用交易，不得解释成 `HOLD`。

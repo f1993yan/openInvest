@@ -1214,6 +1214,10 @@ class CommitteeRunRequest(BaseModel):
         default=4, ge=1, le=8,
         description="cross-challenge 上限。1=旧行为；4=真讨论（推荐）",
     )
+    decision_mode: str = Field(
+        default="",
+        description="algorithm_only / llm_committee / auto；空值读取 INVEST_COMMITTEE_MODE，默认 algorithm_only",
+    )
     event_ids: Optional[List[str]] = Field(
         default=None,
         description=(
@@ -1328,6 +1332,7 @@ async def _run_committee_task(
     task_id: str,
     symbols: Optional[List[str]],
     max_rounds: int,
+    decision_mode: str = "",
     event_ids: Optional[List[str]] = None,
 ) -> None:
     """v3 真并行：多资产同时跑，共享 macro_view，progress 实时推 status.json
@@ -1344,6 +1349,7 @@ async def _run_committee_task(
 
     # 审计 trail：runtime metadata 落 meta.json，永不被 progress 写覆盖
     audit_meta = _build_audit_meta(task_id, symbols, max_rounds)
+    audit_meta["decision_mode"] = decision_mode
     if event_ids:
         audit_meta["triggered_by_event_ids"] = event_ids
     try:
@@ -1386,6 +1392,7 @@ async def _run_committee_task(
         session = run_committee_session(
             symbols=symbols,
             max_debate_rounds=max_rounds,
+            decision_mode=decision_mode,
             progress_callback=on_progress,
             event_ids=event_ids,
         )
@@ -1414,6 +1421,7 @@ async def _run_committee_task(
             "result": {
                 "symbols": symbols,
                 "max_debate_rounds": max_rounds,
+                "decision_mode": decision_mode,
                 "by_asset": summary,
             },
         })
@@ -1455,7 +1463,7 @@ async def committee_run(body: CommitteeRunRequest = Body(default=CommitteeRunReq
     - 不传 symbols → 跑 strategy.target_assets 全部
     - 传单个 symbol → 单资产快速版（旧 run_single 等效）
     - 多资产并行：macro 共享 1 次，每个资产独立线程跑（内部 Round 1/2 也并行）
-    - max_debate_rounds 默认 4 真讨论；旧 daily_report cron 走单独路径不受影响
+    - decision_mode 默认算法直出；显式传 llm/llm_committee 才跑旧多角色辩论
     """
     task_id = uuid.uuid4().hex[:12]
     started_at = _now_iso()
@@ -1467,6 +1475,7 @@ async def committee_run(body: CommitteeRunRequest = Body(default=CommitteeRunReq
         "note": body.note,
         "symbols": body.symbols,
         "max_debate_rounds": body.max_debate_rounds,
+        "decision_mode": body.decision_mode,
         "events": [],
     })
 
@@ -1474,6 +1483,7 @@ async def committee_run(body: CommitteeRunRequest = Body(default=CommitteeRunReq
         task_id,
         symbols=body.symbols,
         max_rounds=body.max_debate_rounds,
+        decision_mode=body.decision_mode,
         event_ids=body.event_ids,
     ))
 

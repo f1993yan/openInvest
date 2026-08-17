@@ -146,7 +146,7 @@ POST /api/gold/buy    POST /api/gold/sell    POST /api/gold/set    POST /api/gol
 
 ### Direct/兼容后端的 A 股行为因子字段
 
-`backend.server.CommitteeRequest` 和 `CommitteeResponse` 增加了可选对象 `behavioral_factor`。这是向后兼容扩展：旧 HTTP/App 调用可以不传，旧客户端也可以忽略响应中的该字段。
+`backend.server.CommitteeRequest` 和 `CommitteeResponse` 增加了可选对象 `behavioral_factor`，并增加 `decision_mode` 标识实际决策引擎。这是向后兼容扩展：旧 HTTP/App 调用可以不传，旧客户端也可以忽略响应中的新增字段。
 
 监控生产路径会在同一轮 A 股横截面计算完成后传入类似结构：
 
@@ -168,6 +168,16 @@ POST /api/gold/buy    POST /api/gold/sell    POST /api/gold/set    POST /api/gol
 ```
 
 字段语义：`target_weight_pct` 是组合目标仓位，`optimizer_weight` 是该标的历史因子收益决定的优化器约束强度，两者不能互换。直接单标的调用若无法形成有效横截面会返回 `low_confidence=true`；非 A 股通常返回空对象并继续原优化器路径。
+
+决策模式：
+
+| 值 | 行为 |
+|---|---|
+| `algorithm_only` | 默认。跳过 LLM 宏观、Quant/Risk/CIO 辩论和优化器 LLM 审核，响应中 `decision_mode=algorithm_only`，`cio_memo` 包含 `llm_calls=0`。 |
+| `llm` / `llm_committee` | 恢复旧多角色 LLM 委员会。 |
+| `auto` | A 股使用算法直出，非 A 股使用 LLM 委员会。 |
+
+空请求字段会读取 `INVEST_COMMITTEE_MODE`；环境变量也为空时默认 `algorithm_only`。
 
 ### 触发 + 状态
 
@@ -200,6 +210,7 @@ POST body schema：
 {
   symbols?: string[]  // 不传 = 跑 strategy.target_assets 全部
   max_debate_rounds?: number  // 默认 4，1-8
+  decision_mode?: string  // algorithm_only / llm_committee / auto；空值默认 algorithm_only
   note?: string
 }
 ```

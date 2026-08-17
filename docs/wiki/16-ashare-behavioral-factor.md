@@ -6,7 +6,7 @@
 
 旧 A 股确定性回退把 regime、30 日动量、MA20/MA120、价格分位、RSI 和弱 LLM 先验直接相加。历史对照中它容易产生高换手，且单标的技术信号不能回答“当前横截面应该持有哪些股票”。
 
-生产基座现在把 A 股改为可审计的横截面行为因子。LLM 仍负责观点和审核，基本面、止盈止损、现金、手数、T+1、涨跌停等仍是约束；因子只替换 A 股的确定性收益和目标仓位基座。非 A 股不受影响。
+生产基座现在把 A 股改为可审计的横截面行为因子。默认生产决策模式为 `algorithm_only`：A 股日常监控、详情分析和异步批量入口不再调用 LLM 委员会或 LLM 审核，直接由行为因子、基本面、regime、入场/出场点、右侧趋势闸门和确定性优化器给出可执行结论。需要恢复旧多角色辩论时，显式设置 `INVEST_COMMITTEE_MODE=llm`；需要 A 股算法、非 A 股 LLM 的混合口径时设置 `INVEST_COMMITTEE_MODE=auto`。
 
 ## 2. 因子公式
 
@@ -92,6 +92,8 @@ jobs.market_monitor_runtime.run_monitor_round
   -> backend.server.CommitteeRequest.behavioral_factor
   -> core.decision_optimizer.optimize_committee_decision
 ```
+
+决策模式由 `core.decision_mode.normalize_decision_mode()` 统一归一化。空配置默认 `algorithm_only`，因此不要通过删除 LLM API key 来省钱；删除 key 只是让旧链路报错或降级，正确做法是保持默认算法模式，或在请求中传 `decision_mode="algorithm_only"`。算法模式会在响应中返回 `decision_mode=algorithm_only`，并在 `cio_memo` 写入 `[ALGORITHM_ONLY_DECISION] ... llm_calls=0`。
 
 日度选股由 `core.daily_stock_selector.build_daily_selection()` 复用同一因子。新闻、板块资金和北向资金先生成候选池，行为因子再执行资格门与横截面排名；最终 `stocks`、`reference_pool` 和 `action_pool` 只包含 `behavioral_selected=true` 的前四成员。历史窗口为两年；综合分只负责排列这四只股票，因子占 40%，新闻、板块资金、基本面、路径风险、技术时点和现金可买约束仍保留，但不能把未进因子前四的标的重新加回结果。
 
