@@ -342,6 +342,33 @@ def _run_algorithm_only_direct(
     from backend.server import CommitteeRequest, Holding as BackendHolding, run_committee_direct
 
     market = _infer_market(symbol, target)
+    hk_spatio_factor: Dict[str, Any] = {}
+    if market == "hk":
+        try:
+            from core.hk_spatio_temporal_factor import normalize_hk_symbol
+            from jobs.market_monitor_quotes import build_hk_spatio_factor_context
+
+            factor_rows = [
+                {
+                    **asset,
+                    "market": _infer_market(str(asset.get("symbol") or ""), asset),
+                }
+                for asset in pm.strategy.get("target_assets", [])
+            ]
+            factor_rows.extend(
+                {
+                    "symbol": holding.get("symbol", ""),
+                    "name": holding.get("display_name", holding.get("name", "")),
+                    "market": _infer_market(str(holding.get("symbol") or ""), holding),
+                }
+                for holding in pm.holdings
+            )
+            hk_spatio_factor = build_hk_spatio_factor_context(factor_rows).get(
+                normalize_hk_symbol(symbol),
+                {},
+            )
+        except Exception as exc:  # noqa: BLE001
+            log.warning(f"港股时空动量上下文不可用 {symbol}: {type(exc).__name__}: {exc}")
     cash_cny = pm.cash_amount("CNY")
     holdings_raw = [h for h in pm.holdings if not h.get("is_tracking_only")]
     holding = next((h for h in holdings_raw if str(h.get("symbol") or "").upper() == symbol.upper()), None)
@@ -394,6 +421,7 @@ def _run_algorithm_only_direct(
         available_cash=cash_cny,
         optimizer_review_enabled=False,
         decision_mode=ALGORITHM_ONLY,
+        hk_spatio_factor=hk_spatio_factor,
     )
     response = run_committee_direct(req)
     payload = response.model_dump()

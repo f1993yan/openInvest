@@ -287,6 +287,151 @@ def test_non_a_share_keeps_existing_baseline_when_factor_is_supplied():
     assert with_factor.target_position_pct == baseline.target_position_pct
 
 
+def test_hk_spatio_factor_replaces_generic_hk_expected_return_and_target():
+    factor = SimpleNamespace(
+        low_confidence=False,
+        expected_return_pct=8.0,
+        target_weight_pct=35.0,
+        score=92.0,
+        selected=True,
+        model_key="hk_spatio_temporal_momentum_proxy_v1",
+        sample_size=40,
+        optimizer_weight=0.85,
+    )
+    decision = optimize_committee_decision(
+        parsed={"verdict": "SELL", "confidence": 0.9, "alloc_cny": -20_000},
+        metrics=_metrics(return_30d=-0.50, rsi14=80, price_quantile_2y=0.95),
+        symbol="00700",
+        regime_brief="REGIME: crash",
+        current_price=10.0,
+        total_assets=100_000,
+        available_cash=80_000,
+        position_pct=0.0,
+        min_lot_size=100,
+        market="hk",
+        hk_spatio_assessment=factor,
+        require_hk_spatio=True,
+    )
+
+    assert decision.expected_return_pct == 8.0
+    assert decision.target_position_pct == 35.0
+    assert decision.hk_spatio_selected is True
+    assert decision.hk_spatio_optimizer_weight == 0.85
+    assert decision.verdict in {"BUY", "ACCUMULATE"}
+
+
+def test_production_hk_fails_closed_without_valid_spatio_factor():
+    common = dict(
+        parsed={"verdict": "BUY", "confidence": 0.9, "alloc_cny": 20_000},
+        metrics=_metrics(return_30d=0.20),
+        symbol="00700",
+        regime_brief="REGIME: uptrend",
+        current_price=10.0,
+        total_assets=100_000,
+        available_cash=50_000,
+        position_pct=12.0,
+        min_lot_size=100,
+        market="hk",
+        require_hk_spatio=True,
+    )
+
+    missing = optimize_committee_decision(**common)
+    low_confidence = optimize_committee_decision(
+        **common,
+        hk_spatio_assessment=SimpleNamespace(
+            low_confidence=True,
+            score=70.0,
+            target_weight_pct=20.0,
+            selected=True,
+            model_key="hk_spatio_temporal_momentum_proxy_v1",
+        ),
+    )
+
+    assert missing.verdict == "WAIT"
+    assert missing.alloc_cny == 0
+    assert missing.target_position_pct == 12.0
+    assert missing.reason == "hk_spatio_temporal_factor_unavailable"
+    assert low_confidence.verdict == "WAIT"
+    assert low_confidence.reason == "hk_spatio_temporal_factor_unavailable"
+
+
+def test_hk_spatio_model_never_buys_outside_frozen_top_four():
+    factor = SimpleNamespace(
+        low_confidence=False,
+        expected_return_pct=15.0,
+        target_weight_pct=0.0,
+        score=75.0,
+        selected=False,
+        model_key="hk_spatio_temporal_momentum_proxy_v1",
+        sample_size=40,
+        optimizer_weight=0.85,
+    )
+    decision = optimize_committee_decision(
+        parsed={"verdict": "BUY", "confidence": 0.9, "alloc_cny": 50_000},
+        metrics=_metrics(return_30d=0.50),
+        symbol="00941",
+        regime_brief="REGIME: uptrend",
+        current_price=10.0,
+        total_assets=100_000,
+        available_cash=100_000,
+        position_pct=0.0,
+        min_lot_size=100,
+        market="hk",
+        hk_spatio_assessment=factor,
+        require_hk_spatio=True,
+    )
+
+    assert decision.expected_return_pct == 0.0
+    assert decision.target_position_pct == 0.0
+    assert decision.verdict == "HOLD"
+    assert decision.alloc_cny == 0
+
+
+def test_a_share_decision_ignores_hk_spatio_assessment():
+    a_factor = SimpleNamespace(
+        low_confidence=False,
+        expected_return_pct=5.0,
+        target_weight_pct=25.0,
+        score=80.0,
+        selected=True,
+        model_key="a_share_behavioral_v1",
+        sample_size=40,
+        optimizer_weight=0.8,
+    )
+    hk_factor = SimpleNamespace(
+        low_confidence=False,
+        expected_return_pct=-15.0,
+        target_weight_pct=0.0,
+        score=0.0,
+        selected=False,
+        model_key="hk_spatio_temporal_momentum_proxy_v1",
+        sample_size=40,
+        optimizer_weight=1.0,
+    )
+    common = dict(
+        parsed={"verdict": "HOLD", "confidence": 0.5, "alloc_cny": 0},
+        metrics=_metrics(),
+        symbol="600900",
+        regime_brief="REGIME: uptrend",
+        current_price=10.0,
+        total_assets=100_000,
+        available_cash=50_000,
+        position_pct=0.0,
+        min_lot_size=100,
+        market="a",
+        behavioral_assessment=a_factor,
+        require_a_share_behavioral=True,
+    )
+    baseline = optimize_committee_decision(**common)
+    with_hk = optimize_committee_decision(**common, hk_spatio_assessment=hk_factor)
+
+    assert with_hk.verdict == baseline.verdict
+    assert with_hk.alloc_cny == baseline.alloc_cny
+    assert with_hk.expected_return_pct == baseline.expected_return_pct
+    assert with_hk.target_position_pct == baseline.target_position_pct
+    assert with_hk.hk_spatio_model == "none"
+
+
 def test_production_a_share_fails_closed_without_valid_behavioral_factor():
     common = dict(
         parsed={"verdict": "BUY", "confidence": 0.9, "alloc_cny": 20_000},

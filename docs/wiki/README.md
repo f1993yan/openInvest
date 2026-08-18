@@ -29,6 +29,7 @@
 6. [13-param-tuning-feasibility.md](13-param-tuning-feasibility.md) —— 参数调优可行性诊断 + [补充文档](13-param-tuning-feasibility-addendum.md)
 7. [adr/](adr/) —— 架构决策记录（为什么不上 Claude Agent SDK 等）
 8. [16-A 股行为因子](16-ashare-behavioral-factor.md) —— 生产横截面因子、标的级权重与回测边界
+9. [17-港股时空动量代理](17-hk-spatio-temporal-factor.md) —— 港股生产公式、20 日调仓、回测证据与风险边界
 
 ### 🎨 我是设计师 / 前端，想改 GUI
 1. [10-design-system.md](10-design-system.md) —— Token 三层 + 排版 + IA
@@ -55,6 +56,7 @@
 | 13 | [参数调优可行性诊断](13-param-tuning-feasibility.md) | 50+ 硬编码常数清单 + 耦合分析 + Optuna 回顾 + sweep 策略 |
 | 15 | [App-Python 接口规范](15-app-python-interface-spec.md) | Android App 与 Python 算法基座的对外接口与字段规范 |
 | 16 | [A 股行为因子](16-ashare-behavioral-factor.md) | 生产因子公式、三个月标的级权重、5 日调仓和验证边界 |
+| 17 | [港股时空动量代理](17-hk-spatio-temporal-factor.md) | 20/60/120 日风险调整动量、20 日调仓和回测边界 |
 
 ## 架构决策记录 (ADR)
 

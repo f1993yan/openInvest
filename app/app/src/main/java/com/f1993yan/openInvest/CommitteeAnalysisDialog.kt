@@ -572,6 +572,60 @@ fun CommitteeAnalysisDialog(
                                     )
                                 }
 
+                                val hkSpatioMap = symbolDetails?.get("hk_spatio_factor") as? Map<*, *>
+                                val hkSpatio = resRow.hk_spatio_factor
+                                val hkScore = (hkSpatioMap?.get("score") as? Number)?.toDouble() ?: hkSpatio?.score
+                                val hkTarget = (hkSpatioMap?.get("target_weight_pct") as? Number)?.toDouble() ?: hkSpatio?.target_weight_pct
+                                val hkExpected = (hkSpatioMap?.get("expected_return_pct") as? Number)?.toDouble() ?: hkSpatio?.expected_return_pct
+                                val hkSample = (hkSpatioMap?.get("sample_size") as? Number)?.toInt() ?: hkSpatio?.sample_size
+                                val hkSelected = hkSpatioMap?.get("selected") as? Boolean ?: hkSpatio?.selected
+                                val hkLowConfidence = hkSpatioMap?.get("low_confidence") as? Boolean ?: hkSpatio?.low_confidence
+
+                                if (hkScore != null) {
+                                    Spacer(modifier = Modifier.height(10.dp))
+                                    HorizontalDivider(color = Color(0xFFEEF2F6))
+                                    Spacer(modifier = Modifier.height(10.dp))
+                                    Text("港股时空动量", fontSize = 11.sp, fontWeight = FontWeight.Bold, color = Color(0xFF667085))
+                                    Spacer(modifier = Modifier.height(6.dp))
+                                    Row(modifier = Modifier.fillMaxWidth()) {
+                                        Column(modifier = Modifier.weight(1f)) {
+                                            Text("因子分 / 状态", fontSize = 9.sp, color = Color(0xFF8896AB))
+                                            Text(
+                                                "${String.format("%.1f", hkScore)} · ${if (hkSelected == true) "前四" else "未入选"}",
+                                                fontSize = 11.sp,
+                                                fontWeight = FontWeight.SemiBold,
+                                                color = if (hkSelected == true) Color(0xFF067647) else Color(0xFF475467)
+                                            )
+                                        }
+                                        Column(modifier = Modifier.weight(1f)) {
+                                            Text("目标仓位", fontSize = 9.sp, color = Color(0xFF8896AB))
+                                            Text(
+                                                "${String.format("%.1f", hkTarget ?: 0.0)}%",
+                                                fontSize = 11.sp,
+                                                fontWeight = FontWeight.SemiBold,
+                                                color = Color(0xFF18202B)
+                                            )
+                                        }
+                                        Column(modifier = Modifier.weight(1f)) {
+                                            Text("20日预期 / 样本", fontSize = 9.sp, color = Color(0xFF8896AB))
+                                            Text(
+                                                "${String.format("%+.1f", hkExpected ?: 0.0)}% · n=${hkSample ?: 0}",
+                                                fontSize = 11.sp,
+                                                fontWeight = FontWeight.SemiBold,
+                                                color = if ((hkExpected ?: 0.0) >= 0) Color(0xFF067647) else Color(0xFFB42318)
+                                            )
+                                        }
+                                    }
+                                    if (hkLowConfidence == true) {
+                                        Text(
+                                            "横截面或历史样本不足，本轮暂停交易",
+                                            fontSize = 9.sp,
+                                            color = Color(0xFFB54708),
+                                            modifier = Modifier.padding(top = 4.dp)
+                                        )
+                                    }
+                                }
+
                                 Spacer(modifier = Modifier.height(10.dp))
                                 HorizontalDivider(color = Color(0xFFEEF2F6))
                                 Spacer(modifier = Modifier.height(10.dp))

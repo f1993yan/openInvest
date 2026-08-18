@@ -138,6 +138,10 @@ class CommitteeRequest(BaseModel):
         default_factory=dict,
         description="可选的A股行为因子横截面评估；不传时服务端使用单标的低置信度降级评估",
     )
+    hk_spatio_factor: Dict[str, Any] = Field(
+        default_factory=dict,
+        description="可选的港股时空动量横截面评估；与A股行为因子完全独立",
+    )
     # === 影子账户（Committee）字段 ===
     shadow_position_pct: float = Field(0.0, description="影子账户该股仓位百分比")
     shadow_cost: float = Field(0.0, description="影子账户成本均价")
@@ -177,6 +181,7 @@ class CommitteeResponse(BaseModel):
     decision_synthesis: Dict[str, Any] = Field(default_factory=dict)
     buy_signal_backtest: Dict[str, Any] = Field(default_factory=dict)
     behavioral_factor: Dict[str, Any] = Field(default_factory=dict)
+    hk_spatio_factor: Dict[str, Any] = Field(default_factory=dict)
     error: str = ""
     elapsed_sec: float = 0.0
     # === 影子账户结果 ===
@@ -303,6 +308,98 @@ def _resolve_a_share_behavioral_assessment(
         symbol=symbol.upper(),
         low_confidence=True,
         reason="behavioral_cross_section_or_history_unavailable",
+    )
+
+
+def _hk_spatio_universe_rows(
+    symbol: str,
+    *,
+    name: str = "",
+    holdings: Optional[List[Any]] = None,
+) -> List[Dict[str, Any]]:
+    """Collect only Hong Kong holdings and watchlist rows for factor repair."""
+    from core.hk_spatio_temporal_factor import normalize_hk_symbol
+
+    rows: List[Dict[str, Any]] = [
+        {"symbol": normalize_hk_symbol(symbol) or symbol, "name": name or symbol, "market": "hk"},
+    ]
+
+    def append_row(item: Any) -> None:
+        if isinstance(item, dict):
+            value = item
+        else:
+            value = {
+                "symbol": getattr(item, "symbol", ""),
+                "name": getattr(item, "name", ""),
+                "market": getattr(item, "market", ""),
+            }
+        raw_symbol = str(value.get("symbol") or "").strip().upper()
+        market = str(value.get("market") or "").strip().lower()
+        candidate = normalize_hk_symbol(raw_symbol)
+        is_hk = market in {"hk", "h", "hongkong", "hong_kong", "港股"} or raw_symbol.endswith(".HK")
+        if candidate and (is_hk or (raw_symbol.isdigit() and len(raw_symbol) <= 5)):
+            rows.append({**value, "symbol": candidate, "market": "hk"})
+
+    for holding in holdings or []:
+        append_row(holding)
+    try:
+        if MONITOR_CONFIG_PATH.exists():
+            config = json.loads(MONITOR_CONFIG_PATH.read_text(encoding="utf-8"))
+            for key in ("holdings", "watchlist"):
+                for item in config.get(key) or []:
+                    append_row(item)
+    except Exception as exc:  # noqa: BLE001
+        log.warning(f"港股因子补全读取监控配置失败: {type(exc).__name__}: {exc}")
+
+    deduped: Dict[str, Dict[str, Any]] = {}
+    for row in rows:
+        candidate = normalize_hk_symbol(row.get("symbol"))
+        if candidate:
+            deduped[candidate] = {**deduped.get(candidate, {}), **row, "symbol": candidate}
+    return list(deduped.values())
+
+
+def _resolve_hk_spatio_assessment(
+    symbol: str,
+    *,
+    name: str = "",
+    provided: Optional[Dict[str, Any]] = None,
+    holdings: Optional[List[Any]] = None,
+    target_history: Any = None,
+) -> Any:
+    """Repair a missing HK assessment from the local Hong Kong cross-section."""
+    from core.hk_spatio_temporal_factor import (
+        HKSpatioTemporalAssessment,
+        assess_single_hk_spatio_history,
+        normalize_hk_symbol,
+    )
+
+    normalized = normalize_hk_symbol(symbol) or symbol.upper()
+    assessment = HKSpatioTemporalAssessment.from_mapping(provided or {})
+    if assessment is not None and not assessment.low_confidence:
+        return assessment
+    try:
+        from jobs.market_monitor_quotes import build_hk_spatio_factor_context
+
+        context = build_hk_spatio_factor_context(
+            _hk_spatio_universe_rows(symbol, name=name, holdings=holdings),
+        )
+        repaired = HKSpatioTemporalAssessment.from_mapping(context.get(normalized) or {})
+        if repaired is not None and not repaired.low_confidence:
+            return repaired
+        if repaired is not None:
+            assessment = repaired
+    except Exception as exc:  # noqa: BLE001
+        log.warning(f"港股时空动量横截面补全失败 {symbol}: {type(exc).__name__}: {exc}")
+
+    if assessment is not None:
+        return assessment
+    if target_history is not None and not getattr(target_history, "empty", True):
+        return assess_single_hk_spatio_history(normalized, target_history)
+    return HKSpatioTemporalAssessment(
+        symbol=normalized,
+        low_confidence=True,
+        reason="hk_spatio_cross_section_or_history_unavailable",
     )
 
 
@@ -678,7 +775,9 @@ def run_committee_direct(req: CommitteeRequest) -> CommitteeResponse:
         metrics = compute_metrics(df_2y) if not df_2y.empty else {}
         regime_brief = format_regime_brief(metrics, symbol=req.symbol)
         behavioral_assessment = None
-        if (req.market or "a").lower() == "a":
+        hk_spatio_assessment = None
+        market_key = (req.market or "a").lower()
+        if market_key == "a":
             behavioral_assessment = _resolve_a_share_behavioral_assessment(
                 req.symbol,
                 name=req.name,
@@ -687,6 +786,15 @@ def run_committee_direct(req: CommitteeRequest) -> CommitteeResponse:
                 target_history=df_2y,
             )
             market_data += behavioral_assessment.audit_text()
+        elif market_key in {"hk", "h", "hongkong", "hong_kong"}:
+            hk_spatio_assessment = _resolve_hk_spatio_assessment(
+                req.symbol,
+                name=req.name,
+                provided=req.hk_spatio_factor,
+                holdings=req.holdings,
+                target_history=df_2y,
+            )
+            market_data += hk_spatio_assessment.audit_text()
         from core.buy_signal_miner import mine_historical_buy_signals
         buy_signal_backtest = mine_historical_buy_signals(req.symbol, df_2y)
 
@@ -731,7 +839,7 @@ def run_committee_direct(req: CommitteeRequest) -> CommitteeResponse:
         if algorithm_only:
             macro_view = (
                 "ALGORITHM_ONLY_MACRO: 未调用LLM宏观角色；"
-                "本轮只使用价格、行为因子、基本面、regime和交易约束。"
+                "本轮只使用价格、对应市场因子、基本面、regime和交易约束。"
             )
             if req.news_brief:
                 macro_view += f"\nNEWS_BRIEF_USED_AS_TEXT_ONLY:\n{req.news_brief[:800]}"
@@ -803,6 +911,7 @@ def run_committee_direct(req: CommitteeRequest) -> CommitteeResponse:
                 optimizer_review_enabled=req.optimizer_review_enabled,
                 decision_mode=decision_mode,
                 behavioral_factor=req.behavioral_factor,
+                hk_spatio_factor=req.hk_spatio_factor,
             )
             p_summary = _build_portfolio_summary(temp_req)
 
@@ -824,6 +933,18 @@ def run_committee_direct(req: CommitteeRequest) -> CommitteeResponse:
                         f"selected={str(getattr(behavioral_assessment, 'selected', False)).lower()} "
                         f"target_weight={factor_target:.2f}% "
                         f"low_confidence={str(getattr(behavioral_assessment, 'low_confidence', True)).lower()}"
+                    )
+                elif hk_spatio_assessment is not None:
+                    factor_score = float(getattr(hk_spatio_assessment, "score", 0.0) or 0.0)
+                    factor_target = float(
+                        getattr(hk_spatio_assessment, "target_weight_pct", 0.0) or 0.0
+                    )
+                    factor_line = (
+                        "港股时空动量: "
+                        f"score={factor_score:.2f} "
+                        f"selected={str(getattr(hk_spatio_assessment, 'selected', False)).lower()} "
+                        f"target_weight={factor_target:.2f}% "
+                        f"low_confidence={str(getattr(hk_spatio_assessment, 'low_confidence', True)).lower()}"
                     )
                 report = CommitteeReport(
                     asset=asset,
@@ -913,7 +1034,9 @@ def run_committee_direct(req: CommitteeRequest) -> CommitteeResponse:
                 fundamental_assessment=fundamental_assessment,
                 position_exit_policy=None,
                 behavioral_assessment=behavioral_assessment,
+                hk_spatio_assessment=hk_spatio_assessment,
                 require_a_share_behavioral=True,
+                require_hk_spatio=True,
             )
 
             entry_exit_plan = compute_entry_exit_points(
@@ -1046,6 +1169,7 @@ def run_committee_direct(req: CommitteeRequest) -> CommitteeResponse:
                 "decision_synthesis": decision_synthesis,
                 "buy_signal_backtest": buy_signal_backtest,
                 "behavioral_factor": behavioral_assessment,
+                "hk_spatio_factor": hk_spatio_assessment,
             }
 
         # 6. 跑真实账户（Real）的评估
@@ -1112,6 +1236,10 @@ def run_committee_direct(req: CommitteeRequest) -> CommitteeResponse:
                         shadow_res["behavioral_factor"].as_dict()
                         if shadow_res.get("behavioral_factor") is not None else {}
                     ),
+                    "hk_spatio_factor": (
+                        shadow_res["hk_spatio_factor"].as_dict()
+                        if shadow_res.get("hk_spatio_factor") is not None else {}
+                    ),
                 }
             else:
                 log.warning(f"影子账户委员会评估失败: {shadow_res.get('error')}")
@@ -1134,6 +1262,10 @@ def run_committee_direct(req: CommitteeRequest) -> CommitteeResponse:
             right_side_trend_gate=real_res["right_side_gate"].as_dict(),
             optimizer_review=real_res["optimizer_review"][:500],
             decision_mode=real_res["decision_mode"],
+            hk_spatio_factor=(
+                real_res["hk_spatio_factor"].as_dict()
+                if real_res.get("hk_spatio_factor") is not None else {}
+            ),
             cio_note=real_res["cio_memo"][:500],
         )
 
@@ -1177,6 +1309,10 @@ def run_committee_direct(req: CommitteeRequest) -> CommitteeResponse:
             behavioral_factor=(
                 real_res["behavioral_factor"].as_dict()
                 if real_res.get("behavioral_factor") is not None else {}
+            ),
+            hk_spatio_factor=(
+                real_res["hk_spatio_factor"].as_dict()
+                if real_res.get("hk_spatio_factor") is not None else {}
             ),
             elapsed_sec=round(elapsed, 1),
             shadow_result=shadow_result_dict,
@@ -1667,6 +1803,32 @@ async def get_behavioral_assessment_api(symbol: str):
         return {
             "success": True,
             "symbol": symbol,
+            "assessment": assessment.as_dict(),
+            "decidable": not assessment.low_confidence,
+        }
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
+@app.get("/api/stock/hk-spatio")
+async def get_hk_spatio_assessment_api(symbol: str):
+    """Return the latest HK spatio-temporal assessment for local mobile runs."""
+    from core.hk_spatio_temporal_factor import normalize_hk_symbol
+
+    normalized = normalize_hk_symbol(symbol)
+    if not normalized:
+        return {"success": False, "error": "Invalid Hong Kong stock symbol"}
+    try:
+        from utils.market_data_provider import get_history_data
+
+        df_2y = get_history_data(normalized, "2y")
+        assessment = _resolve_hk_spatio_assessment(
+            normalized,
+            target_history=df_2y,
+        )
+        return {
+            "success": True,
+            "symbol": normalized,
             "assessment": assessment.as_dict(),
             "decidable": not assessment.low_confidence,
         }

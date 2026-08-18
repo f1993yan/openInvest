@@ -69,6 +69,44 @@ def test_behavioral_factor_repair_uses_holdings_and_watchlist(tmp_path, monkeypa
     assert captured["symbols"] == {"600900", "600487", "600183", "002185", "601138"}
 
 
+def test_hk_spatio_factor_repair_uses_only_hk_holdings_and_watchlist(tmp_path, monkeypatch):
+    config_path = tmp_path / "market_monitor_config.json"
+    config_path.write_text(
+        '{"holdings":[{"symbol":"00700","market":"hk"},{"symbol":"600183","market":"a"}],'
+        '"watchlist":[{"symbol":"09988.HK","market":"hk"},{"symbol":"00005","market":"hk"}]}',
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(server_module, "MONITOR_CONFIG_PATH", config_path)
+    captured = {}
+
+    def fake_context(rows):
+        captured["symbols"] = {row["symbol"] for row in rows}
+        return {
+            "00941": {
+                "symbol": "00941",
+                "score": 88.0,
+                "expected_return_pct": 5.0,
+                "target_weight_pct": 30.0,
+                "eligible": True,
+                "selected": True,
+                "low_confidence": False,
+                "sample_size": 40,
+            }
+        }
+
+    import jobs.market_monitor_quotes as quotes
+
+    monkeypatch.setattr(quotes, "build_hk_spatio_factor_context", fake_context)
+    assessment = server_module._resolve_hk_spatio_assessment(
+        "00941",
+        holdings=[{"symbol": "00001", "market": "hk"}, {"symbol": "600487", "market": "a"}],
+    )
+
+    assert assessment.low_confidence is False
+    assert assessment.selected is True
+    assert captured["symbols"] == {"00941", "00001", "00700", "09988", "00005"}
+
+
 def test_retired_exit_parameter_endpoints_remain_non_persisting_compatible(monkeypatch):
     monkeypatch.delenv("INVEST_API_TOKEN", raising=False)
     with TestClient(app) as client:

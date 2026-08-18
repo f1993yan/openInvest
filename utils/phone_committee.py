@@ -157,6 +157,7 @@ def build_mobile_recommendation_text(
     decision_synthesis: Optional[Dict[str, Any]] = None,
     buy_signal_backtest: Optional[Dict[str, Any]] = None,
     behavioral_factor: Optional[Dict[str, Any]] = None,
+    hk_spatio_factor: Optional[Dict[str, Any]] = None,
     decision_mode: str = "",
 ) -> str:
     _ = position_exit_policy  # Deprecated compatibility argument.
@@ -220,6 +221,18 @@ def build_mobile_recommendation_text(
         lines.extend([
             f"- A股行为因子: {factor_score:.1f}分，{selected_text}，目标仓位 {target_weight:.1f}%（{confidence_text}）。",
             f"- 因子历史: 近3月 {trailing_return:+.1f}%，命中 {hit_rate * 100:.0f}% (n={sample_size})，优化权重 {optimizer_weight:.2f}。",
+        ])
+
+    if hk_spatio_factor:
+        factor_score = _safe_num(hk_spatio_factor.get("score"))
+        target_weight = _safe_num(hk_spatio_factor.get("target_weight_pct"))
+        expected_return = _safe_num(hk_spatio_factor.get("expected_return_pct"))
+        sample_size = int(_safe_num(hk_spatio_factor.get("sample_size")))
+        selected_text = "入选前四" if hk_spatio_factor.get("selected") else "未进入前四"
+        confidence_text = "低置信度" if hk_spatio_factor.get("low_confidence") else "有效"
+        lines.extend([
+            f"- 港股时空动量: {factor_score:.1f}分，{selected_text}，目标仓位 {target_weight:.1f}%（{confidence_text}）。",
+            f"- 港股模型校准: 未来20日预期 {expected_return:+.1f}% (n={sample_size})，目标每20个交易日更新。",
         ])
 
     if decision_synthesis:
@@ -447,8 +460,9 @@ def run_committee_local(
         fundamental_brief += f"\nDATA_SOURCE: remote metrics={len(auto_fundamentals)}"
         market_data += f"\n\n--- FUNDAMENTAL MODEL ---\n{fundamental_brief}"
 
-        # 3.5 拉取 A 股行为因子评估
+        # 3.5 Fetch the market-specific production factor assessment.
         behavioral_assessment = None
+        hk_spatio_assessment = None
         if market.lower() == "a" and len(symbol) == 6:
             try:
                 import requests
@@ -461,9 +475,39 @@ def run_committee_local(
                         behavioral_assessment = AShareBehavioralAssessment.from_mapping(res["assessment"])
             except Exception as e:
                 log.warning(f"Phone fetch behavioral assessment error: {e}")
+        elif market.lower() in {"hk", "h", "hongkong", "hong_kong"}:
+            try:
+                import requests
+                from core.hk_spatio_temporal_factor import (
+                    HKSpatioTemporalAssessment,
+                    assess_single_hk_spatio_history,
+                    normalize_hk_symbol,
+                )
+
+                normalized_hk_symbol = normalize_hk_symbol(symbol)
+                url = (
+                    f"http://{server_ip}:{server_port}/api/stock/hk-spatio"
+                    f"?symbol={normalized_hk_symbol}"
+                )
+                resp = requests.get(url, timeout=10)
+                if resp.status_code == 200:
+                    res = resp.json()
+                    if res.get("success") and res.get("assessment"):
+                        hk_spatio_assessment = HKSpatioTemporalAssessment.from_mapping(
+                            res["assessment"],
+                        )
+                if hk_spatio_assessment is None and df_2y is not None and not df_2y.empty:
+                    hk_spatio_assessment = assess_single_hk_spatio_history(
+                        normalized_hk_symbol,
+                        df_2y,
+                    )
+            except Exception as e:
+                log.warning(f"Phone fetch HK spatio assessment error: {e}")
 
         if behavioral_assessment is not None:
             market_data += behavioral_assessment.audit_text()
+        if hk_spatio_assessment is not None:
+            market_data += hk_spatio_assessment.audit_text()
 
         # 4. 获取宏观视图（含新闻）
         macro_data_str = get_macro_data()
@@ -472,7 +516,7 @@ def run_committee_local(
         if algorithm_only:
             macro_view = (
                 "ALGORITHM_ONLY_MACRO: 未调用LLM宏观角色；"
-                "本轮只使用价格、行为因子、基本面、regime和交易约束。"
+                "本轮只使用价格、对应市场因子、基本面、regime和交易约束。"
             )
             if news_brief:
                 macro_view += f"\nNEWS_BRIEF_USED_AS_TEXT_ONLY:\n{news_brief[:800]}"
@@ -559,6 +603,18 @@ def run_committee_local(
                     f"selected={str(getattr(behavioral_assessment, 'selected', False)).lower()} "
                     f"target_weight={factor_target:.2f}% "
                     f"low_confidence={str(getattr(behavioral_assessment, 'low_confidence', True)).lower()}"
+                )
+            elif hk_spatio_assessment is not None:
+                factor_score = float(getattr(hk_spatio_assessment, "score", 0.0) or 0.0)
+                factor_target = float(
+                    getattr(hk_spatio_assessment, "target_weight_pct", 0.0) or 0.0
+                )
+                factor_line = (
+                    "港股时空动量: "
+                    f"score={factor_score:.2f} "
+                    f"selected={str(getattr(hk_spatio_assessment, 'selected', False)).lower()} "
+                    f"target_weight={factor_target:.2f}% "
+                    f"low_confidence={str(getattr(hk_spatio_assessment, 'low_confidence', True)).lower()}"
                 )
             report = CommitteeReport(
                 asset=asset,
@@ -679,7 +735,9 @@ def run_committee_local(
             fundamental_assessment=fundamental_assessment,
             position_exit_policy=None,
             behavioral_assessment=behavioral_assessment,
+            hk_spatio_assessment=hk_spatio_assessment,
             require_a_share_behavioral=True,
+            require_hk_spatio=True,
         )
         entry_exit_plan = compute_entry_exit_points(
             symbol=symbol,
@@ -822,6 +880,9 @@ def run_committee_local(
             right_side_trend_gate=right_side_gate.as_dict(),
             optimizer_review=optimizer_review[:500],
             decision_mode=resolved_decision_mode,
+            hk_spatio_factor=(
+                hk_spatio_assessment.as_dict() if hk_spatio_assessment is not None else {}
+            ),
             cio_note=cio_memo[:500],
         )
 
@@ -845,6 +906,9 @@ def run_committee_local(
             decision_synthesis=decision_synthesis.as_dict(),
             buy_signal_backtest=buy_signal_backtest.as_dict(),
             behavioral_factor=behavioral_assessment.as_dict() if behavioral_assessment is not None else {},
+            hk_spatio_factor=(
+                hk_spatio_assessment.as_dict() if hk_spatio_assessment is not None else {}
+            ),
             decision_mode=resolved_decision_mode,
         )
 
@@ -878,6 +942,9 @@ def run_committee_local(
             "decision_synthesis": decision_synthesis.as_dict(),
             "buy_signal_backtest": buy_signal_backtest.as_dict(),
             "behavioral_factor": behavioral_assessment.as_dict() if behavioral_assessment is not None else {},
+            "hk_spatio_factor": (
+                hk_spatio_assessment.as_dict() if hk_spatio_assessment is not None else {}
+            ),
             "elapsed_sec": round(elapsed, 1)
         }
         return json.dumps(response, ensure_ascii=False)

@@ -148,14 +148,24 @@ def _operation_detail(
     alloc = _safe_num(alloc_source.get("suggested_alloc_cny"))
     triggers = row.get("triggers") or []
     behavioral = result.get("behavioral_factor") or {}
-    factor_unavailable = (
-        str(result.get("market") or "a").lower() in {"a", "cn", "ashare"}
+    hk_spatio = result.get("hk_spatio_factor") or {}
+    market = str(result.get("market") or "a").lower()
+    a_factor_unavailable = (
+        market in {"a", "cn", "ashare"}
         and verdict in {"WAIT", "UNCLEAR"}
         and bool(behavioral.get("low_confidence", True))
     )
-    if factor_unavailable:
+    hk_factor_unavailable = (
+        market in {"hk", "h", "hongkong", "hong_kong"}
+        and verdict in {"WAIT", "UNCLEAR"}
+        and bool(hk_spatio.get("low_confidence", True))
+    )
+    if a_factor_unavailable:
         status = "factor_unavailable"
         reason = str(behavioral.get("reason") or "behavioral_cross_section_or_history_unavailable")
+    elif hk_factor_unavailable:
+        status = "factor_unavailable"
+        reason = str(hk_spatio.get("reason") or "hk_spatio_cross_section_or_history_unavailable")
     elif action_row:
         status = "action_required"
         reason = "selected_by_cash_risk_optimizer"
@@ -300,6 +310,7 @@ def build_monitor_window_snapshot(
             "position_exit_plan": {},
             "right_side_trend_gate": result.get("right_side_trend_gate", {}),
             "behavioral_factor": result.get("behavioral_factor", {}),
+            "hk_spatio_factor": result.get("hk_spatio_factor", {}),
             "price": {
                 "current": _safe_num(price_info.get("price"), _safe_num(ee.get("current_price"))),
                 "prev_close": _safe_num(price_info.get("prev_close")),

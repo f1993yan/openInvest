@@ -67,9 +67,10 @@
 | 行情中间层 | `utils.market_data_provider.py` / `utils.akshare_data.py` | 统一实时/历史行情路由；A 股历史优先东方财富/腾讯直连 HTTP，最后才走 AkShare/Sina |
 | 监控入口 | `jobs/market_monitor.py` | 仅保留 CLI 入口和兼容导出，旧导入仍可用 |
 | 监控通用 | `jobs/market_monitor_common.py` | 路径、日志、交易时段常量、通用数值函数 |
-| 行情/委员会 | `jobs/market_monitor_quotes.py` | 腾讯/新浪行情、构建 A 股行为因子横截面、直接 Python 调用委员会，不依赖 8766 HTTP |
+| 行情/委员会 | `jobs/market_monitor_quotes.py` | 腾讯/新浪行情、分别构建 A 股与港股因子横截面、直接 Python 调用委员会，不依赖 8766 HTTP |
 | A 股行为因子 | `core/ashare_behavioral_factor.py` | 点时横截面特征、前四目标、20 日收益校准、每标的三个月优化器权重 |
-| 确定性优化器 | `core/decision_optimizer.py` | 离散手数效用、行为因子目标、现金/风险/成本约束 |
+| 港股时空动量 | `core/hk_spatio_temporal_factor.py` | 20/60/120 日风险调整动量、前四逆波动目标、20 日调仓与收益校准 |
+| 确定性优化器 | `core/decision_optimizer.py` | 按市场消费独立因子、离散手数效用、现金/风险/成本约束 |
 | 买卖点 | `jobs/market_monitor_entry_exit.py` | 连续触发状态；旧 A 股持仓纪律函数仅保留兼容，不进入生产监控 |
 | 风控护栏 | `jobs/market_monitor_guards.py` | 涨停买入拦截、同向重复交易冷却、反向交易需重新触发价格线 |
 | 告警优化 | `jobs/market_monitor_alerts.py` | 现金约束、仓位风险、LLM 审核修正后的最优提醒选择 |
@@ -82,6 +83,7 @@
 market_monitor_runtime.run_monitor_round()
   → load_config() + AccountLedger 读取真实账户 / 委员会影子账户
   → build_behavioral_factor_context() 计算一次 A 股横截面并读取/更新 5 日目标状态
+  → build_hk_spatio_factor_context() 计算一次港股横截面并读取/更新 20 日目标状态
   → fetch_sina_prices() 拉最新价
   → call_committee() 直接调用 backend.server.run_committee_direct()
       ↳ 同一标的分别用 real 与 committee 账户上下文做独立评估
@@ -93,7 +95,7 @@ market_monitor_runtime.run_monitor_round()
   → scripts/monitor_desktop_window.py 监听 latest_window.json 并局部刷新 UI
 ```
 
-行为因子属于共享市场证据：同一轮真实账户和影子账户读取相同分数、期望收益与标的权重，但优化器分别读取两个账户自己的现金、仓位和可交易手数。因子不会把影子持仓注入真实账户，也不会改变 ledger 的账户隔离规则。详见 [16-A 股行为因子](16-ashare-behavioral-factor.md)。
+两套市场因子都属于共享市场证据：同一轮真实账户和影子账户读取相同分数、期望收益与标的权重，但优化器分别读取两个账户自己的现金、仓位和可交易手数。港股只读取 `hk_spatio_factor`，A 股只读取 `behavioral_factor`；任何一套因子都不会把影子持仓注入真实账户。详见 [16-A 股行为因子](16-ashare-behavioral-factor.md) 与 [17-港股时空动量代理](17-hk-spatio-temporal-factor.md)。
 
 `build_monitor_window_snapshot()` 把每行可选 `behavioral_factor` 写入 `latest_window.json`。桌面窗口和 Android 主界面只筛选其中 `selected=true` 的行，按 `target_weight_pct` 降序取四只；桌面点击后切换卡片，Android 点击后打开委员会分析。`selection_scope=factor_model_target_portfolio` 与 `represents_account_holding=false` 明确该列表是模型目标，不是 `AccountLedger(real)` 持仓。
 

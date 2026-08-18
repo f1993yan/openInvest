@@ -33,6 +33,7 @@ data class HoldingRow(
     val operation: Operation? = null,
     val llm_review: LlmReview? = null,
     val behavioral_factor: BehavioralFactor? = null,
+    val hk_spatio_factor: HkSpatioFactor? = null,
     val error: String? = null,
     val success: Boolean = true,
     var _is_resolving: Boolean = false // Client side flag
@@ -120,6 +121,21 @@ data class BehavioralFactor(
     val trailing_3m_factor_return_pct: Double? = null,
     val trailing_3m_hit_rate: Double? = null,
     val trailing_3m_sample_size: Int? = null,
+    val selection_scope: String? = null,
+    val represents_account_holding: Boolean? = null,
+)
+
+data class HkSpatioFactor(
+    val model_key: String? = null,
+    val score: Double? = null,
+    val expected_return_pct: Double? = null,
+    val target_weight_pct: Double? = null,
+    val eligible: Boolean? = null,
+    val selected: Boolean? = null,
+    val low_confidence: Boolean? = null,
+    val sample_size: Int? = null,
+    val optimizer_weight: Double? = null,
+    val rebalance_sessions: Int? = null,
     val selection_scope: String? = null,
     val represents_account_holding: Boolean? = null,
 )

@@ -1,4 +1,6 @@
 from datetime import datetime, timedelta
+import sys
+import types
 
 import pandas as pd
 import pytest
@@ -101,4 +103,27 @@ def test_history_refresh_replaces_whole_symbol_when_basis_changes(monkeypatch):
     assert len(store.replacements) == 1
     assert store.replacements[0][0] == "600000"
     assert "adjustment_basis_refresh" in store.replacements[0][2]
+
+
+def test_hk_history_prefers_tencent_route_before_akshare(monkeypatch):
+    import utils.akshare_data as ak
+
+    expected = pd.DataFrame(
+        {"Close": [10.0, 10.5]},
+        index=pd.date_range("2026-01-01", periods=2),
+    )
+    fake_cn = types.ModuleType("utils.cn_market_provider")
+    fake_cn.fetch_history = lambda symbol, period: expected.copy()
+    fake_akshare = types.ModuleType("akshare")
+
+    def fail_akshare(**kwargs):
+        raise AssertionError("AkShare fallback must not run when Tencent data is available")
+
+    fake_akshare.stock_hk_daily = fail_akshare
+    monkeypatch.setitem(sys.modules, "utils.cn_market_provider", fake_cn)
+    monkeypatch.setitem(sys.modules, "akshare", fake_akshare)
+
+    result = ak._fetch_hk_stock("00700", "2y")
+
+    pd.testing.assert_frame_equal(result, expected)
 

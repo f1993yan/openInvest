@@ -10,7 +10,8 @@ data class ParsedCommitteeFields(
     val operation: Operation?,
     val fundamental: Fundamental?,
     val llmReview: LlmReview?,
-    val behavioralFactor: BehavioralFactor?
+    val behavioralFactor: BehavioralFactor?,
+    val hkSpatioFactor: HkSpatioFactor?
 )
 
 private fun JsonObject.number(key: String): Double? =
@@ -75,7 +76,25 @@ fun parseCachedResult(symbol: String, rawJson: String): ParsedCommitteeFields? {
             represents_account_holding = it.get("represents_account_holding")?.asBoolean,
         )
     }
-        ParsedCommitteeFields(exitPoints, buyCriteria, operation, fundamental, review, behavioral)
+    val hkSpatio = symbolObj.getAsJsonObject("hk_spatio_factor")?.let {
+        HkSpatioFactor(
+            model_key = it.text("model_key"),
+            score = it.number("score"),
+            expected_return_pct = it.number("expected_return_pct"),
+            target_weight_pct = it.number("target_weight_pct"),
+            eligible = it.get("eligible")?.asBoolean,
+            selected = it.get("selected")?.asBoolean,
+            low_confidence = it.get("low_confidence")?.asBoolean,
+            sample_size = it.number("sample_size")?.toInt(),
+            optimizer_weight = it.number("optimizer_weight"),
+            rebalance_sessions = it.number("rebalance_sessions")?.toInt(),
+            selection_scope = it.text("selection_scope"),
+            represents_account_holding = it.get("represents_account_holding")?.asBoolean,
+        )
+    }
+        ParsedCommitteeFields(
+            exitPoints, buyCriteria, operation, fundamental, review, behavioral, hkSpatio,
+        )
     } catch (_: Exception) {
         null
     }

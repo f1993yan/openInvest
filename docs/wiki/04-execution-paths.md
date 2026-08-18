@@ -154,7 +154,8 @@ start-invest-backend.bat
 - `jobs.market_monitor_quotes.call_committee()` 直接调用 `backend.server.run_committee_direct()`，不通过 `http://127.0.0.1:8766`。
 - `jobs.market_monitor_quotes.build_behavioral_factor_context()` 在每轮委员会前只构建一次 A 股横截面。它读取两年日线，调用 `core.ashare_behavioral_factor.assess_behavioral_universe()`，并把每只标的评估作为可选 `behavioral_factor` 传给 Direct 委员会。
 - 因子前四成员与逆波动目标仓位存放在 `data/behavioral_factor_state.json`，每 5 个交易日更新。分数和最近三个月标的级证据可随新收盘数据重算，但五日内不切换目标成员；`data/` 被 git 忽略。
-- A 股优化器优先使用行为因子的经验 20 日收益和目标仓位。标的级优化器权重由最近 63 个交易日的因子方向超额收益决定，范围 `0.55~1.0`；港股等非 A 股保持原 `_estimate_expected_return_pct()` 路径。
+- `build_hk_spatio_factor_context()` 只构建港股横截面，使用已完成日线、公开恒指 93 只参考池和 `core.hk_spatio_temporal_factor`；只返回用户持仓/关注标的，不自动扩充列表。港股前四与逆波动目标独立存放在 `data/hk_spatio_factor_state.json`，每 20 个交易日更新，不读写 A 股状态。
+- A 股优化器使用行为因子的经验 20 日收益和目标仓位；港股优化器使用时空动量代理的经验 20 日收益和目标仓位。两者都不再为本市场回退到 `_estimate_expected_return_pct()`；其他市场保持原路径。
 - 行为因子的 5 个百分点免交易带只抑制因子目标附近的反复调仓。委员会/优化器给出的高置信卖出仍可越过免交易带；成本锚定持仓纪律已停用，不再作为越过免交易带的依据。
 - 每个标的一次 Direct 调用可以同时携带真实账户和影子账户上下文：`position_pct/cash/holdings` 属于 `real`，`shadow_position_pct/shadow_cash/shadow_holdings` 属于 `committee`。
 - 返回给主窗口、报告和 HTTP `/api/committee` 的是真实账户评估；`shadow_result` 只在 Python 内部给 `jobs.market_monitor_runtime` 执行影子账户，不展示给用户。
@@ -192,6 +193,7 @@ start-invest-backend.bat
 - 成本锚定的 `position_exit_plan`、`position_exit_policy` 和 `position_exit_discipline_review` 已从生产路径删除；同名空字段/空函数仅用于旧接口兼容，周度参数模块与调度不再存在。
 - 卖出提醒阈值在 `jobs/market_monitor_alerts.py`：当前只看委员会/优化器 `SELL/TRIM`、负向建议金额、可卖手数、交易模式、A 股 T+1 和重复交易护栏。旧持仓纪律线不会合成 `action_required`。
 - A 股生产优化器要求有效 `behavioral_factor`。缺失时先从持仓与关注列表补建横截面；补全失败返回 `WAIT`，快照状态为 `factor_unavailable`，窗口灰卡且不允许交易。
+- 港股生产优化器同样要求有效 `hk_spatio_factor`。补建港股横截面仍失败时返回 `WAIT`，不会使用旧的 regime/RSI/价格分位模型继续给出买卖建议。
 - 反向交易冷却不是固定禁买回：当天或冷却窗口内发生过同标的真实/影子反向成交时，再次买入必须重新触发 `buy_pullback`、`reentry` 或 `buy_breakout`，且当前价要相对上次成交价穿越对应触发边界；再次卖出按委员会/优化器卖出方向和交易约束判断。
 - 交易模式在 `jobs/trading_mode.py` 定义，并由 `jobs/market_monitor_alerts.py` 使用：`主动盈利` 保持期望最大化，`现金回收` 增加现金保留和卖出释放现金效用。旧 `risk_off` / “主动避险”会归一化为现金回收；模式只改变提醒优化层，不改变 `entry_exit_points` 或委员会原始 verdict。
 - 主窗口文案在 `scripts/monitor_window_text.py`：方向性委员会结果但未成为可执行提醒时显示“候选卖/候选买”，避免和普通“观察”混淆。快照原因来自 `jobs/market_monitor_snapshot.py` 的 `operation.reason`。

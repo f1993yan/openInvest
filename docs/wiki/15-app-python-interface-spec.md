@@ -110,10 +110,12 @@ def run_committee_local(
 - `decision_mode` 为空时读取 `INVEST_COMMITTEE_MODE`，仍为空则默认 `algorithm_only`。`algorithm_only` 跳过 `run_macro_view`、`run_committee` 和 `run_optimizer_review_view`，不会消耗 LLM；`llm` / `llm_committee` 恢复旧多角色辩论；`auto` 表示 A 股算法直出、非 A 股使用 LLM 委员会。
 - Android 本地 wrapper 不再强制要求 LLM API Key；在算法模式下，Key 为空也可以完成 A 股分析。
 - `behavioral_factor` 是 A 股生产基座新增的可选审计对象。旧 App 不需要新增必填入参，也可以忽略响应中的该对象；`verdict`、`confidence`、`suggested_alloc_cny` 和 `entry_exit_points` 的既有类型与含义不变。`position_exit_policy` 仅保留为空对象兼容旧客户端，不再影响生产决策。`optimizer_weight` 表示标的级因子可信权重，不是建议买入比例；`target_weight_pct` 才是因子目标仓位。
+- `hk_spatio_factor` 是港股生产模型的独立可选审计对象，基础字段与 `behavioral_factor` 一致，但模型名称、分数、20 日目标和状态文件均独立。客户端不得把它显示成“A 股行为因子”，也不得把 `selected=true` 解释成真实港股持仓。
 - `behavioral_factor.selection_scope` 和 `behavioral_factor.represents_account_holding` 是尾部可选语义字段。当前前四目标使用 `selection_scope=factor_model_target_portfolio`、`represents_account_holding=false`；客户端不得把 `selected=true` 当作真实持仓。旧响应缺少这两个字段时仍按可选字段兼容，不改变其他字段解析。
 - A 股行为因子缺失或低置信度时，服务端会先使用监控配置中的持仓/关注标的补建横截面；仍失败时 `verdict=WAIT`、`suggested_alloc_cny=0`，监控快照写 `state=factor_unavailable`。客户端应显示“无法判断”并禁用交易，不得解释成 `HOLD`。
+- 港股时空动量缺失或低置信度时采用相同的 `WAIT` / `factor_unavailable` 失败语义，但原因来自 `hk_spatio_factor.reason`。客户端不得回退使用旧缓存中的港股 regime/RSI 方向作为本轮操作。
 - 旧 `/api/config/exit_params` 与 `/api/config/env_policies` 仅保留兼容响应：POST 忽略内容，GET 返回空对象/空策略，不再写报告或 `.env`。
-- 手机本地 `run_committee_local` 返回单标的根 JSON，部分远程任务返回 `result.by_asset.<symbol>`。Android 缓存解析器必须同时支持两种响应形状，并恢复 `entry_exit_points`、`behavioral_factor`、基本面和操作字段，不能假设本地缓存一定有 `by_asset` 包装层。
+- 手机本地 `run_committee_local` 返回单标的根 JSON，部分远程任务返回 `result.by_asset.<symbol>`。Android 缓存解析器必须同时支持两种响应形状，并恢复 `entry_exit_points`、`behavioral_factor`、`hk_spatio_factor`、基本面和操作字段，不能假设本地缓存一定有 `by_asset` 包装层。
 - 委员会详情弹窗的价格线优先读取本轮 `symbolSummary.entry_exit_points`，只有本轮字段缺失时才回退 `HoldingRow.buy_criteria/exit_points`，避免 Python 已完成计算但 UI 仍显示分析前旧行数据。
 - Android 行为因子区展示 `score/selected/target_weight_pct/trailing_3m_factor_return_pct/trailing_3m_hit_rate/trailing_3m_sample_size/optimizer_weight`。字段均为可选项，缺失时应局部降级，不得隐藏已有入场/出场点或改变 verdict。
 - Android 主界面可从当前 `HoldingRow` 集合筛选 `behavioral_factor.selected=true`，按 `target_weight_pct` 降序显示最多四只。点击目标只打开对应委员会分析，不写持仓；没有有效目标时隐藏总览，不影响原监控列表。

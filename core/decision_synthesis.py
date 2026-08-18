@@ -103,6 +103,19 @@ def synthesize_decision(
         )
         if behavioral_low_confidence:
             risk_warnings.append("A股行为因子横截面或历史样本不足，本轮使用低置信度兼容结果")
+    hk_spatio_model = str(getattr(optimizer, "hk_spatio_model", "none") or "none")
+    if hk_spatio_model != "none":
+        factor_score = _safe_float(getattr(optimizer, "hk_spatio_factor_score", 0.0))
+        target_weight = _safe_float(getattr(optimizer, "hk_spatio_target_weight_pct", 0.0))
+        selected = bool(getattr(optimizer, "hk_spatio_selected", False))
+        factor_weight = _safe_float(getattr(optimizer, "hk_spatio_optimizer_weight", 0.0))
+        status = "入选前四" if selected else "未进入前四"
+        evidence.append(
+            f"港股时空动量 {factor_score:.1f}分，{status}，目标仓位 {target_weight:.1f}%"
+        )
+        evidence.append(f"港股模型优化权重 {factor_weight:.2f}，每20个交易日更新目标")
+        if bool(getattr(optimizer, "hk_spatio_low_confidence", True)):
+            risk_warnings.append("港股时空动量横截面或历史样本不足，本轮暂停交易")
     rr = _safe_float(entry_exit_points.get("reward_risk_ratio"))
     if expected_return is not None:
         evidence.append(f"优化器30日预期收益 {float(expected_return):+.1f}%")

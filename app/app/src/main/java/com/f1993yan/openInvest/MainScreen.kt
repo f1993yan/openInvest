@@ -299,6 +299,7 @@ fun MainScreen(modifier: Modifier = Modifier, onSaveUrl: (String) -> Unit) {
                                 fundamental = parsedFields.fundamental,
                                 llm_review = parsedFields.llmReview,
                                 behavioral_factor = parsedFields.behavioralFactor,
+                                hk_spatio_factor = parsedFields.hkSpatioFactor,
                                 success = true
                             )
                         }
@@ -359,6 +360,7 @@ fun MainScreen(modifier: Modifier = Modifier, onSaveUrl: (String) -> Unit) {
                                 operation = cachedRow.operation,
                                 fundamental = cachedRow.fundamental,
                                 behavioral_factor = cachedRow.behavioral_factor,
+                                hk_spatio_factor = cachedRow.hk_spatio_factor,
                                 error = cachedRow.error,
                                 success = cachedRow.success
                             )
@@ -560,6 +562,7 @@ fun MainScreen(modifier: Modifier = Modifier, onSaveUrl: (String) -> Unit) {
                                     val fCoverage = (symbolSummary?.get("fundamental_coverage") as? Number)?.toDouble() ?: 0.0
                                     val fAnchor = (symbolSummary?.get("fundamental_anchor_multiplier") as? Number)?.toDouble() ?: 1.0
                                     val behavioralMap = symbolSummary?.get("behavioral_factor") as? Map<*, *>
+                                    val hkSpatioMap = symbolSummary?.get("hk_spatio_factor") as? Map<*, *>
 
                                     val exitPoints = ExitPoints(
                                         stop_loss_price = (eePoints?.get("stop_loss_price") as? Number)?.toDouble(),
@@ -599,6 +602,22 @@ fun MainScreen(modifier: Modifier = Modifier, onSaveUrl: (String) -> Unit) {
                                             trailing_3m_sample_size = (b["trailing_3m_sample_size"] as? Number)?.toInt()
                                         )
                                     }
+                                    val hkSpatioFactor = hkSpatioMap?.let { factor ->
+                                        HkSpatioFactor(
+                                            model_key = factor["model_key"] as? String,
+                                            score = (factor["score"] as? Number)?.toDouble(),
+                                            expected_return_pct = (factor["expected_return_pct"] as? Number)?.toDouble(),
+                                            target_weight_pct = (factor["target_weight_pct"] as? Number)?.toDouble(),
+                                            eligible = factor["eligible"] as? Boolean,
+                                            selected = factor["selected"] as? Boolean,
+                                            low_confidence = factor["low_confidence"] as? Boolean,
+                                            sample_size = (factor["sample_size"] as? Number)?.toInt(),
+                                            optimizer_weight = (factor["optimizer_weight"] as? Number)?.toDouble(),
+                                            rebalance_sessions = (factor["rebalance_sessions"] as? Number)?.toInt(),
+                                            selection_scope = factor["selection_scope"] as? String,
+                                            represents_account_holding = factor["represents_account_holding"] as? Boolean
+                                        )
+                                    }
 
                                     updateSnapshotRow(row.symbol) { r ->
                                         r.copy(
@@ -607,7 +626,8 @@ fun MainScreen(modifier: Modifier = Modifier, onSaveUrl: (String) -> Unit) {
                                             buy_criteria = buyCriteria,
                                             operation = operation,
                                             fundamental = fundamental,
-                                            behavioral_factor = behavioralFactor
+                                            behavioral_factor = behavioralFactor,
+                                            hk_spatio_factor = hkSpatioFactor
                                         )
                                     }
                                 },

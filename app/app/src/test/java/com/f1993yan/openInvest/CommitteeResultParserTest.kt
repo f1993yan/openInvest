@@ -16,4 +16,19 @@ class CommitteeResultParserTest {
         assertEquals("factor_model_target_portfolio", parsed.behavioralFactor?.selection_scope)
         assertTrue(parsed.behavioralFactor?.represents_account_holding == false)
     }
+
+    @Test
+    fun parsesHongKongSpatioFactorSeparately() {
+        val parsed = parseCachedResult(
+            "00700",
+            """{"verdict":"HOLD","hk_spatio_factor":{"model_key":"hk_spatio_temporal_momentum_proxy_v1","score":91.2,"expected_return_pct":4.3,"target_weight_pct":35.0,"selected":true,"low_confidence":false,"sample_size":40,"optimizer_weight":0.85,"rebalance_sessions":20,"selection_scope":"hk_factor_model_target_portfolio","represents_account_holding":false}}"""
+        )
+
+        assertNotNull(parsed)
+        assertEquals(91.2, parsed!!.hkSpatioFactor?.score ?: 0.0, 0.0001)
+        assertEquals(35.0, parsed.hkSpatioFactor?.target_weight_pct ?: 0.0, 0.0001)
+        assertEquals(20, parsed.hkSpatioFactor?.rebalance_sessions)
+        assertTrue(parsed.hkSpatioFactor?.selected == true)
+        assertNull(parsed.behavioralFactor)
+    }
 }

@@ -441,17 +441,7 @@ def _fetch_a_share(symbol: str, period: str) -> pd.DataFrame:
 
 
 def _fetch_hk_stock(symbol: str, period: str) -> pd.DataFrame:
-    """拉港股日线（优先 akshare，失败时退回腾讯直连国内源）"""
-    try:
-        import akshare as ak
-        df = ak.stock_hk_daily(symbol=symbol, adjust="qfq")
-        if df is not None and not df.empty:
-            df = _map_sina_columns(df)
-            return _apply_period_filter(df, period)
-        log.warning(f"akshare 港股 {symbol} 返回空数据")
-    except Exception as e:
-        log.error(f"akshare 港股 {symbol} 拉取失败: {e}")
-
+    """拉港股日线（腾讯直连优先，AkShare 仅作降级）。"""
     try:
         from utils.cn_market_provider import fetch_history as _cn_fetch_history
 
@@ -461,6 +451,17 @@ def _fetch_hk_stock(symbol: str, period: str) -> pd.DataFrame:
         log.warning(f"cn_market_provider 港股 {symbol} 返回空数据")
     except Exception as e:
         log.warning(f"cn_market_provider 港股 {symbol} 拉取失败: {e}")
+
+    try:
+        import akshare as ak
+
+        df = ak.stock_hk_daily(symbol=symbol, adjust="qfq")
+        if df is not None and not df.empty:
+            df = _map_sina_columns(df)
+            return _apply_period_filter(df, period)
+        log.warning(f"akshare 港股 {symbol} 返回空数据")
+    except Exception as e:
+        log.error(f"akshare 港股 {symbol} 拉取失败: {e}")
 
     return pd.DataFrame()
 

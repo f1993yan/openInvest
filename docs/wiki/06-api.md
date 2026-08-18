@@ -144,9 +144,9 @@ POST /api/gold/buy    POST /api/gold/sell    POST /api/gold/set    POST /api/gol
 
 ## 4. 委员会
 
-### Direct/兼容后端的 A 股行为因子字段
+### Direct/兼容后端的市场因子字段
 
-`backend.server.CommitteeRequest` 和 `CommitteeResponse` 增加了可选对象 `behavioral_factor`，并增加 `decision_mode` 标识实际决策引擎。这是向后兼容扩展：旧 HTTP/App 调用可以不传，旧客户端也可以忽略响应中的新增字段。
+`backend.server.CommitteeRequest` 和 `CommitteeResponse` 提供两个互相隔离的可选对象：A 股使用 `behavioral_factor`，港股使用 `hk_spatio_factor`。`decision_mode` 标识实际决策引擎。这是向后兼容扩展：旧 HTTP/App 调用可以不传，旧客户端也可以忽略响应中的新增字段。
 
 监控生产路径会在同一轮 A 股横截面计算完成后传入类似结构：
 
@@ -167,7 +167,9 @@ POST /api/gold/buy    POST /api/gold/sell    POST /api/gold/set    POST /api/gol
 }
 ```
 
-字段语义：`target_weight_pct` 是组合目标仓位，`optimizer_weight` 是该标的历史因子收益决定的优化器约束强度，两者不能互换。直接单标的调用若无法形成有效横截面会返回 `low_confidence=true`；非 A 股通常返回空对象并继续原优化器路径。
+港股监控传入的 `hk_spatio_factor` 使用同一组基础语义字段，并额外带出 `rebalance_sessions=20` 与论文链接；它的 `model_key` 是 `hk_spatio_temporal_momentum_proxy_v1`。
+
+字段语义：`target_weight_pct` 是组合目标仓位，`optimizer_weight` 是样本可靠度决定的优化器约束强度，两者不能互换。直接单标的调用若无法形成有效横截面会返回 `low_confidence=true`；A 股或港股的生产因子补全失败时返回 `WAIT` 和零建议金额，其他市场才继续原优化器路径。
 
 决策模式：
 

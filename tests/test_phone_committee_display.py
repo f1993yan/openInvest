@@ -41,3 +41,36 @@ def test_mobile_recommendation_displays_behavioral_factor_parameters():
     assert "近3月 +6.2%，命中 57% (n=63)，优化权重 0.81" in text
     assert "回调 27.20" in text
     assert "止损 25.90" in text
+
+
+def test_mobile_recommendation_labels_hk_spatio_factor_separately():
+    text = build_mobile_recommendation_text(
+        symbol="00700",
+        name="腾讯控股",
+        market="hk",
+        current_price=500.0,
+        change_pct=1.2,
+        verdict="ACCUMULATE",
+        confidence=0.75,
+        suggested_alloc_cny=50_000,
+        is_holding=False,
+        entry_exit_points={},
+        position_exit_policy={},
+        right_side_trend_gate={"allow": True, "reason": "trend_confirmed"},
+        fundamental_score=70.0,
+        regime_brief="REGIME: uptrend",
+        cio_memo="",
+        hk_spatio_factor={
+            "score": 91.2,
+            "expected_return_pct": 4.3,
+            "target_weight_pct": 35.0,
+            "sample_size": 40,
+            "selected": True,
+            "low_confidence": False,
+        },
+        decision_mode="algorithm_only",
+    )
+
+    assert "港股时空动量: 91.2分，入选前四，目标仓位 35.0%" in text
+    assert "未来20日预期 +4.3% (n=40)" in text
+    assert "A股行为因子" not in text

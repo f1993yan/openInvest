@@ -454,6 +454,40 @@ def test_monitor_window_marks_unrepairable_behavioral_factor_as_unavailable():
     assert row["behavioral_factor"]["low_confidence"] is True
 
 
+def test_monitor_window_marks_unavailable_hk_spatio_factor_without_a_share_label():
+    result = {
+        "success": True,
+        "symbol": "00700",
+        "name": "腾讯控股",
+        "market": "hk",
+        "verdict": "WAIT",
+        "confidence": 0.35,
+        "suggested_alloc_cny": 0,
+        "hk_spatio_factor": {
+            "low_confidence": True,
+            "reason": "hk_spatio_cross_section_or_history_unavailable",
+        },
+    }
+    snapshot = build_monitor_window_snapshot(
+        round_time="10:10",
+        results=[result],
+        actionable=[],
+        prices={"00700": {"price": 500.0, "change_pct": 1.0}},
+        stocks=[{"symbol": "00700", "name": "腾讯控股", "market": "hk", "units": 100}],
+        entry_exit_watch=[],
+        entry_exit_alerts=[],
+        suppressed_alerts=[],
+        cash=10000,
+        total_assets=100000,
+    )
+
+    row = snapshot["rows"][0]
+    assert row["state"] == "factor_unavailable"
+    assert row["operation"]["reason"] == "hk_spatio_cross_section_or_history_unavailable"
+    assert row["hk_spatio_factor"]["low_confidence"] is True
+    assert row["behavioral_factor"] == {}
+
+
 def test_monitor_window_snapshot_fills_sector_from_cache_when_config_is_empty(tmp_path, monkeypatch):
     import jobs.market_monitor_snapshot as snapshot_mod
 
@@ -1288,11 +1322,13 @@ def test_call_committee_uses_direct_backend_call(monkeypatch):
         total_assets=100000.0,
         cash=10000.0,
         all_holdings=[{"symbol": "600900", "name": "test", "position_pct": 5.0, "cost": 10.0}],
+        hk_spatio_factor={"model_key": "hk_spatio_temporal_momentum_proxy_v1"},
     )
 
     assert result == {"success": True, "symbol": "600900", "verdict": "HOLD"}
     assert captured["req"].symbol == "600900"
     assert captured["req"].holdings[0].weight_pct == 5.0
+    assert captured["req"].hk_spatio_factor["model_key"] == "hk_spatio_temporal_momentum_proxy_v1"
 
 @pytest.mark.skip(reason="Position exit discipline is disabled")
 def test_policy_quality_adjusts_existing_position_sell_score_conservatively():

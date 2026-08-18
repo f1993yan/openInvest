@@ -65,6 +65,12 @@ class OptimizedDecision:
     behavioral_trailing_3m_return_pct: float = 0.0
     behavioral_trailing_3m_hit_rate: float = 0.5
     behavioral_trailing_3m_sample_size: int = 0
+    hk_spatio_factor_score: float = 0.0
+    hk_spatio_target_weight_pct: float = 0.0
+    hk_spatio_selected: bool = False
+    hk_spatio_low_confidence: bool = True
+    hk_spatio_model: str = "none"
+    hk_spatio_optimizer_weight: float = 0.0
 
     def audit_text(self) -> str:
         side = "buy" if self.alloc_cny > 0 else "sell" if self.alloc_cny < 0 else "hold"
@@ -87,6 +93,11 @@ class OptimizedDecision:
             f"trailing_3m_return={self.behavioral_trailing_3m_return_pct:+.2f}% "
             f"trailing_3m_hit_rate={self.behavioral_trailing_3m_hit_rate:.2%} "
             f"trailing_3m_n={self.behavioral_trailing_3m_sample_size}\n"
+            f"hk_spatio_model={self.hk_spatio_model} score={self.hk_spatio_factor_score:.2f} "
+            f"selected={str(self.hk_spatio_selected).lower()} "
+            f"target_weight={self.hk_spatio_target_weight_pct:.2f}% "
+            f"low_confidence={str(self.hk_spatio_low_confidence).lower()} "
+            f"optimizer_weight={self.hk_spatio_optimizer_weight:.3f}\n"
             f"conditional_cvar_95_loss={self.cvar_95_loss_pct:.2f}%\n"
             f"reason={self.reason}"
         )
@@ -295,7 +306,9 @@ def optimize_committee_decision(
     fundamental_assessment: Optional[Any] = None,
     position_exit_policy: Optional[Any] = None,
     behavioral_assessment: Optional[Any] = None,
+    hk_spatio_assessment: Optional[Any] = None,
     require_a_share_behavioral: bool = False,
+    require_hk_spatio: bool = False,
 ) -> OptimizedDecision:
     """Choose the executable action with maximum expected utility vs HOLD.
 
@@ -310,17 +323,28 @@ def optimize_committee_decision(
     holding_value = max(total * _safe_float(position_pct, 0.0) / 100.0, 0.0)
     _ = position_exit_policy  # Deprecated compatibility argument.
     is_a_share = (market or "a").lower() == "a"
+    is_hk = (market or "").lower() in {"hk", "h", "hongkong", "hong_kong"}
     use_behavioral = (
         is_a_share
         and behavioral_assessment is not None
         and not getattr(behavioral_assessment, "low_confidence", True)
     )
+    use_hk_spatio = (
+        is_hk
+        and hk_spatio_assessment is not None
+        and not getattr(hk_spatio_assessment, "low_confidence", True)
+    )
     behavioral_target = _safe_float(
         getattr(behavioral_assessment, "target_weight_pct", 0.0), 0.0,
     ) if use_behavioral else None
+    hk_spatio_target = _safe_float(
+        getattr(hk_spatio_assessment, "target_weight_pct", 0.0), 0.0,
+    ) if use_hk_spatio else None
     raw_target = (
         behavioral_target
         if behavioral_target is not None
+        else hk_spatio_target
+        if hk_spatio_target is not None
         else bl_anchor_target_pct if bl_anchor_target_pct is not None else target_position_pct
     )
     bl_target = _safe_float(raw_target, _safe_float(position_pct, 0.0))
@@ -342,10 +366,10 @@ def optimize_committee_decision(
                 -1.5,
                 1.5,
             )
-            # A valid A-share behavioral target already includes inverse-risk
-            # sizing and a 35% single-name cap. Fundamentals may adjust the
-            # expected return, but must not expand that portfolio target.
-            if not use_behavioral:
+            # A valid market-factor target already includes inverse-risk sizing
+            # and a 35% single-name cap. Fundamentals may adjust expected return,
+            # but must not expand that portfolio target.
+            if not use_behavioral and not use_hk_spatio:
                 bl_target *= fundamental_anchor_multiplier
     target_pct = _clamp(bl_target / 100.0, 0.0, 1.0)
     regime = _regime_label(regime_brief)
@@ -396,16 +420,51 @@ def optimize_committee_decision(
             behavioral_model=str(getattr(behavioral_assessment, "model_key", "none")),
         )
 
-    if use_behavioral:
-        # For A shares the validated cross-sectional factor replaces the old
-        # momentum/RSI/regime fallback. Fundamentals remain a bounded overlay;
-        # cost-anchored position discipline is intentionally not applied.
+    if require_hk_spatio and is_hk and not use_hk_spatio:
+        return OptimizedDecision(
+            verdict="WAIT",
+            alloc_cny=0,
+            confidence=0.35,
+            lots=0,
+            hand_cost=hand_cost,
+            edge_cny=0.0,
+            expected_return_pct=0.0,
+            sigma_30d_pct=_sigma_30d_pct(metrics),
+            p_directional=0.5,
+            odds=0.0,
+            kelly_fraction=0.0,
+            target_position_pct=_safe_float(position_pct, 0.0),
+            cvar_95_loss_pct=0.0,
+            reason="hk_spatio_temporal_factor_unavailable",
+            fundamental_score=fundamental_score,
+            fundamental_model=fundamental_model,
+            fundamental_anchor_multiplier=fundamental_anchor_multiplier,
+            fundamental_return_adjustment_pct=fundamental_return_adj,
+            hk_spatio_factor_score=_safe_float(
+                getattr(hk_spatio_assessment, "score", 0.0), 0.0,
+            ),
+            hk_spatio_target_weight_pct=_safe_float(
+                getattr(hk_spatio_assessment, "target_weight_pct", 0.0), 0.0,
+            ),
+            hk_spatio_selected=bool(getattr(hk_spatio_assessment, "selected", False)),
+            hk_spatio_low_confidence=True,
+            hk_spatio_model=str(getattr(hk_spatio_assessment, "model_key", "none")),
+        )
+
+    if use_behavioral or use_hk_spatio:
+        # Validated cross-sectional factors replace the old momentum/RSI/regime
+        # fallback for their own market. Fundamentals remain a bounded overlay.
+        factor_assessment = behavioral_assessment if use_behavioral else hk_spatio_assessment
         mu_pct = _clamp(
-            _safe_float(getattr(behavioral_assessment, "expected_return_pct", 0.0))
+            _safe_float(getattr(factor_assessment, "expected_return_pct", 0.0))
             + fundamental_return_adj,
             -15.0,
             15.0,
         )
+        if use_hk_spatio and not bool(getattr(hk_spatio_assessment, "selected", False)):
+            # The validated HK portfolio owns only the frozen top four. A
+            # positive local calibration must not create an off-portfolio buy.
+            mu_pct = min(mu_pct, 0.0)
     else:
         mu_pct = _estimate_expected_return_pct(
             parsed=parsed, metrics=metrics, regime=regime,
@@ -421,7 +480,8 @@ def optimize_committee_decision(
     sigma = sigma_pct / 100.0
 
     if (
-        conditional_return_stats is not None
+        not use_hk_spatio
+        and conditional_return_stats is not None
         and not getattr(conditional_return_stats, "low_confidence", False)
     ):
         upside_pct = max(
@@ -441,8 +501,8 @@ def optimize_committee_decision(
     odds = max(upside_pct / downside_pct, 0.01)
     p_buy = _directional_probability(
         mu_pct=mu_pct, sigma_pct=sigma_pct,
-        regime_probability=regime_probability,
-        conditional_return_stats=conditional_return_stats,
+        regime_probability=None if use_hk_spatio else regime_probability,
+        conditional_return_stats=None if use_hk_spatio else conditional_return_stats,
         for_sell=False,
     )
     kelly = p_buy - (1.0 - p_buy) / odds
@@ -451,6 +511,8 @@ def optimize_committee_decision(
     max_buy_by_cash = int(cash // hand_cost)
     max_buy_by_total_assets = int(max(0.0, total - holding_value) // hand_cost)
     max_buy_lots = min(max_buy_by_cash, max_buy_by_total_assets)
+    if use_hk_spatio and not bool(getattr(hk_spatio_assessment, "selected", False)):
+        max_buy_lots = 0
     max_sell_lots = int(holding_value // hand_cost)
 
     fee_rate = 0.0020 if market.lower() == "hk" else 0.0013
@@ -475,6 +537,19 @@ def optimize_committee_decision(
             factor_sample_size = max(
                 0.0,
                 _safe_float(getattr(behavioral_assessment, "sample_size", 0.0), 0.0),
+            )
+            factor_reliability = factor_sample_size / (factor_sample_size + 20.0)
+            anchor_lambda = 0.55 + 0.45 * factor_reliability
+    elif use_hk_spatio:
+        configured_weight = _safe_float(
+            getattr(hk_spatio_assessment, "optimizer_weight", 0.0), 0.0,
+        )
+        if configured_weight > 0:
+            anchor_lambda = _clamp(configured_weight, 0.55, 1.0)
+        else:
+            factor_sample_size = max(
+                0.0,
+                _safe_float(getattr(hk_spatio_assessment, "sample_size", 0.0), 0.0),
             )
             factor_reliability = factor_sample_size / (factor_sample_size + 20.0)
             anchor_lambda = 0.55 + 0.45 * factor_reliability
@@ -528,11 +603,13 @@ def optimize_committee_decision(
     if edge <= min_edge:
         best_verdict, best_lots, best_delta, edge = "HOLD", 0, 0.0, 0.0
 
-    # The production portfolio refreshes its factor target every five sessions.
-    # target is stable between refreshes; this five-percentage-point no-trade
-    # band prevents ten-minute committee runs from churning around that target.
+    # Each production factor keeps its target stable between scheduled refreshes.
+    # This five-percentage-point no-trade band prevents ten-minute committee runs
+    # from churning around that target.
     # Reliable position-risk sell evidence is deliberately allowed through.
-    if use_behavioral and abs(_safe_float(position_pct) - target_pct * 100.0) <= 5.0:
+    if (use_behavioral or use_hk_spatio) and abs(
+        _safe_float(position_pct) - target_pct * 100.0
+    ) <= 5.0:
         risk_sell_bypass = (
             best_verdict in {"TRIM", "SELL"}
             and exit_policy_reliability >= 0.50
@@ -549,8 +626,8 @@ def optimize_committee_decision(
 
     p_directional = _directional_probability(
         mu_pct=mu_pct, sigma_pct=sigma_pct,
-        regime_probability=regime_probability,
-        conditional_return_stats=conditional_return_stats,
+        regime_probability=None if use_hk_spatio else regime_probability,
+        conditional_return_stats=None if use_hk_spatio else conditional_return_stats,
         for_sell=best_verdict in {"TRIM", "SELL"},
     )
     if best_verdict == "HOLD":
@@ -598,4 +675,20 @@ def optimize_committee_decision(
         behavioral_trailing_3m_sample_size=int(
             _safe_float(getattr(behavioral_assessment, "trailing_3m_sample_size", 0), 0.0)
         ),
+        hk_spatio_factor_score=_safe_float(
+            getattr(hk_spatio_assessment, "score", 0.0), 0.0,
+        ) if is_hk else 0.0,
+        hk_spatio_target_weight_pct=_safe_float(
+            getattr(hk_spatio_assessment, "target_weight_pct", 0.0), 0.0,
+        ) if is_hk else 0.0,
+        hk_spatio_selected=(
+            bool(getattr(hk_spatio_assessment, "selected", False)) if is_hk else False
+        ),
+        hk_spatio_low_confidence=bool(
+            getattr(hk_spatio_assessment, "low_confidence", True),
+        ) if is_hk else True,
+        hk_spatio_model=(
+            str(getattr(hk_spatio_assessment, "model_key", "none")) if is_hk else "none"
+        ),
+        hk_spatio_optimizer_weight=anchor_lambda if use_hk_spatio else 0.0,
     )

@@ -1262,15 +1262,28 @@ def _run_latest_committee_for_row(row: Dict[str, Any]) -> Dict[str, Any]:
         (s for s in shadow_stocks if str(s.get("symbol") or "").upper() == symbol),
         None,
     )
+    market = str(stock.get("market") or row.get("market") or "a")
+    behavioral_factor = None
+    hk_spatio_factor = None
     try:
-        from jobs.market_monitor_quotes import build_behavioral_factor_context
-        behavioral_factor = build_behavioral_factor_context(stocks).get(symbol.upper())
+        if market.lower() == "a":
+            from jobs.market_monitor_quotes import build_behavioral_factor_context
+
+            behavioral_factor = build_behavioral_factor_context(stocks).get(symbol.upper())
+        elif market.lower() in {"hk", "h", "hongkong", "hong_kong"}:
+            from core.hk_spatio_temporal_factor import normalize_hk_symbol
+            from jobs.market_monitor_quotes import build_hk_spatio_factor_context
+
+            hk_spatio_factor = build_hk_spatio_factor_context(stocks).get(
+                normalize_hk_symbol(symbol),
+            )
     except Exception:
         behavioral_factor = None
+        hk_spatio_factor = None
     result = call_committee(
         symbol=symbol,
         name=str(stock.get("name") or row.get("name") or symbol),
-        market=str(stock.get("market") or row.get("market") or "a"),
+        market=market,
         position_pct=_safe_num(stock.get("position_pct")),
         cost=_safe_num(stock.get("cost")),
         current_price=current_price,
@@ -1290,6 +1303,7 @@ def _run_latest_committee_for_row(row: Dict[str, Any]) -> Dict[str, Any]:
         shadow_available_cash=shadow_cash,
         shadow_t2_pending=shadow_t2_pending,
         behavioral_factor=behavioral_factor,
+        hk_spatio_factor=hk_spatio_factor,
     ) or {"success": False, "symbol": symbol, "error": "委员会返回空结果"}
 
     if not result.get("success"):

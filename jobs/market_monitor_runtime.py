@@ -9,6 +9,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, List
 
+from core.hk_spatio_temporal_factor import normalize_hk_symbol
 from jobs.market_monitor_common import (
     AUTO_TRADE_REPEAT_COOLDOWN_MINUTES,
     CONFIG_PATH,
@@ -37,7 +38,12 @@ from jobs.market_monitor_notify import (
     send_windows_toast,
     should_send_monitor_summary_popup,
 )
-from jobs.market_monitor_quotes import build_behavioral_factor_context, call_committee, fetch_sina_prices
+from jobs.market_monitor_quotes import (
+    build_behavioral_factor_context,
+    build_hk_spatio_factor_context,
+    call_committee,
+    fetch_sina_prices,
+)
 from jobs.market_monitor_snapshot import build_monitor_window_snapshot, write_monitor_window_snapshot, write_report
 from jobs.trading_mode import DEFAULT_TRADING_MODE, normalize_trading_mode
 
@@ -338,6 +344,12 @@ def run_monitor_round():
     except Exception as e:
         behavioral_factors = {}
         log.warning(f"A股行为因子横截面不可用，委员会将使用兼容降级模型: {e}")
+    try:
+        hk_spatio_factors = build_hk_spatio_factor_context(all_stocks)
+        log.info(f"港股时空动量横截面已更新: {len(hk_spatio_factors)} 只")
+    except Exception as e:
+        hk_spatio_factors = {}
+        log.warning(f"港股时空动量横截面不可用，港股委员会将暂停交易: {e}")
 
     # 1. 拉取行情
     log.info(f"拉取 {len(all_symbols)} 只标的最新行情...")
@@ -443,6 +455,7 @@ def run_monitor_round():
             shadow_available_cash=shadow_available_cash,
             shadow_t2_pending=shadow_t2_pending,
             behavioral_factor=behavioral_factors.get(str(sym).upper()),
+            hk_spatio_factor=hk_spatio_factors.get(normalize_hk_symbol(sym)),
         )
         if isinstance(result, dict):
             result["price_sentinel"] = sentinel_status

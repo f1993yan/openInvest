@@ -136,7 +136,8 @@ object LocalCommitteeRunner {
                     "optimizer_review" to map["optimizer_review"],
                     "decision_mode" to map["decision_mode"],
                     "decision_synthesis" to map["decision_synthesis"],
-                    "behavioral_factor" to map["behavioral_factor"]
+                    "behavioral_factor" to map["behavioral_factor"],
+                    "hk_spatio_factor" to map["hk_spatio_factor"]
                 )
 
                 val finishedResponse = CommitteeStatusResponse(
