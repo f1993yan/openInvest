@@ -202,6 +202,72 @@ def test_weekend_llm_summary_discovers_a_share_hot_opportunities(monkeypatch, tm
     assert out["_source_date_range"] == "2026-06-07"
 
 
+def test_weekend_llm_empty_response_retries_with_thinking_disabled(monkeypatch, tmp_path):
+    from types import SimpleNamespace
+
+    from jobs import weekend_news_crawl as mod
+
+    monkeypatch.setattr(mod, "CACHE_DIR", tmp_path)
+    monkeypatch.setattr(
+        "utils.llm.get_llm_config_safe",
+        lambda: ("fake-key", "https://example.test", "deepseek-v4-flash", "openai"),
+    )
+
+    payload = {
+        "key_themes": ["商业航天"],
+        "theme_detail": {"商业航天": "航天产业链受到关注。"},
+        "sector_opportunities": [],
+        "hot_stock_opportunities": [],
+        "watchlist_symbols": [],
+        "rejected_topics": [],
+        "overall_sentiment": "neutral",
+        "summary_one_liner": "商业航天是本周末值得跟踪的主题。",
+    }
+    responses = [
+        SimpleNamespace(
+            choices=[SimpleNamespace(message=SimpleNamespace(content=""), finish_reason="length")],
+            usage=SimpleNamespace(completion_tokens=8000, reasoning_tokens=8000),
+        ),
+        SimpleNamespace(
+            choices=[
+                SimpleNamespace(
+                    message=SimpleNamespace(content=__import__("json").dumps(payload, ensure_ascii=False)),
+                    finish_reason="stop",
+                )
+            ],
+            usage=SimpleNamespace(completion_tokens=200, reasoning_tokens=0),
+        ),
+    ]
+    calls = []
+
+    class FakeCompletions:
+        def create(self, **kwargs):
+            calls.append(kwargs)
+            return responses.pop(0)
+
+    class FakeOpenAI:
+        def __init__(self, **kwargs):
+            self.chat = SimpleNamespace(completions=FakeCompletions())
+
+    monkeypatch.setattr("openai.OpenAI", FakeOpenAI)
+
+    caches = [
+        {
+            "slot": "2026-08-23_Sun_2000",
+            "total_items": 1,
+            "items": [{"src_name": "baidu_hot", "title": "航天产业链受到关注"}],
+        }
+    ]
+    out = mod.summarize_and_evaluate(caches, {}, output_date="2026-08-23")
+
+    assert out["_llm_status"] == "success"
+    assert out["_llm_attempts"] == 2
+    assert len(calls) == 2
+    assert calls[0]["extra_body"] == {"thinking": {"type": "disabled"}}
+    assert calls[0]["max_tokens"] == 8000
+    assert (tmp_path / "summary_2026-08-23.json").exists()
+
+
 def test_weekend_committee_on_leaders_uses_direct_backend_call(monkeypatch):
     from jobs import weekend_news_crawl as mod
 

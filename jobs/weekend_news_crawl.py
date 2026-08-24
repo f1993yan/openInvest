@@ -24,7 +24,7 @@ import os
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 import requests
 
@@ -38,6 +38,8 @@ CONFIG_PATH = _PROJECT_ROOT / "jobs" / "market_monitor_config.json"
 # 历史兼容：持仓 ≥ 此百分比的才进入旧的委员会重评流程。
 # 新的周末新闻总结不再默认评估持仓，而是从新闻中寻找 A 股热门题材和候选龙头。
 LEADING_PCT_THRESHOLD = float(os.getenv("INVEST_WEEKEND_LEADING_PCT", "5.0"))
+_LLM_SUMMARY_ATTEMPTS = 2
+_LLM_SUMMARY_MAX_TOKENS = 8000
 
 log = logging.getLogger("weekend_news")
 logging.basicConfig(
@@ -345,6 +347,8 @@ def _build_leading_stocks_text(config: Dict[str, Any]) -> str:
 def _empty_summary(message: str) -> Dict[str, Any]:
     return {
         "error": message,
+        "_llm_status": "failed",
+        "_llm_attempts": 0,
         "key_themes": [],
         "theme_detail": {},
         "sector_opportunities": [],
@@ -374,8 +378,102 @@ def _cache_source_date_range(caches: List[Dict[str, Any]]) -> str:
     return ordered[0] if len(ordered) == 1 else f"{ordered[0]} ~ {ordered[-1]}"
 
 
+def _extract_json(text: str):
+    """Extract JSON candidates from a possibly formatted LLM response."""
+    import re
+
+    text = str(text or "").strip()
+    if text:
+        yield "level1_direct", text
+
+    first_brace = text.find("{")
+    last_brace = text.rfind("}")
+    if first_brace >= 0 and last_brace > first_brace:
+        yield "level2_braces", text[first_brace: last_brace + 1]
+
+    markdown = re.search(r"```(?:json)?\s*([\s\S]*?)```", text)
+    if markdown:
+        inner = markdown.group(1).strip()
+        yield "level3_markdown", inner
+        first_inner_brace = inner.find("{")
+        last_inner_brace = inner.rfind("}")
+        if first_inner_brace >= 0 and last_inner_brace > first_inner_brace:
+            yield "level3b_markdown_braces", inner[first_inner_brace: last_inner_brace + 1]
+
+
+def _parse_opportunity_summary(
+    content: str,
+) -> tuple[Optional[Dict[str, Any]], str, Optional[str]]:
+    """Parse one LLM response and return (object, strategy, error)."""
+    parse_error: Optional[str] = None
+    for strategy, candidate in _extract_json(content):
+        try:
+            result = json.loads(candidate)
+        except json.JSONDecodeError as exc:
+            parse_error = str(exc)
+            continue
+        if isinstance(result, dict):
+            return result, strategy, None
+        parse_error = f"JSON root must be an object, got {type(result).__name__}"
+    return None, "", parse_error
+
+
+def _coerce_llm_content(message: Any) -> str:
+    """Normalize string or content-part responses from OpenAI-compatible APIs."""
+    content = getattr(message, "content", "")
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts: List[str] = []
+        for part in content:
+            if isinstance(part, dict):
+                value = part.get("text") or part.get("content")
+            else:
+                value = getattr(part, "text", None) or getattr(part, "content", None)
+            if value:
+                parts.append(str(value))
+        return "".join(parts)
+    return str(content or "")
+
+
+def _summary_has_signal(result: Dict[str, Any]) -> bool:
+    """Reject an otherwise valid but completely empty JSON object."""
+    signal_fields = (
+        "key_themes",
+        "theme_detail",
+        "sector_opportunities",
+        "hot_stock_opportunities",
+        "watchlist_symbols",
+        "rejected_topics",
+    )
+    return any(bool(result.get(field)) for field in signal_fields) or bool(
+        str(result.get("summary_one_liner") or "").strip()
+    )
+
+
+def _response_diagnostics(response: Any, content: str) -> str:
+    """Return bounded response metadata without logging prompt or response text."""
+    choices = getattr(response, "choices", None) or []
+    choice = choices[0] if choices else None
+    finish_reason = getattr(choice, "finish_reason", "unknown")
+    usage = getattr(response, "usage", None)
+    usage_parts: List[str] = []
+    for field in ("prompt_tokens", "completion_tokens", "total_tokens"):
+        value = getattr(usage, field, None)
+        if value is not None:
+            usage_parts.append(f"{field}={value}")
+    details = getattr(usage, "completion_tokens_details", None)
+    reasoning_tokens = getattr(details, "reasoning_tokens", None)
+    if reasoning_tokens is not None:
+        usage_parts.append(f"reasoning_tokens={reasoning_tokens}")
+    usage_text = ", ".join(usage_parts) or "usage=unknown"
+    return f"finish_reason={finish_reason}, content_len={len(content)}, {usage_text}"
+
+
 def summarize_and_evaluate(caches: List[Dict[str, Any]],
-                           config: Dict[str, Any]) -> Dict[str, Any]:
+                           config: Dict[str, Any],
+                           *,
+                           output_date: Optional[str] = None) -> Dict[str, Any]:
     """LLM 总结周末新闻，并发现 A 股板块/龙头机会。
 
     config is retained for backward compatibility with callers, but this
@@ -396,96 +494,92 @@ def summarize_and_evaluate(caches: List[Dict[str, Any]],
 
     # 调 LLM
     from openai import OpenAI
-    from utils.llm import get_llm_config_safe
+    from utils.llm import get_llm_config_safe, get_thinking_disable_kwargs
 
     _load_local_env()
     api_key, base_url, model, _ = get_llm_config_safe()
     if not api_key:
         return _empty_summary("LLM API key 未设，无法总结")
 
-    client = OpenAI(api_key=api_key, base_url=base_url)
+    client = OpenAI(api_key=api_key, base_url=base_url, timeout=90)
+    thinking_kwargs = get_thinking_disable_kwargs(model)
+    if thinking_kwargs:
+        log.info("LLM 新闻总结已关闭模型 thinking，避免推理占满输出预算 (model=%s)", model)
 
-    try:
-        resp = client.chat.completions.create(
-            model=model,
-            messages=[
+    result: Optional[Dict[str, Any]] = None
+    content = ""
+    failure_reasons: List[str] = []
+    attempts_used = 0
+    for attempt in range(1, _LLM_SUMMARY_ATTEMPTS + 1):
+        attempts_used = attempt
+        request_kwargs = {
+            "model": model,
+            "messages": [
                 {"role": "system", "content": "你是一个专业的中文宏观分析师。请严格按 JSON 格式输出，不要输出任何多余内容。"},
                 {"role": "user", "content": prompt},
             ],
-            temperature=0.2,
-            max_tokens=16000,
-            response_format={"type": "json_object"},
-        )
-        content = resp.choices[0].message.content or ""
-    except Exception as e:
-        log.error(f"LLM 调用失败: {e}")
-        return _empty_summary(f"LLM 调用失败: {e}")
-
-    # 解析 JSON（逐级降级：裸 JSON → {} 提取 → ```json 提取 → fallback）
-    def _extract_json(text: str):
-        """Extract a JSON object from LLM response using layered strategies."""
-        import re
-
-        text = text.strip()
-
-        # Level 1: direct parse (works with response_format=json_object)
-        if text:
-            yield "level1_direct", text
-
-        # Level 2: extract outermost { ... } pair
-        first_brace = text.find("{")
-        last_brace = text.rfind("}")
-        if first_brace >= 0 and last_brace > first_brace:
-            yield "level2_braces", text[first_brace: last_brace + 1]
-
-        # Level 3: extract markdown ```json ... ``` block
-        m = re.search(r'```(?:json)?\s*([\s\S]*?)```', text)
-        if m:
-            inner = m.group(1).strip()
-            yield "level3_markdown", inner
-            # also try extracting braces inside the markdown block
-            fb = inner.find("{")
-            lb = inner.rfind("}")
-            if fb >= 0 and lb > fb:
-                yield "level3b_markdown_braces", inner[fb: lb + 1]
-
-    result = None
-    parse_error = None
-    for strategy, candidate in _extract_json(content):
-        try:
-            result = json.loads(candidate)
-            log.info(f"JSON 解析成功 (strategy={strategy}, len={len(candidate)})")
-            break
-        except json.JSONDecodeError as e:
-            parse_error = e
-            log.debug(f"JSON 解析失败 (strategy={strategy}): {e}")
-            continue
-
-    if result is None or not isinstance(result, dict):
-        log.warning(
-            f"所有 JSON 解析策略均失败 (last_error={parse_error}), "
-            f"content preview: {content[:300]}"
-        )
-        result = {
-            "key_themes": [],
-            "theme_detail": {},
-            "sector_opportunities": [],
-            "hot_stock_opportunities": [],
-            "watchlist_symbols": [],
-            "rejected_topics": [],
-            "need_committee_rerun": [],
-            "overall_sentiment": "neutral",
-            "summary_one_liner": content[:200],
+            "temperature": 0.2 if attempt == 1 else 0.1,
+            "max_tokens": _LLM_SUMMARY_MAX_TOKENS,
+            "response_format": {"type": "json_object"},
         }
+        request_kwargs.update(thinking_kwargs)
+        try:
+            resp = client.chat.completions.create(**request_kwargs)
+            choices = getattr(resp, "choices", None) or []
+            message = getattr(choices[0], "message", None) if choices else None
+            content = _coerce_llm_content(message) if message is not None else ""
+            diagnostics = _response_diagnostics(resp, content)
+            if not content.strip():
+                reason = f"空响应 ({diagnostics})"
+                failure_reasons.append(reason)
+                log.warning("LLM 新闻总结第 %s 次返回空正文: %s", attempt, diagnostics)
+                continue
 
-    result = _normalize_opportunity_summary(result)
+            parsed, strategy, parse_error = _parse_opportunity_summary(content)
+            if parsed is None:
+                reason = f"JSON 解析失败 ({parse_error or 'unknown error'}; {diagnostics})"
+                failure_reasons.append(reason)
+                log.warning("LLM 新闻总结第 %s 次解析失败: %s", attempt, reason)
+                continue
+
+            normalized = _normalize_opportunity_summary(parsed)
+            if not _summary_has_signal(normalized):
+                reason = f"JSON 内容为空 ({diagnostics})"
+                failure_reasons.append(reason)
+                log.warning("LLM 新闻总结第 %s 次返回空 JSON: %s", attempt, diagnostics)
+                continue
+
+            result = normalized
+            log.info(
+                "JSON 解析成功 (attempt=%s, strategy=%s, len=%s, %s)",
+                attempt,
+                strategy,
+                len(content),
+                diagnostics,
+            )
+            break
+        except Exception as exc:  # noqa: BLE001
+            reason = f"{type(exc).__name__}: {exc}"
+            failure_reasons.append(reason)
+            log.warning("LLM 新闻总结第 %s 次调用失败: %s", attempt, reason)
+
+    if result is None:
+        error = "LLM 新闻总结失败；" + "；".join(failure_reasons[-_LLM_SUMMARY_ATTEMPTS:])
+        log.error("%s", error)
+        result = _empty_summary(error)
+        result["_llm_status"] = "failed"
+    else:
+        result["_llm_status"] = "success"
+    result["_llm_attempts"] = attempts_used
+
     result["_total_news"] = total_items
     result["_cache_count"] = len(caches)
     result["_source_date_range"] = _cache_source_date_range(caches)
     result["_raw_response"] = content
 
     # 保存 summary
-    summary_file = CACHE_DIR / f"summary_{_now_local().strftime('%Y-%m-%d')}.json"
+    summary_date = output_date or _now_local().strftime("%Y-%m-%d")
+    summary_file = CACHE_DIR / f"summary_{summary_date}.json"
     summary_file.write_text(
         json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8"
     )
@@ -769,7 +863,9 @@ def run() -> Dict[str, Any]:
 
     # Step 5: LLM 总结 + A 股板块/候选龙头发现
     summary = summarize_and_evaluate(caches, config)
+    summary_status = str(summary.get("_llm_status") or "success")
     log.info(f"总结完成: sentiment={summary.get('overall_sentiment')}, "
+              f"status={summary_status}, "
               f"themes={len(summary.get('key_themes', []))}, "
               f"watchlist={summary.get('watchlist_symbols', [])}")
 
@@ -781,7 +877,7 @@ def run() -> Dict[str, Any]:
 
     # Step 7: 生成最终报告
     report = {
-        "status": "complete",
+        "status": "complete" if summary_status == "success" else "partial",
         "timestamp": _now_iso(),
         "cache_slot": cache_stats["slot"],
         "total_news_crawled": cache_stats["total"],
@@ -796,10 +892,16 @@ def run() -> Dict[str, Any]:
             "hot_stock_opportunities": summary.get("hot_stock_opportunities", []),
             "watchlist_symbols": summary.get("watchlist_symbols", []),
             "rejected_topics": summary.get("rejected_topics", []),
+            "_source_date_range": summary.get("_source_date_range", ""),
         },
         "committee": {
             "symbols_evaluated": rerun_symbols,
             "results": committee_results,
+        },
+        "llm": {
+            "status": summary_status,
+            "attempts": summary.get("_llm_attempts", 0),
+            "error": summary.get("error", "") if summary_status != "success" else "",
         },
     }
 

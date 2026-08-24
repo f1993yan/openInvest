@@ -22,6 +22,8 @@ from jobs.trading_mode import DEFAULT_TRADING_MODE, normalize_trading_mode, trad
 
 SECTOR_CACHE_PATH = ROOT / "data" / "sector_cache.json"
 MARKET_DB_PATH = ROOT / "db" / "market_data.db"
+REMINDER_IGNORE_STATE_PATH = ROOT / "data" / "market_monitor" / "reminder_ignore_state.json"
+REMINDER_IGNORE_TTL_SECONDS = 60 * 60
 log = logging.getLogger(__name__)
 
 
@@ -38,6 +40,161 @@ def _safe_num(value: Any, default: float = 0.0) -> float:
         return float(value)
     except (TypeError, ValueError):
         return default
+
+
+def _normalize_reminder_symbol(symbol: Any) -> str:
+    """Use one stable key for a symbol in the local desktop reminder state."""
+    return str(symbol or "").strip().upper()
+
+
+def _reminder_timestamp(now: Any = None) -> float:
+    if now is None:
+        return datetime.now().timestamp()
+    if isinstance(now, datetime):
+        return now.timestamp()
+    try:
+        return float(now)
+    except (TypeError, ValueError):
+        return datetime.now().timestamp()
+
+
+def _normalize_reminder_state(state: Any, *, now: Any = None) -> Dict[str, float]:
+    current = _reminder_timestamp(now)
+    raw = state.get("ignored_until") if isinstance(state, dict) else None
+    if not isinstance(raw, dict):
+        return {}
+    normalized: Dict[str, float] = {}
+    for symbol, deadline in raw.items():
+        key = _normalize_reminder_symbol(symbol)
+        if not key:
+            continue
+        try:
+            deadline_value = float(deadline)
+        except (TypeError, ValueError):
+            continue
+        if math.isfinite(deadline_value) and deadline_value > current:
+            normalized[key] = deadline_value
+    return normalized
+
+
+def load_reminder_ignore_state(
+    path: Path = REMINDER_IGNORE_STATE_PATH,
+    *,
+    now: Any = None,
+) -> Dict[str, float]:
+    """Load active per-symbol desktop reminder silences; malformed data fails open."""
+    target = Path(path)
+    if not target.exists():
+        return {}
+    try:
+        payload = json.loads(target.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    return _normalize_reminder_state(payload, now=now)
+
+
+def _persist_reminder_ignore_state(
+    state: Dict[str, Any],
+    *,
+    path: Path,
+    now: Any = None,
+) -> Dict[str, float]:
+    active: Dict[str, float] = {}
+    current = _reminder_timestamp(now)
+    for symbol, deadline in (state or {}).items():
+        key = _normalize_reminder_symbol(symbol)
+        if not key:
+            continue
+        try:
+            deadline_value = float(deadline)
+        except (TypeError, ValueError):
+            continue
+        if math.isfinite(deadline_value) and deadline_value > current:
+            active[key] = deadline_value
+    from utils.safe_persistence import atomic_write_json
+
+    atomic_write_json(
+        Path(path),
+        {"version": 1, "ignored_until": dict(sorted(active.items()))},
+    )
+    return active
+
+
+def ignore_symbol_for_window(
+    symbol: Any,
+    *,
+    now: Any = None,
+    ttl_seconds: float = REMINDER_IGNORE_TTL_SECONDS,
+    path: Path = REMINDER_IGNORE_STATE_PATH,
+    state: Optional[Dict[str, float]] = None,
+) -> Dict[str, float]:
+    """Silence one symbol for a bounded period and persist the result."""
+    key = _normalize_reminder_symbol(symbol)
+    if not key:
+        raise ValueError("缺少标的代码")
+    ttl = float(ttl_seconds)
+    if not math.isfinite(ttl) or ttl <= 0:
+        raise ValueError("忽略时长必须大于零")
+    current = _reminder_timestamp(now)
+    active = dict(state or {}) if state is not None else load_reminder_ignore_state(path, now=current)
+    active[key] = current + ttl
+    return _persist_reminder_ignore_state(active, path=Path(path), now=current)
+
+
+def clear_symbol_reminder_ignore(
+    symbol: Any,
+    *,
+    now: Any = None,
+    path: Path = REMINDER_IGNORE_STATE_PATH,
+    state: Optional[Dict[str, float]] = None,
+) -> Dict[str, float]:
+    key = _normalize_reminder_symbol(symbol)
+    if not key:
+        return dict(state or {})
+    current = _reminder_timestamp(now)
+    active = dict(state or {}) if state is not None else load_reminder_ignore_state(path, now=current)
+    active.pop(key, None)
+    return _persist_reminder_ignore_state(active, path=Path(path), now=current)
+
+
+def is_symbol_reminder_ignored(
+    symbol: Any,
+    *,
+    now: Any = None,
+    state: Optional[Dict[str, float]] = None,
+    path: Path = REMINDER_IGNORE_STATE_PATH,
+) -> bool:
+    key = _normalize_reminder_symbol(symbol)
+    if not key:
+        return False
+    active = state if state is not None else load_reminder_ignore_state(path, now=now)
+    current = _reminder_timestamp(now)
+    try:
+        deadline = float(active.get(key, 0.0))
+        return math.isfinite(deadline) and deadline > current
+    except (AttributeError, TypeError, ValueError):
+        return False
+
+
+def reminder_ignore_remaining_seconds(
+    symbol: Any,
+    *,
+    now: Any = None,
+    state: Optional[Dict[str, float]] = None,
+    path: Path = REMINDER_IGNORE_STATE_PATH,
+) -> int:
+    key = _normalize_reminder_symbol(symbol)
+    if not key:
+        return 0
+    active = state if state is not None else load_reminder_ignore_state(path, now=now)
+    current = _reminder_timestamp(now)
+    try:
+        deadline = float(active.get(key, 0.0))
+        if not math.isfinite(deadline):
+            return 0
+        return max(0, int(math.ceil(deadline - current)))
+    except (AttributeError, TypeError, ValueError):
+        return 0
 
 
 def _clean_sector(value: Any) -> str:
@@ -1353,6 +1510,14 @@ def _run_latest_committee_for_row(row: Dict[str, Any]) -> Dict[str, Any]:
 
 __all__ = [
     "_safe_num",
+    "REMINDER_IGNORE_STATE_PATH",
+    "REMINDER_IGNORE_TTL_SECONDS",
+    "_normalize_reminder_symbol",
+    "load_reminder_ignore_state",
+    "ignore_symbol_for_window",
+    "clear_symbol_reminder_ignore",
+    "is_symbol_reminder_ignored",
+    "reminder_ignore_remaining_seconds",
     "_remote_api_headers",
     "_stop_background_services",
     "_fmt_price",

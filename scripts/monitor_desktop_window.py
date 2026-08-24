@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import queue
 import sys
@@ -70,6 +71,12 @@ class MonitorWindow(MonitorNewsMixin, MonitorSelectionMixin, MonitorTradeMixin, 
         self.drag_origin: Optional[tuple[int, int]] = None
         self.pinned = False
         self.previous_action_symbols: set[str] = set()
+        self.reminder_ignore_state_path = REMINDER_IGNORE_STATE_PATH
+        self.reminder_ignore_state: Dict[str, float] = (
+            {}
+            if demo
+            else load_reminder_ignore_state(self.reminder_ignore_state_path)
+        )
         self.current_rows: List[Dict[str, Any]] = []
         self.stock_page_index = 0
         self.last_payload_signature: tuple[Any, ...] = ()
@@ -1171,6 +1178,36 @@ class MonitorWindow(MonitorNewsMixin, MonitorSelectionMixin, MonitorTradeMixin, 
             remove_btn.bind("<Double-Button-1>", lambda _event: "break")
             remove_btn.bind("<Enter>", lambda _event, w=remove_btn: w.configure(bg="#fee4e2", fg=DOWN_FG))
             remove_btn.bind("<Leave>", lambda _event, w=remove_btn: w.configure(bg="#eef2f7" if bg == CARD_BG else bg, fg=MUTED))
+        ignored = is_symbol_reminder_ignored(
+            symbol,
+            state=self._active_reminder_ignore_state(),
+        )
+        ignore_btn = tk.Label(
+            top,
+            text="恢复" if ignored else "忽略",
+            bg="#e1e6ee" if ignored else ("#eef2f7" if bg == CARD_BG else bg),
+            fg=MUTED,
+            font=("Microsoft YaHei UI", 8, "bold"),
+            width=4,
+            padx=2,
+            pady=2,
+            cursor="hand2",
+        )
+        ignore_btn._skip_card_bindings = True  # type: ignore[attr-defined]
+        ignore_btn.pack(side=tk.RIGHT, padx=(6, 0))
+        ignore_btn.bind("<Button-1>", lambda event, r=row: self._toggle_reminder_ignore(r, event))
+        ignore_btn.bind("<Double-Button-1>", lambda _event: "break")
+        ignore_btn.bind(
+            "<Enter>",
+            lambda _event, w=ignore_btn: w.configure(bg="#d5deeb", fg=TEXT),
+        )
+        ignore_btn.bind(
+            "<Leave>",
+            lambda _event, w=ignore_btn, active=ignored: w.configure(
+                bg="#e1e6ee" if active else ("#eef2f7" if bg == CARD_BG else bg),
+                fg=MUTED,
+            ),
+        )
         tk.Label(
             top,
             text=_operation_summary(row),
@@ -1346,6 +1383,81 @@ class MonitorWindow(MonitorNewsMixin, MonitorSelectionMixin, MonitorTradeMixin, 
             messagebox.showerror("取消关注失败", str(exc), parent=self.root)
         return "break"
 
+    def _active_reminder_ignore_state(self) -> Dict[str, float]:
+        now = datetime.now().timestamp()
+        active: Dict[str, float] = {}
+        for symbol, deadline in (getattr(self, "reminder_ignore_state", {}) or {}).items():
+            key = _normalize_reminder_symbol(symbol)
+            try:
+                deadline_value = float(deadline)
+            except (TypeError, ValueError):
+                continue
+            if key and math.isfinite(deadline_value) and deadline_value > now:
+                active[key] = deadline_value
+        self.reminder_ignore_state = active
+        return active
+
+    def _forget_reminder_alerts(self, symbol: str) -> None:
+        key = _normalize_reminder_symbol(symbol)
+        if not key:
+            return
+        action_id = f"action:{key}"
+        sentinel_prefix = f"sentinel:{key}:"
+        previous = getattr(self, "previous_action_symbols", set()) or set()
+        self.previous_action_symbols = {
+            alert_id
+            for alert_id in previous
+            if alert_id != action_id and not str(alert_id).startswith(sentinel_prefix)
+        }
+
+    def _toggle_reminder_ignore(
+        self,
+        row: Dict[str, Any],
+        event: Optional[tk.Event] = None,
+    ) -> str:
+        if event is not None:
+            try:
+                event.widget.focus_set()
+            except Exception:
+                pass
+        symbol = _normalize_reminder_symbol(row.get("symbol"))
+        if not symbol:
+            return "break"
+        name = str(row.get("name") or symbol)
+        state = self._active_reminder_ignore_state()
+        ignored = is_symbol_reminder_ignored(symbol, state=state)
+        try:
+            if getattr(self, "demo", False):
+                if ignored:
+                    state.pop(symbol, None)
+                else:
+                    state[symbol] = datetime.now().timestamp() + REMINDER_IGNORE_TTL_SECONDS
+                self.reminder_ignore_state = state
+            elif ignored:
+                self.reminder_ignore_state = clear_symbol_reminder_ignore(
+                    symbol,
+                    path=self.reminder_ignore_state_path,
+                    state=state,
+                )
+            else:
+                self.reminder_ignore_state = ignore_symbol_for_window(
+                    symbol,
+                    path=self.reminder_ignore_state_path,
+                    state=state,
+                )
+        except Exception as exc:  # noqa: BLE001
+            self.status_text.set(f"提醒设置失败: {exc}")
+            messagebox.showerror("提醒设置失败", str(exc), parent=self.root)
+            return "break"
+
+        self._forget_reminder_alerts(symbol)
+        status = f"{name} 已恢复提醒" if ignored else f"{name} 已忽略提醒 1 小时"
+        self.status_text.set(status)
+        self._render_rows()
+        self._resize_to_rows(len(self._filtered_rows()))
+        self._maybe_alert(self.current_rows)
+        return "break"
+
     def _set_hover_stack(self, stack: str) -> None:
         self.hover_stack = stack
 
@@ -1361,9 +1473,12 @@ class MonitorWindow(MonitorNewsMixin, MonitorSelectionMixin, MonitorTradeMixin, 
 
     def _maybe_alert(self, rows: List[Dict[str, Any]]) -> None:
         alert_ids: set[str] = set()
+        ignore_state = self._active_reminder_ignore_state()
         for row in rows:
-            symbol = str(row.get("symbol") or "")
+            symbol = _normalize_reminder_symbol(row.get("symbol"))
             if not symbol:
+                continue
+            if is_symbol_reminder_ignored(symbol, state=ignore_state):
                 continue
             if row.get("state") == "action_required":
                 alert_ids.add(f"action:{symbol}")
