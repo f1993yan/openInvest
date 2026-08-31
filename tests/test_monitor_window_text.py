@@ -4,6 +4,8 @@ import sqlite3
 import pytest
 from scripts.monitor_window_text import (
     _behavioral_factor_badge,
+    _behavioral_factor_inline_timing,
+    _behavioral_factor_timing,
     _behavioral_factor_targets,
     _beginner_summary_lines,
     _card_bg,
@@ -177,10 +179,66 @@ def test_behavioral_factor_targets_are_sorted_by_model_target_weight():
     assert [row["symbol"] for row in _behavioral_factor_targets(rows)] == ["000811", "600396"]
 
 
+def test_behavioral_factor_timing_distinguishes_scoring_from_activation():
+    update_text, effective_text, pending = _behavioral_factor_timing(
+        {
+            "score_updated_at": "2026-08-30T22:00:03.240993",
+            "target_effective_at": "2026-09-01T09:30+08:00",
+            "pending_target_change": True,
+        }
+    )
+
+    assert update_text == "评分更新 08-30 22:00"
+    assert effective_text == "预计生效 09-01 09:30"
+    assert pending is True
+
+
+def test_behavioral_factor_timing_formats_active_legacy_date():
+    update_text, effective_text, pending = _behavioral_factor_timing(
+        {
+            "score_updated_at": "2026-08-24T13:47:36+08:00",
+            "target_effective_at": "2026-08-24",
+            "pending_target_change": False,
+        }
+    )
+
+    assert update_text == "评分更新 08-24 13:47"
+    assert effective_text == "已生效 08-24"
+    assert pending is False
+
+
+def test_behavioral_factor_inline_timing_collapses_equal_times():
+    text, pending = _behavioral_factor_inline_timing(
+        {
+            "score_updated_at": "2026-08-31T10:00:18+08:00",
+            "target_effective_at": "2026-08-31T10:00:18+08:00",
+            "pending_target_change": False,
+        }
+    )
+
+    assert text == "08-31 10:00 更新并生效"
+    assert pending is False
+
+
+def test_behavioral_factor_inline_timing_keeps_pending_dates():
+    text, pending = _behavioral_factor_inline_timing(
+        {
+            "score_updated_at": "2026-08-30T22:00:03+08:00",
+            "target_effective_at": "2026-09-01T09:30+08:00",
+            "pending_target_change": True,
+        }
+    )
+
+    assert text == "更新08-30 22:00→09-01 09:30生效"
+    assert pending is True
+
+
 def test_behavioral_factor_helpers_are_exported_for_desktop_wildcard_import():
     import scripts.monitor_window_text as text_helpers
 
     assert "_behavioral_factor_badge" in text_helpers.__all__
+    assert "_behavioral_factor_inline_timing" in text_helpers.__all__
+    assert "_behavioral_factor_timing" in text_helpers.__all__
     assert "_behavioral_factor_targets" in text_helpers.__all__
 
 

@@ -156,6 +156,8 @@ def test_monitor_target_membership_is_frozen_until_five_sessions(monkeypatch, tm
 
     assert saved["rebalance_sessions"] == 5
     assert saved["rebalance_date"] == str(max(frame.index[-1] for frame in active.values()))[:10]
+    assert saved["score_updated_at"] == saved["targets_effective_at"]
+    assert saved["targets_effective_at"].endswith("+08:00")
     assert saved["selection_scope"] == "factor_model_target_portfolio"
     assert saved["represents_account_holdings"] is False
     assert all("target_membership_frozen_from_" not in row["reason"] for row in refreshed.values())

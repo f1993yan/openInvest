@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import re
+from datetime import datetime
 from typing import Any, Dict, List, Optional
 
 from core.buy_signal_miner import buy_signal_summary_text
@@ -167,6 +168,57 @@ def _behavioral_factor_targets(rows: List[Dict[str, Any]]) -> List[Dict[str, Any
             str(row.get("symbol") or ""),
         ),
     )[:4]
+
+
+def _compact_factor_time(value: Any) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return "-"
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return text
+    has_clock = "T" in text or " " in text
+    return parsed.strftime("%m-%d %H:%M" if has_clock else "%m-%d")
+
+
+def _behavioral_factor_timing(summary: Dict[str, Any]) -> tuple[str, str, bool]:
+    """Format factor scoring and target activation times for the compact bar."""
+    summary = summary if isinstance(summary, dict) else {}
+    updated = _compact_factor_time(summary.get("score_updated_at"))
+    effective = _compact_factor_time(summary.get("target_effective_at"))
+    pending = bool(summary.get("pending_target_change"))
+    effective_prefix = "预计生效" if pending else "已生效"
+    return f"评分更新 {updated}", f"{effective_prefix} {effective}", pending
+
+
+def _behavioral_factor_inline_timing(summary: Dict[str, Any]) -> tuple[str, bool]:
+    """Combine factor scoring and activation into one compact timeline."""
+    summary = summary if isinstance(summary, dict) else {}
+    updated = _compact_factor_time(summary.get("score_updated_at"))
+    effective = _compact_factor_time(summary.get("target_effective_at"))
+    pending = bool(summary.get("pending_target_change"))
+    if updated == "-" and effective == "-":
+        return "更新- | 生效-", pending
+    if updated == effective:
+        return f"{updated} 更新并生效", pending
+
+    updated_parts = updated.split(" ", 1)
+    effective_parts = effective.split(" ", 1)
+    same_date = (
+        len(updated_parts) == 2
+        and len(effective_parts) == 2
+        and updated_parts[0] == effective_parts[0]
+    )
+    if same_date:
+        separator = "→" if pending else " | "
+        return (
+            f"{updated_parts[0]} 更新{updated_parts[1]}"
+            f"{separator}{effective_parts[1]}生效",
+            pending,
+        )
+    separator = "→" if pending else " | "
+    return f"更新{updated}{separator}{effective}生效", pending
 
 
 def _operation_summary(row: Dict[str, Any]) -> str:
@@ -677,6 +729,8 @@ __all__ = [
     "_sector_summary",
     "_behavioral_factor_badge",
     "_behavioral_factor_targets",
+    "_behavioral_factor_timing",
+    "_behavioral_factor_inline_timing",
     "_operation_summary",
     "_llm_review_lots_hint",
     "_verdict_label",

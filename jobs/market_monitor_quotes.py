@@ -143,6 +143,9 @@ def build_behavioral_factor_context(
     }
 
     if refresh_targets:
+        target_refresh_at = datetime.now(
+            ZoneInfo("Asia/Shanghai")
+        ).isoformat(timespec="seconds")
         targets = {
             symbol: {
                 "selected": assessment.selected,
@@ -156,6 +159,8 @@ def build_behavioral_factor_context(
                 **state_semantics,
                 "rebalance_date": latest_date,
                 "rebalance_sessions": 5,
+                "score_updated_at": target_refresh_at,
+                "targets_effective_at": target_refresh_at,
                 "targets": targets,
             })
         except Exception as exc:

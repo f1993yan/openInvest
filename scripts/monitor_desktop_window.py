@@ -26,6 +26,11 @@ _IMPORT_ROOT = Path(__file__).resolve().parents[1]
 if str(_IMPORT_ROOT) not in sys.path:
     sys.path.insert(0, str(_IMPORT_ROOT))
 
+from core.behavioral_snapshot import (
+    DEFAULT_BEHAVIORAL_ASSESSMENTS_PATH,
+    DEFAULT_BEHAVIORAL_STATE_PATH,
+    enrich_snapshot_with_behavioral_targets,
+)
 from scripts.monitor_window_constants import *
 from scripts.monitor_window_services import *
 from scripts.monitor_window_text import *
@@ -78,6 +83,7 @@ class MonitorWindow(MonitorNewsMixin, MonitorSelectionMixin, MonitorTradeMixin, 
             else load_reminder_ignore_state(self.reminder_ignore_state_path)
         )
         self.current_rows: List[Dict[str, Any]] = []
+        self.current_factor_summary: Dict[str, Any] = {}
         self.stock_page_index = 0
         self.last_payload_signature: tuple[Any, ...] = ()
         self.watched_mtime_signature: tuple[Any, ...] = ()
@@ -103,6 +109,10 @@ class MonitorWindow(MonitorNewsMixin, MonitorSelectionMixin, MonitorTradeMixin, 
         self.filter_text = tk.StringVar(value="")
         self.status_text = tk.StringVar(value="等待监控快照")
         self.last_update_text = tk.StringVar(value="更新 -")
+        self.factor_timing_text = tk.StringVar(value="更新- | 生效-")
+        self.factor_title_label: Optional[tk.Label] = None
+        self.factor_timing_label: Optional[tk.Label] = None
+        self.factor_target_labels: List[tuple[tk.Label, str]] = []
         self.trading_mode_text = tk.StringVar(value="主动盈利")
         self.trading_mode_switch: Optional[ModeSlider] = None
         self.action_email_enabled = True
@@ -294,15 +304,28 @@ class MonitorWindow(MonitorNewsMixin, MonitorSelectionMixin, MonitorTradeMixin, 
 
         self.factor_targets_bar = tk.Frame(self.root, bg=BOARD_BG, padx=14)
         self.factor_targets_bar.pack(fill=tk.X, pady=(3, 0))
-        tk.Label(
+        self.factor_title_label = tk.Label(
             self.factor_targets_bar,
-            text="因子目标前四",
+            text="因子前四",
             bg=BOARD_BG,
             fg=MUTED,
             font=("Microsoft YaHei UI", 8, "bold"),
-        ).pack(side=tk.LEFT, padx=(0, 7))
+        )
+        self.factor_title_label.pack(side=tk.LEFT, padx=(0, 5))
+        self.factor_timing_label = tk.Label(
+            self.factor_targets_bar,
+            textvariable=self.factor_timing_text,
+            bg=BOARD_BG,
+            fg=MUTED,
+            font=("Microsoft YaHei UI", 8),
+        )
+        self.factor_timing_label.pack(side=tk.RIGHT, padx=(5, 0))
         self.factor_targets_frame = tk.Frame(self.factor_targets_bar, bg=BOARD_BG)
         self.factor_targets_frame.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        self.factor_targets_bar.bind(
+            "<Configure>",
+            lambda event: self._layout_factor_target_row(event.width),
+        )
 
         self.selection_bar = tk.Frame(self.root, bg=BOARD_BG, padx=12)
         self.selection_bar.pack(side=tk.BOTTOM, fill=tk.X, pady=(0, 7))
@@ -481,6 +504,8 @@ class MonitorWindow(MonitorNewsMixin, MonitorSelectionMixin, MonitorTradeMixin, 
             _path_mtime(self.snapshot_path),
             _path_mtime(ROOT / "jobs" / "market_monitor_config.json"),
             _path_mtime(DAILY_SELECTION_LATEST),
+            _path_mtime(DEFAULT_BEHAVIORAL_STATE_PATH),
+            _path_mtime(DEFAULT_BEHAVIORAL_ASSESSMENTS_PATH),
             self._weekend_news_files_signature(),
         )
 
@@ -500,7 +525,9 @@ class MonitorWindow(MonitorNewsMixin, MonitorSelectionMixin, MonitorTradeMixin, 
                 "monitor_action_email_enabled": True,
             }
             if self.demo
-            else _load_snapshot(self.snapshot_path)
+            else enrich_snapshot_with_behavioral_targets(
+                _load_snapshot(self.snapshot_path)
+            )
         )
         mode_payload = payload.get("trading_mode") if self.demo else _current_trading_mode()
         mode_payload = mode_payload or _current_trading_mode()
@@ -538,6 +565,13 @@ class MonitorWindow(MonitorNewsMixin, MonitorSelectionMixin, MonitorTradeMixin, 
             for row in rows
         )
         counts = payload.get("counts") or {}
+        factor_summary = payload.get("behavioral_factor_summary") or {}
+        factor_timing_signature = (
+            factor_summary.get("score_updated_at"),
+            factor_summary.get("target_effective_at"),
+            factor_summary.get("target_effective_status"),
+            bool(factor_summary.get("pending_target_change")),
+        )
         payload_signature = (
             payload.get("generated_at"),
             payload.get("round_time"),
@@ -550,6 +584,7 @@ class MonitorWindow(MonitorNewsMixin, MonitorSelectionMixin, MonitorTradeMixin, 
             email_enabled,
             counts.get("symbols", len(rows)),
             counts.get("action_required", 0),
+            factor_timing_signature,
             stock_signature,
         )
         if payload_signature == self.last_payload_signature:
@@ -565,6 +600,7 @@ class MonitorWindow(MonitorNewsMixin, MonitorSelectionMixin, MonitorTradeMixin, 
         self.stock_content_signature = stock_signature
         self.last_payload_signature = payload_signature
         self.current_rows = rows
+        self.current_factor_summary = dict(factor_summary)
         self.status_text.set(
             f"{counts.get('symbols', len(rows))} 标的 / {counts.get('action_required', 0)} 操作"
         )
@@ -577,7 +613,7 @@ class MonitorWindow(MonitorNewsMixin, MonitorSelectionMixin, MonitorTradeMixin, 
             payload.get("total_assets_cny"),
             payload.get("t2_pending_cash_cny", 0),
         )
-        self._render_factor_targets(rows)
+        self._render_factor_targets(rows, factor_summary)
         self._render_rows()
         self._resize_to_rows(len(self._filtered_rows()))
         self._redraw_action_fabs()
@@ -645,7 +681,7 @@ class MonitorWindow(MonitorNewsMixin, MonitorSelectionMixin, MonitorTradeMixin, 
                 rows.append(row)
             self.current_rows = _sort_stock_rows(rows)
             self.stock_page_index = 0
-            self._render_factor_targets(self.current_rows)
+            self._render_factor_targets(self.current_rows, self.current_factor_summary)
             self._render_rows()
             self._resize_to_rows(len(self._filtered_rows()))
             self.status_text.set(
@@ -869,7 +905,7 @@ class MonitorWindow(MonitorNewsMixin, MonitorSelectionMixin, MonitorTradeMixin, 
     def _resize_to_rows(self, row_count: int) -> None:
         screen_h = self.root.winfo_screenheight()
         screen_w = self.root.winfo_screenwidth()
-        # Keep the fixed-height stock card intact after adding the factor-target bar.
+        # Keep the fixed-height stock card intact below the compact factor row.
         height = min(444 if row_count > 1 else 414, max(330, screen_h - 120))
         width = min(max(330, screen_w // 4), 420)
         x = self.root.winfo_x() if self.root.winfo_x() >= 0 else 24
@@ -1004,9 +1040,20 @@ class MonitorWindow(MonitorNewsMixin, MonitorSelectionMixin, MonitorTradeMixin, 
         self.stock_page_index = 0
         self._render_rows()
 
-    def _render_factor_targets(self, rows: List[Dict[str, Any]]) -> None:
+    def _render_factor_targets(
+        self,
+        rows: List[Dict[str, Any]],
+        summary: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        timing_text, pending = _behavioral_factor_inline_timing(
+            summary or getattr(self, "current_factor_summary", {})
+        )
+        self.factor_timing_text.set(timing_text)
+        if self.factor_timing_label is not None:
+            self.factor_timing_label.configure(fg=TRIGGER_FG if pending else MUTED)
         for child in self.factor_targets_frame.winfo_children():
             child.destroy()
+        self.factor_target_labels = []
         targets = _behavioral_factor_targets(rows)
         if not targets:
             tk.Label(
@@ -1019,19 +1066,35 @@ class MonitorWindow(MonitorNewsMixin, MonitorSelectionMixin, MonitorTradeMixin, 
             return
         for row in targets:
             symbol = str(row.get("symbol") or "")
-            name = _short(row.get("name") or symbol, 4)
+            name = str(row.get("name") or symbol)
             label = tk.Label(
                 self.factor_targets_frame,
-                text=name,
+                text=_short(name, 4),
                 bg="#e7f6ed",
                 fg=UP_FG,
                 font=("Microsoft YaHei UI", 8, "bold"),
-                padx=5,
+                padx=2,
                 pady=2,
                 cursor="hand2",
             )
-            label.pack(side=tk.LEFT, padx=(0, 4))
+            label.pack(side=tk.LEFT, padx=(0, 3))
             label.bind("<Button-1>", lambda _event, value=symbol: self._show_factor_target(value))
+            self.factor_target_labels.append((label, name))
+        self._layout_factor_target_row(self.factor_targets_bar.winfo_width())
+
+    def _layout_factor_target_row(self, width: int) -> None:
+        compact = int(width or self.root.winfo_width()) < 370
+        if self.factor_title_label is not None:
+            self.factor_title_label.configure(text="因子" if compact else "因子前四")
+        timing_is_long = len(self.factor_timing_text.get()) > 24
+        if self.factor_timing_label is not None:
+            self.factor_timing_label.configure(
+                font=("Microsoft YaHei UI", 7 if compact else 8)
+            )
+        name_limit = 2 if compact or timing_is_long else 4
+        for label, name in self.factor_target_labels:
+            if label.winfo_exists():
+                label.configure(text=str(name).strip()[:name_limit])
 
     def _show_factor_target(self, symbol: str) -> None:
         if self.filter_text.get():
