@@ -84,12 +84,152 @@ def call_committee(symbol: str, name: str, market: str,
         return {"success": False, "symbol": symbol, "error": str(e)}
 
 
+BEHAVIORAL_TIMEZONE = ZoneInfo("Asia/Shanghai")
+BEHAVIORAL_REBALANCE_SESSIONS = 5
+
+
+def _parse_factor_timestamp(value: Any) -> Optional[datetime]:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=BEHAVIORAL_TIMEZONE)
+    return parsed.astimezone(BEHAVIORAL_TIMEZONE)
+
+
+def _next_behavioral_session_open(moment: datetime) -> str:
+    """Return the next XSHG session open after a factor calculation."""
+    import exchange_calendars as xcal
+
+    local_moment = moment.astimezone(BEHAVIORAL_TIMEZONE)
+    calendar = xcal.get_calendar("XSHG")
+    session = calendar.date_to_session(local_moment.date().isoformat(), direction="next")
+    session_date = session.date()
+    if session_date <= local_moment.date() and local_moment.time() >= clock_time(9, 30):
+        session = calendar.next_session(session)
+    return datetime.combine(
+        session.date(),
+        clock_time(9, 30),
+        tzinfo=BEHAVIORAL_TIMEZONE,
+    ).isoformat(timespec="minutes")
+
+
+def _factor_targets(assessments: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
+    return {
+        str(symbol): {
+            "selected": bool(getattr(assessment, "selected", False))
+            if not isinstance(assessment, dict)
+            else bool(assessment.get("selected", False)),
+            "target_weight_pct": float(
+                getattr(assessment, "target_weight_pct", 0.0)
+                if not isinstance(assessment, dict)
+                else assessment.get("target_weight_pct", 0.0)
+                or 0.0
+            ),
+        }
+        for symbol, assessment in assessments.items()
+    }
+
+
+def _read_behavioral_state(state_file: Path) -> Dict[str, Any]:
+    try:
+        payload = json.loads(state_file.read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError):
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _activate_due_behavioral_targets(
+    state_file: Path,
+    state: Dict[str, Any],
+    *,
+    now: datetime,
+) -> Dict[str, Any]:
+    pending = state.get("pending_target_update")
+    if not isinstance(pending, dict):
+        return state
+    effective_at = _parse_factor_timestamp(pending.get("targets_effective_at"))
+    if effective_at is None or now.astimezone(BEHAVIORAL_TIMEZONE) < effective_at:
+        return state
+
+    from utils.safe_persistence import atomic_write_json
+
+    activated = {
+        **state,
+        "rebalance_date": pending.get("rebalance_date", state.get("rebalance_date", "")),
+        "score_updated_at": pending.get("score_updated_at", state.get("score_updated_at", "")),
+        "targets_effective_at": pending.get("targets_effective_at", ""),
+        "targets": pending.get("targets", {}),
+        "activation_policy": "next_trading_session",
+    }
+    activated.pop("pending_target_update", None)
+    try:
+        atomic_write_json(state_file, activated)
+    except Exception as exc:
+        log.warning(f"A股行为因子待生效目标激活状态写入失败: {exc}")
+    return activated
+
+
+def schedule_behavioral_factor_targets(
+    assessments: Dict[str, Any],
+    *,
+    latest_date: str,
+    score_updated_at: Optional[str] = None,
+    state_path: Optional[Path] = None,
+    now: Optional[datetime] = None,
+) -> Dict[str, Any]:
+    """Persist Sunday scores for activation at the next trading-session open."""
+    from jobs.market_monitor_common import _PROJECT_ROOT
+    from utils.safe_persistence import atomic_write_json
+
+    state_file = state_path or (_PROJECT_ROOT / "data" / "behavioral_factor_state.json")
+    previous = _read_behavioral_state(state_file)
+    calculation_time = (now or datetime.now(BEHAVIORAL_TIMEZONE)).astimezone(
+        BEHAVIORAL_TIMEZONE
+    )
+    score_time = score_updated_at or calculation_time.isoformat(timespec="seconds")
+    effective_at = _next_behavioral_session_open(calculation_time)
+    targets = _factor_targets(assessments)
+    pending = {
+        "rebalance_date": str(latest_date or ""),
+        "score_updated_at": score_time,
+        "targets_effective_at": effective_at,
+        "targets": targets,
+    }
+    state = {
+        "model": "a_share_behavioral_v1",
+        "selection_scope": "factor_model_target_portfolio",
+        "represents_account_holdings": False,
+        "selection_semantics": (
+            "selected means membership in the factor model target portfolio; "
+            "it never means a real or committee account holding"
+        ),
+        "rebalance_sessions": BEHAVIORAL_REBALANCE_SESSIONS,
+        "activation_policy": "next_trading_session",
+        "rebalance_date": str(previous.get("rebalance_date") or ""),
+        "score_updated_at": str(previous.get("score_updated_at") or ""),
+        "targets_effective_at": str(previous.get("targets_effective_at") or ""),
+        "targets": dict(previous.get("targets") or {}),
+        "pending_target_update": pending,
+    }
+    if not state["targets"] and _parse_factor_timestamp(effective_at) <= calculation_time:
+        state.update(pending)
+        state.pop("pending_target_update", None)
+    atomic_write_json(state_file, state)
+    return state
+
+
 def build_behavioral_factor_context(
     stocks: List[Dict[str, Any]],
     *,
     state_path: Optional[Path] = None,
+    now: Optional[datetime] = None,
 ) -> Dict[str, Dict[str, Any]]:
-    """Build a shared cross-section with a persistent five-session target."""
+    """Build a shared cross-section using the currently active target state."""
     symbols = sorted({
         str(stock.get("symbol") or "").strip().upper()
         for stock in stocks
@@ -119,12 +259,15 @@ def build_behavioral_factor_context(
         return {}
 
     state_file = state_path or (_PROJECT_ROOT / "data" / "behavioral_factor_state.json")
-    previous: Dict[str, Any] = {}
-    try:
-        if state_file.exists():
-            previous = json.loads(state_file.read_text(encoding="utf-8"))
-    except Exception as exc:
-        log.warning(f"A股行为因子调仓状态不可读，将重建: {exc}")
+    previous = _read_behavioral_state(state_file)
+    calculation_time = (now or datetime.now(BEHAVIORAL_TIMEZONE)).astimezone(
+        BEHAVIORAL_TIMEZONE
+    )
+    previous = _activate_due_behavioral_targets(
+        state_file,
+        previous,
+        now=calculation_time,
+    )
 
     longest = max(histories.values(), key=len)
     calendar = sorted(set(str(value)[:10] for value in longest.index))
@@ -132,7 +275,11 @@ def build_behavioral_factor_context(
     previous_date = str(previous.get("rebalance_date") or "")
     sessions_since = sum(1 for value in calendar if previous_date and value > previous_date)
     previous_targets = dict(previous.get("targets") or {})
-    refresh_targets = not previous_targets or not previous_date or sessions_since >= 5
+    scheduled_policy = previous.get("activation_policy") == "next_trading_session"
+    refresh_targets = (
+        not scheduled_policy
+        and (not previous_targets or not previous_date or sessions_since >= BEHAVIORAL_REBALANCE_SESSIONS)
+    )
     state_semantics = {
         "selection_scope": "factor_model_target_portfolio",
         "represents_account_holdings": False,
@@ -158,7 +305,7 @@ def build_behavioral_factor_context(
                 "model": "a_share_behavioral_v1",
                 **state_semantics,
                 "rebalance_date": latest_date,
-                "rebalance_sessions": 5,
+                "rebalance_sessions": BEHAVIORAL_REBALANCE_SESSIONS,
                 "score_updated_at": target_refresh_at,
                 "targets_effective_at": target_refresh_at,
                 "targets": targets,

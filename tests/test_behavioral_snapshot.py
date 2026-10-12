@@ -176,6 +176,51 @@ def test_snapshot_reports_pending_target_activation_after_five_sessions(tmp_path
     assert stale_summary["pending_target_change"] is False
 
 
+def test_snapshot_uses_scheduled_next_session_time(tmp_path):
+    state_path = tmp_path / "behavioral_factor_state.json"
+    assessments_path = tmp_path / "behavioral_factor_assessments.json"
+    state_path.write_text(
+        json.dumps(
+            {
+                "activation_policy": "next_trading_session",
+                "selection_scope": "factor_model_target_portfolio",
+                "rebalance_date": "2026-10-02",
+                "score_updated_at": "2026-10-02T10:00:00+08:00",
+                "targets_effective_at": "2026-10-02T10:00:00+08:00",
+                "targets": {"600001": {"selected": True, "target_weight_pct": 30.0}},
+                "pending_target_update": {
+                    "rebalance_date": "2026-10-09",
+                    "score_updated_at": "2026-10-11T22:00:03+08:00",
+                    "targets_effective_at": "2026-10-12T09:30+08:00",
+                    "targets": {"600002": {"selected": True, "target_weight_pct": 35.0}},
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    assessments_path.write_text(
+        json.dumps(
+            {
+                "date": "2026-10-11T22:00:03+08:00",
+                "selection_scope": "factor_model_target_portfolio",
+                "assessments": {"600002": {"selected": True, "target_weight_pct": 35.0}},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    summary = enrich_snapshot_with_behavioral_targets(
+        {"version": 1, "rows": []},
+        state_path=state_path,
+        assessments_path=assessments_path,
+    )["behavioral_factor_summary"]
+
+    assert summary["score_updated_at"] == "2026-10-11T22:00:03+08:00"
+    assert summary["target_effective_at"] == "2026-10-12T09:30+08:00"
+    assert summary["target_effective_status"] == "scheduled"
+    assert summary["pending_target_change"] is True
+
+
 def test_snapshot_is_unchanged_when_factor_state_is_missing(tmp_path):
     payload = {"version": 1, "rows": [{"symbol": "600000"}]}
 

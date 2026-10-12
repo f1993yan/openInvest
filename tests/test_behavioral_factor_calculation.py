@@ -32,7 +32,7 @@ def test_weekly_cache_lists_only_selected_top_four(monkeypatch, tmp_path):
             for index, stock in enumerate(stocks)
         },
     )
-    monkeypatch.setattr(job, "build_behavioral_factor_context", lambda _stocks: {})
+    monkeypatch.setattr(job, "schedule_behavioral_factor_targets", lambda *args, **kwargs: {})
     output = tmp_path / "behavioral_factor_assessments.json"
     monkeypatch.setattr(job, "ASSESSMENTS_FILE", output)
 

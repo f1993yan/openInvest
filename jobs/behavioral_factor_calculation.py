@@ -10,10 +10,11 @@ import json
 from pathlib import Path
 from typing import Dict, Any
 from datetime import datetime
+from zoneinfo import ZoneInfo
 
 from jobs.market_monitor_runtime import load_config
 from db.account_ledger import AccountLedger, REAL_ACCOUNT
-from jobs.market_monitor_quotes import build_behavioral_factor_context
+from jobs.market_monitor_quotes import schedule_behavioral_factor_targets
 
 log = logging.getLogger("jobs.behavioral_factor_calculation")
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -94,9 +95,10 @@ def run() -> str:
         if assessment.selected
     }
 
+    score_updated_at = datetime.now(ZoneInfo("Asia/Shanghai")).isoformat(timespec="seconds")
     try:
         atomic_write_json(assessments_file, {
-            "date": datetime.now().isoformat(),
+            "date": score_updated_at,
             "selection_scope": "factor_model_target_portfolio",
             "candidate_count": len(assessments),
             "selected_count": len(serializable),
@@ -112,11 +114,23 @@ def run() -> str:
         log.error(f"Failed to save assessments file: {exc}")
         return f"Failed to save output: {exc}"
 
-    # Also update the rebalance state data/behavioral_factor_state.json using the quotes helper
+    # Keep the previous target active until the next exchange session opens.
     try:
-        build_behavioral_factor_context(all_stocks)
-        log.info("Successfully updated behavioral factor state (rebalance anchors).")
+        latest_date = max(
+            str(value)[:10]
+            for frame in histories.values()
+            for value in frame.index
+        )
+        schedule_behavioral_factor_targets(
+            assessments,
+            latest_date=latest_date,
+            score_updated_at=score_updated_at,
+            now=datetime.fromisoformat(score_updated_at),
+        )
+        log.info(
+            "Successfully scheduled behavioral factor targets for the next trading-session open."
+        )
     except Exception as e:
-        log.warning(f"Failed to update behavioral factor state: {e}")
+        log.warning(f"Failed to schedule behavioral factor state: {e}")
 
     return f"Selected {len(serializable)} of {len(assessments)} symbols."

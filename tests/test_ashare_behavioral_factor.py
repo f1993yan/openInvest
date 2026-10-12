@@ -1,14 +1,22 @@
 from __future__ import annotations
 
+import json
+from datetime import datetime
+from zoneinfo import ZoneInfo
+
 import numpy as np
 import pandas as pd
 
 from core.ashare_behavioral_factor import (
+    AShareBehavioralAssessment,
     assess_behavioral_universe,
     build_behavioral_feature_table,
     score_behavioral_features,
 )
-from jobs.market_monitor_quotes import build_behavioral_factor_context
+from jobs.market_monitor_quotes import (
+    build_behavioral_factor_context,
+    schedule_behavioral_factor_targets,
+)
 
 
 def _history(seed: int, drift: float, *, periods: int = 380) -> pd.DataFrame:
@@ -161,3 +169,88 @@ def test_monitor_target_membership_is_frozen_until_five_sessions(monkeypatch, tm
     assert saved["selection_scope"] == "factor_model_target_portfolio"
     assert saved["represents_account_holdings"] is False
     assert all("target_membership_frozen_from_" not in row["reason"] for row in refreshed.values())
+
+
+def test_sunday_factor_scores_are_scheduled_for_next_session(tmp_path):
+    state = tmp_path / "behavioral_state.json"
+    state.write_text(
+        json.dumps(
+            {
+                "model": "a_share_behavioral_v1",
+                "rebalance_date": "2026-10-02",
+                "score_updated_at": "2026-10-02T10:00:00+08:00",
+                "targets_effective_at": "2026-10-02T10:00:00+08:00",
+                "targets": {"600001": {"selected": True, "target_weight_pct": 30.0}},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    scheduled = schedule_behavioral_factor_targets(
+        {
+            "600000": {"selected": True, "target_weight_pct": 35.0},
+            "600001": {"selected": False, "target_weight_pct": 0.0},
+        },
+        latest_date="2026-10-09",
+        now=datetime(2026, 10, 11, 22, 0, tzinfo=ZoneInfo("Asia/Shanghai")),
+        state_path=state,
+    )
+
+    assert scheduled["targets"]["600001"]["selected"] is True
+    assert scheduled["pending_target_update"]["targets"]["600000"]["selected"] is True
+    assert scheduled["pending_target_update"]["targets_effective_at"] == "2026-10-12T09:30+08:00"
+
+
+def test_scheduled_targets_activate_at_session_open(monkeypatch, tmp_path):
+    state = tmp_path / "behavioral_state.json"
+    active = {symbol: _history(index, 0.0002, periods=360) for index, symbol in enumerate(("600000", "600001"))}
+
+    monkeypatch.setattr("utils.market_data_provider.get_history_data", lambda symbol, _period: active[symbol])
+    monkeypatch.setattr(
+        "core.ashare_behavioral_factor.assess_behavioral_universe",
+        lambda _histories: {
+            "600000": AShareBehavioralAssessment(symbol="600000", selected=True, target_weight_pct=35.0, reason="test"),
+            "600001": AShareBehavioralAssessment(symbol="600001", selected=False, target_weight_pct=0.0, reason="test"),
+        },
+    )
+    state.write_text(
+        json.dumps(
+            {
+                "activation_policy": "next_trading_session",
+                "rebalance_date": "2026-10-02",
+                "score_updated_at": "2026-10-02T10:00:00+08:00",
+                "targets_effective_at": "2026-10-02T10:00:00+08:00",
+                "targets": {
+                    "600000": {"selected": False, "target_weight_pct": 0.0},
+                    "600001": {"selected": True, "target_weight_pct": 30.0},
+                },
+                "pending_target_update": {
+                    "rebalance_date": "2026-10-09",
+                    "score_updated_at": "2026-10-11T22:00:00+08:00",
+                    "targets_effective_at": "2026-10-12T09:30+08:00",
+                    "targets": {
+                        "600000": {"selected": True, "target_weight_pct": 35.0},
+                        "600001": {"selected": False, "target_weight_pct": 0.0},
+                    },
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    stocks = [{"symbol": symbol, "market": "a"} for symbol in active]
+
+    before = build_behavioral_factor_context(
+        stocks,
+        state_path=state,
+        now=datetime(2026, 10, 12, 9, 29, tzinfo=ZoneInfo("Asia/Shanghai")),
+    )
+    assert before["600001"]["selected"] is True
+
+    after = build_behavioral_factor_context(
+        stocks,
+        state_path=state,
+        now=datetime(2026, 10, 12, 9, 30, tzinfo=ZoneInfo("Asia/Shanghai")),
+    )
+    assert after["600000"]["selected"] is True
+    assert after["600001"]["selected"] is False
+    assert "pending_target_update" not in json.loads(state.read_text(encoding="utf-8"))

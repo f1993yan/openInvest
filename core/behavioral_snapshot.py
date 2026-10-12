@@ -165,16 +165,35 @@ def _timing_summary(
     assessment_timestamp = _parse_local_timestamp(assessment_updated_at)
     state_score_timestamp = _parse_local_timestamp(state_score_updated_at)
     state_timestamp = _parse_local_timestamp(state_reference_at)
+    pending_update = state.get("pending_target_update")
+    pending_score_timestamp = (
+        _parse_local_timestamp(pending_update.get("score_updated_at"))
+        if isinstance(pending_update, dict)
+        else None
+    )
+    pending_targets = (
+        _selected_target_weights(pending_update.get("targets") or {})
+        if isinstance(pending_update, dict)
+        else {}
+    )
     assessment_is_newer = bool(
         assessment_timestamp
         and (state_timestamp is None or assessment_timestamp > state_timestamp)
     )
-    pending = bool(
-        assessment_is_newer
-        and assessed_targets
-        and assessed_targets != current_targets
+    has_scheduled_update = bool(
+        isinstance(pending_update, dict)
+        and pending_score_timestamp
+        and (state_timestamp is None or pending_score_timestamp >= state_timestamp)
     )
-    if pending:
+    pending = bool(
+        (has_scheduled_update or assessment_is_newer)
+        and (pending_targets or assessed_targets)
+        and (pending_targets or assessed_targets) != current_targets
+    )
+    if has_scheduled_update:
+        target_effective_at = str(pending_update.get("targets_effective_at") or "")
+        effective_status = "scheduled"
+    elif pending:
         target_effective_at = _next_target_effective_at(
             rebalance_date,
             state.get("rebalance_sessions", 5),

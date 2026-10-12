@@ -73,7 +73,7 @@ optimizer_weight = 0.55 + 0.45 * reliability * p_positive
 expected_return_20d = (n * local_mean + 20 * prior_mean) / (n + 20)
 ```
 
-生产目标成员和目标权重每 5 个交易日更新，状态文件是：
+生产目标成员和目标权重由周日任务计算，并在下一个交易日 09:30 生效，状态文件是：
 
 ```text
 data/behavioral_factor_state.json
@@ -81,7 +81,9 @@ data/behavioral_factor_state.json
 
 该文件包含关注/持仓标的派生出的**因子模型目标组合**，属于本地生成数据，必须保持 git ignored。`targets.<symbol>.selected=true` 只表示标的进入因子目标前四，不表示真实账户或委员会影子账户已经持有。真实持仓只能以 `accounts.db` 的 `real` 账户为准。状态文件和 API 评估同时通过 `selection_scope=factor_model_target_portfolio`、`represents_account_holdings=false`（单标的评估中为 `represents_account_holding=false`）明确这个边界。
 
-五个交易日内保持的是“目标组合成员资格”，审计原因为 `target_membership_frozen_from_...`，不能写成 `held` 或翻译成“仍持有”。当前真实仓位距离模型目标不超过 5 个百分点时，因子动作降为 `HOLD`，降低十分钟委员会重复调仓。可靠的持仓风险卖出可以越过该免交易带。
+两次周日调仓之间保持的是“目标组合成员资格”，审计原因为 `target_membership_frozen_from_...`，不能写成 `held` 或翻译成“仍持有”。当前真实仓位距离模型目标不超过 5 个百分点时，因子动作降为 `HOLD`，降低十分钟委员会重复调仓。可靠的持仓风险卖出可以越过该免交易带。
+
+周日计算不会直接覆盖当前生效目标。它写入 `pending_target_update`，其中包含完整目标、评分时间、数据截止日和下一个 XSHG 交易日 09:30 的生效时间；监控轮次到达该时间后一次性提升为当前目标。这样周日评分与周一开盘之间不会提前交易，也不会再因为旧的五交易日锚点把生效时间推迟到下一周。旧版没有 `activation_policy` 或 `pending_target_update` 的状态仍按五交易日冻结规则兼容读取。
 
 ## 5. 调用链
 
@@ -97,7 +99,7 @@ jobs.market_monitor_runtime.run_monitor_round
 
 日度选股由 `core.daily_stock_selector.build_daily_selection()` 复用同一因子。新闻、板块资金和北向资金先生成候选池，行为因子再执行资格门与横截面排名；最终 `stocks`、`reference_pool` 和 `action_pool` 只包含 `behavioral_selected=true` 的前四成员。历史窗口为两年；综合分只负责排列这四只股票，因子占 40%，新闻、板块资金、基本面、路径风险、技术时点和现金可买约束仍保留，但不能把未进因子前四的标的重新加回结果。
 
-周日 `behavioral_factor_calculation` 仍在内部计算持仓与关注列表的完整横截面，以便委员会知道未入选标的的目标仓位为 0；面向用户的 `data/behavioral_factor_assessments.json` 只写入前四，并通过 `candidate_count` / `selected_count` 记录过滤规模。内部状态 `data/behavioral_factor_state.json` 保持完整，不作为选股名单展示。
+周日 `behavioral_factor_calculation` 仍在内部计算持仓与关注列表的完整横截面，以便委员会知道未入选标的的目标仓位为 0；面向用户的 `data/behavioral_factor_assessments.json` 只写入前四，并通过 `candidate_count` / `selected_count` 记录过滤规模。内部状态 `data/behavioral_factor_state.json` 保持完整，不作为选股名单展示。桌面摘要中的“更新”是周日评分完成时间，“生效”是下一个交易日 09:30；若当前仍处于周末或开盘前，显示的目标仍是上一版生效目标。
 
 生产决策不再回退旧技术收益模型。缺少有效因子时，后端先合并目标标的、真实持仓与关注列表补建横截面；仍失败则输出 `WAIT/factor_unavailable`，桌面显示灰色卡片并禁止交易。日度选股会过滤这类候选，并在摘要写入 `factor_unavailable_filtered`。
 
