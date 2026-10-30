@@ -6,7 +6,7 @@
 
 旧 A 股确定性回退把 regime、30 日动量、MA20/MA120、价格分位、RSI 和弱 LLM 先验直接相加。历史对照中它容易产生高换手，且单标的技术信号不能回答“当前横截面应该持有哪些股票”。
 
-生产基座现在把 A 股改为可审计的横截面行为因子。默认生产决策模式为 `algorithm_only`：A 股日常监控、详情分析和异步批量入口不再调用 LLM 委员会或 LLM 审核，直接由行为因子、基本面、regime、入场/出场点、右侧趋势闸门和确定性优化器给出可执行结论。需要恢复旧多角色辩论时，显式设置 `INVEST_COMMITTEE_MODE=llm`；需要 A 股算法、非 A 股 LLM 的混合口径时设置 `INVEST_COMMITTEE_MODE=auto`。
+生产基座把 A 股改为可审计的横截面行为因子。默认模式为 `algorithm_only`，不调用 LLM 委员会或审核。2026-10-30 起桌面/Direct 后端的执行仓位改由[交易成本正则化组合](18-transaction-cost-portfolio.md)联合求解，本文的因子公式、校准、前四成员与周日激活机制不变。Android Chaquopy 本地仍使用旧单股优化器。显式设置 `INVEST_COMMITTEE_MODE=llm` 可开启多角色解释，但不能覆盖新组合的剩余订单。
 
 ## 2. 因子公式
 
@@ -29,9 +29,9 @@ BehavioralScore = 0.65 Momentum
 R60 > 0  且  Close > EMA100
 ```
 
-合格标的按 `BehavioralScore` 取前四。目标仓位按 20 日年化波动率的倒数分配，总风险资产上限 95%，单股上限 35%。基本面可以对期望收益做有界调整，但不能再次放大行为因子的 35% 目标上限。
+合格标的按 `BehavioralScore` 取前四。因子参考仓位按 20 日年化波动率倒数分配，总风险资产上限 95%，单股上限 35%。桌面生产的新组合保留成员和校准收益，执行目标另行联合优化，不直接照搬逆波动参考仓位。
 
-## 3. 每标的独立优化器权重
+## 3. 兼容单股优化器权重
 
 优化器权重不是所有股票共用一个常数。每只股票回看最近 63 个交易日，历史模拟以 5 个交易日为一个目标持有块：
 
@@ -51,7 +51,7 @@ p_positive = NormalCDF(posterior_mean / posterior_se)
 optimizer_weight = 0.55 + 0.45 * reliability * p_positive
 ```
 
-最终权重限制在 `[0.55, 1.0]`。它表示优化器服从该标的行为因子目标仓位的强度，不是目标仓位本身，也不是买入手数。
+最终权重限制在 `[0.55, 1.0]`。旧单股路径用它控制服从因子目标的强度；新交易成本组合不使用此惩罚系数，但保留历史统计/接口字段。它不是目标仓位，也不是买入手数。
 
 响应审计字段包括：
 
@@ -81,7 +81,7 @@ data/behavioral_factor_state.json
 
 该文件包含关注/持仓标的派生出的**因子模型目标组合**，属于本地生成数据，必须保持 git ignored。`targets.<symbol>.selected=true` 只表示标的进入因子目标前四，不表示真实账户或委员会影子账户已经持有。真实持仓只能以 `accounts.db` 的 `real` 账户为准。状态文件和 API 评估同时通过 `selection_scope=factor_model_target_portfolio`、`represents_account_holdings=false`（单标的评估中为 `represents_account_holding=false`）明确这个边界。
 
-两次周日调仓之间保持的是“目标组合成员资格”，审计原因为 `target_membership_frozen_from_...`，不能写成 `held` 或翻译成“仍持有”。当前真实仓位距离模型目标不超过 5 个百分点时，因子动作降为 `HOLD`，降低十分钟委员会重复调仓。可靠的持仓风险卖出可以越过该免交易带。
+两次周日调仓之间保持的是“目标组合成员资格”，审计原因为 `target_membership_frozen_from_...`，不能写成 `held` 或翻译成“仍持有”。新组合不再使用旧 5 个百分点免交易带；它固定本周目标股数，仅检查未完成的订单。前四之外目标为零，成交后不再靠单股正预期长期保留残仓。
 
 周日计算不会直接覆盖当前生效目标。它写入 `pending_target_update`，其中包含完整目标、评分时间、数据截止日和下一个 XSHG 交易日 09:30 的生效时间；监控轮次到达该时间后一次性提升为当前目标。这样周日评分与周一开盘之间不会提前交易，也不会再因为旧的五交易日锚点把生效时间推迟到下一周。旧版没有 `activation_policy` 或 `pending_target_update` 的状态仍按五交易日冻结规则兼容读取。
 
@@ -91,8 +91,10 @@ data/behavioral_factor_state.json
 jobs.market_monitor_runtime.run_monitor_round
   -> jobs.market_monitor_quotes.build_behavioral_factor_context
   -> core.ashare_behavioral_factor.assess_behavioral_universe
-  -> backend.server.CommitteeRequest.behavioral_factor
-  -> core.decision_optimizer.optimize_committee_decision
+  -> services.ashare_allocation.prepare_account_plan
+  -> core.transaction_cost_portfolio.optimize_transaction_cost_portfolio
+  -> backend.server.run_committee_direct / portfolio_optimizer
+  -> 组合剩余订单、提醒与账本检查
 ```
 
 决策模式由 `core.decision_mode.normalize_decision_mode()` 统一归一化。空配置默认 `algorithm_only`，因此不要通过删除 LLM API key 来省钱；删除 key 只是让旧链路报错或降级，正确做法是保持默认算法模式，或在请求中传 `decision_mode="algorithm_only"`。算法模式会在响应中返回 `decision_mode=algorithm_only`，并在 `cio_memo` 写入 `[ALGORITHM_ONLY_DECISION] ... llm_calls=0`。
@@ -125,7 +127,7 @@ HTTP/App 接口只新增可选 `behavioral_factor` 字段，原有字段没有�
 | 最大回撤 | -11.0715% | -21.6536% |
 | 交易数 | 17 | 351 |
 
-这不是生产收益承诺。尤其要注意：上述胜出版本每 20 个交易日调仓，而当前生产按用户要求每 5 个交易日更新目标，并叠加委员会、基本面、止盈止损和实际账户约束。两者不是完全相同的策略，不能直接把 `+63.8573%` 写成生产预期。
+这不是生产收益承诺。上述研究每 20 个交易日调仓，当前生产使用周日计算/下一交易日生效的前四，并叠加交易成本组合与实际账户约束。两者不是相同策略，不能把 `+63.8573%` 写成生产预期；新组合的十个月对照与限制见第 18 章。
 
 研究脚本：
 

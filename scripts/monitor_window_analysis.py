@@ -452,9 +452,12 @@ def _dialog_row_from_committee_result(row: Dict[str, Any], result: Dict[str, Any
             "suggested_alloc_cny": alloc,
             "analysis_id": str(result.get("analysis_id") or op.get("analysis_id") or ""),
             "decision_id": str(result.get("decision_id") or op.get("decision_id") or ""),
+            "portfolio_optimizer": result.get("portfolio_optimizer") or {},
+            "execution_units": _safe_num((result.get("portfolio_optimizer") or {}).get("units")),
         }
     )
     out["operation"] = op
+    out["portfolio_optimizer"] = result.get("portfolio_optimizer") or {}
     out["state"] = status
     out["analysis_id"] = str(result.get("analysis_id") or out.get("analysis_id") or "")
     out["decision_id"] = str(result.get("decision_id") or out.get("decision_id") or "")

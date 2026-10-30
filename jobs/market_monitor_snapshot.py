@@ -213,6 +213,8 @@ def _operation_detail(
         "wait_reasons": suppressed_reason_labels,
         "analysis_id": str(result.get("analysis_id") or ""),
         "decision_id": str(result.get("decision_id") or ""),
+        "portfolio_optimizer": (action_row or result).get("portfolio_optimizer") or {},
+        "execution_units": (action_row or {}).get("execution_units", 0),
     }
 
 
@@ -311,6 +313,7 @@ def build_monitor_window_snapshot(
             "right_side_trend_gate": result.get("right_side_trend_gate", {}),
             "behavioral_factor": result.get("behavioral_factor", {}),
             "hk_spatio_factor": result.get("hk_spatio_factor", {}),
+            "portfolio_optimizer": result.get("portfolio_optimizer", {}),
             "price": {
                 "current": _safe_num(price_info.get("price"), _safe_num(ee.get("current_price"))),
                 "prev_close": _safe_num(price_info.get("prev_close")),

@@ -29,7 +29,10 @@ def call_committee(symbol: str, name: str, market: str,
                    shadow_available_cash: float = 0.0,
                    shadow_t2_pending: float = 0.0,
                    behavioral_factor: Optional[Dict[str, Any]] = None,
-                   hk_spatio_factor: Optional[Dict[str, Any]] = None) -> Optional[Dict]:
+                   hk_spatio_factor: Optional[Dict[str, Any]] = None,
+                   portfolio_decision: Optional[Dict[str, Any]] = None,
+                   shadow_portfolio_decision: Optional[Dict[str, Any]] = None,
+                   price_info: Optional[Dict[str, Any]] = None) -> Optional[Dict]:
     """调用委员会分析（直接 Python 调用，不需要后端端口）"""
     from backend.server import run_committee_direct, CommitteeRequest, Holding as BackendHolding
     available_cash = max(float(cash or 0), 0.0)
@@ -62,6 +65,9 @@ def call_committee(symbol: str, name: str, market: str,
         optimizer_review_enabled=optimizer_review_enabled,
         behavioral_factor=behavioral_factor or {},
         hk_spatio_factor=hk_spatio_factor or {},
+        portfolio_decision=portfolio_decision or {},
+        shadow_portfolio_decision=shadow_portfolio_decision or {},
+        price_info=price_info or {},
         max_debate_rounds=2,  # 监控模式减半辩论轮数，加速
         shadow_position_pct=shadow_position_pct,
         shadow_cost=shadow_cost,
@@ -331,7 +337,10 @@ def build_behavioral_factor_context(
             )
             for symbol, assessment in assessments.items()
         }
-    return {symbol: assessment.as_dict() for symbol, assessment in assessments.items()}
+    active = _read_behavioral_state(state_file)
+    revision = str(active.get("targets_effective_at") or active.get("rebalance_date") or "")
+    return {symbol: {**assessment.as_dict(), "target_revision": revision}
+            for symbol, assessment in assessments.items()}
 
 
 def _last_completed_hk_date() -> str:

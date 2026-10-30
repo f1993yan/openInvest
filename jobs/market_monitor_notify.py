@@ -72,6 +72,9 @@ def _trigger_summary(action: Dict[str, Any]) -> str:
 
 
 def _review_one_line(action: Dict[str, Any]) -> str:
+    from core.transaction_cost_portfolio import MODEL_KEY
+    if (action.get("portfolio_optimizer") or {}).get("model") == MODEL_KEY:
+        return str((action.get("decision_synthesis") or {}).get("primary_reason") or "按本周组合剩余计划调仓")
     review = str(action.get("optimizer_review") or "")
     for line in review.splitlines():
         stripped = line.strip()
@@ -145,6 +148,8 @@ def _format_action_email_markdown(
         price = _safe_num((prices.get(symbol) or {}).get("price"))
         trigger_text = _trigger_summary(action)
         source = action.get("alert_source") or action.get("reason") or "-"
+        if source == "transaction_cost_portfolio":
+            source = "本周组合调仓"
         alloc = _safe_num(action.get("suggested_alloc_cny"))
         reason = _review_one_line(action).replace("|", "/")[:140] or str(source)
         direction_label = "买入" if direction == "BUY" else "卖出"

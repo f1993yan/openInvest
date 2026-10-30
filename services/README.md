@@ -7,6 +7,7 @@
 - `commsec_reader.py` — IMAP 拉 CommSec 成交回执邮件 + 解析 → 转成 trade dict（symbol/units/amount/email_id）
 - `news.py` — 新闻搜索（DuckDuckGo via `ddgs` + 网页正文抽取 via `trafilatura`）；macro_strategist 用
 - `notifier.py` — 邮件发送（Gmail SMTP）；daily_report 完成后给用户发 brief
+- `ashare_allocation.py` — A 股真实/影子账户独立周计划，行情/历史输入、原子持久化、成交游标和剩余订单检查；纯数学求解委托 `core.transaction_cost_portfolio`
 
 ## 与其他目录的关系
 

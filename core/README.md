@@ -10,6 +10,7 @@
 - `committee.py` — Coordinator-Worker 投资委员会编排（macro → quant + risk → cio，三轮辩论）
 - `consolidation_lock.py` — Dreaming 子系统的跨进程独占锁
 - `regime.py` — 市场 regime 判定（牛市/熊市/震荡），喂给 quant agent 做硬约束
+- `transaction_cost_portfolio.py` — A 股交易成本正则化联合仓位，L1 成本 + L2 换手 + 协方差风险；仅接收数值输入，不读账户或写计划
 - `benchmarks.py` — 8 个基准定义（SPY/QQQ/...）用于 PnL 对比
 
 ## 与其他目录的关系

@@ -155,8 +155,17 @@ def _behavioral_factor_badge(row: Dict[str, Any]) -> str:
     factor = row.get("behavioral_factor") or {}
     if factor.get("selected") is not True:
         return ""
-    target = _safe_num(factor.get("target_weight_pct"))
+    target = _allocation_target_weight(row)
     return f"因子目标前四 {target:.1f}%" if target > 0 else "因子目标前四"
+
+
+def _allocation_target_weight(row: Dict[str, Any]) -> float:
+    from core.transaction_cost_portfolio import MODEL_KEY
+
+    plan = row.get("portfolio_optimizer") or (row.get("operation") or {}).get("portfolio_optimizer") or {}
+    if plan.get("model") == MODEL_KEY and "target_weight_pct" in plan:
+        return _safe_num(plan.get("target_weight_pct"))
+    return _safe_num((row.get("behavioral_factor") or {}).get("target_weight_pct"))
 
 
 def _behavioral_factor_targets(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -164,7 +173,7 @@ def _behavioral_factor_targets(rows: List[Dict[str, Any]]) -> List[Dict[str, Any
     return sorted(
         selected,
         key=lambda row: (
-            -_safe_num((row.get("behavioral_factor") or {}).get("target_weight_pct")),
+            -_allocation_target_weight(row),
             str(row.get("symbol") or ""),
         ),
     )[:4]

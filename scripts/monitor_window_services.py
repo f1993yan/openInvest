@@ -440,11 +440,17 @@ def _fmt_holding_lots(row: Dict[str, Any]) -> str:
 
 
 def _max_executable_lots(row: Dict[str, Any]) -> int:
+    op = row.get("operation") or {}
+    if (op.get("portfolio_optimizer") or {}).get("allow_odd_lot_exit"):
+        return max(0, math.ceil(abs(_suggested_lots(row))))
     return max(0, math.floor(abs(_suggested_lots(row))))
 
 
 def _suggested_lots(row: Dict[str, Any]) -> float:
     op = row.get("operation") or {}
+    units = _safe_num(op.get("execution_units"))
+    if units > 0:
+        return units/_lot_size(row)*(-1 if _safe_num(op.get("suggested_alloc_cny")) < 0 else 1)
     alloc = _safe_num(op.get("suggested_alloc_cny"))
     price = _safe_num((row.get("price") or {}).get("current"))
     lot_size = _safe_num(row.get("min_lot_size"), 100)
@@ -486,10 +492,10 @@ def _execute_user_trade_from_row(row: Dict[str, Any], lots: float) -> Dict[str, 
         raise ValueError("无法获取最新现价，已取消记账")
     units = int(lots) * _lot_size(row)
     direction = _operation_direction(row)
+    if direction == "SELL" and (row.get("operation", {}).get("portfolio_optimizer") or {}).get("allow_odd_lot_exit"):
+        units = min(units, int(_safe_num(row.get("operation", {}).get("execution_units"))))
     from db.account_ledger import AccountLedger
 
-    ledger = AccountLedger()
-    ledger.ensure_initialized(load_config())
     operation = row.get("operation") or {}
     decision_id = str(row.get("decision_id") or operation.get("decision_id") or "").strip() or None
     idempotency_key = (
@@ -497,15 +503,34 @@ def _execute_user_trade_from_row(row: Dict[str, Any], lots: float) -> Dict[str, 
         if decision_id
         else f"user-manual:{symbol}:{direction}:{units}:{datetime.now().isoformat(timespec='microseconds')}"
     )
-    trade = ledger.apply_user_trade(
-        symbol=symbol,
-        direction=direction,
-        units=units,
-        price=price,
-        note="monitor_window_user_confirmed",
-        decision_id=decision_id,
-        idempotency_key=idempotency_key,
-    )
+    from contextlib import ExitStack
+    with AccountLedger() as ledger, ExitStack() as locks:
+        config = load_config()
+        ledger.ensure_initialized(config)
+        from core.transaction_cost_portfolio import MODEL_KEY
+        from services.ashare_allocation import enabled, preview_active_decision
+
+        if enabled(config) and str(row.get("market") or "a").lower() == "a":
+            import portalocker
+            from services.ashare_allocation import STATE_PATH
+            locks.enter_context(portalocker.Lock(str(STATE_PATH)+".lock", timeout=30))
+            audit = operation.get("portfolio_optimizer") or {}
+            fresh = preview_active_decision(symbol, account="real", price_info=price_info,
+                                            ledger=ledger, require_market_open=False)
+            fresh_direction = "BUY" if fresh.get("verdict") in {"BUY", "ACCUMULATE"} else "SELL"
+            if (audit.get("model") != MODEL_KEY or audit.get("account") != "real"
+                    or audit.get("plan_revision") != fresh.get("plan_revision")
+                    or direction != fresh_direction or units > _safe_num(fresh.get("units"))):
+                raise ValueError("推荐计划或可执行数量已变化，请刷新后再确认；已成交也可通过手动记账录入")
+        trade = ledger.apply_user_trade(
+            symbol=symbol,
+            direction=direction,
+            units=units,
+            price=price,
+            note="monitor_window_user_confirmed",
+            decision_id=decision_id,
+            idempotency_key=idempotency_key,
+        )
     name = price_info.get("name") or row.get("name") or symbol
     return {
         "message": f"已按最新价记账: {name} {trade.direction} {trade.units:.0f}股 @ {trade.price:.2f}",
@@ -1404,7 +1429,7 @@ def _run_latest_committee_for_row(row: Dict[str, Any]) -> Dict[str, Any]:
     if ledger is not None:
         try:
             real_summary = ledger.account_summary("real")
-            cash = float(real_summary.get("cash_cny", cash) or cash)
+            cash = float(real_summary.get("cash_cny", cash))
             t2_pending_cash = float(real_summary.get("t2_pending_cash_cny", t2_pending_cash) or 0)
         except Exception:
             pass
@@ -1461,6 +1486,7 @@ def _run_latest_committee_for_row(row: Dict[str, Any]) -> Dict[str, Any]:
         shadow_t2_pending=shadow_t2_pending,
         behavioral_factor=behavioral_factor,
         hk_spatio_factor=hk_spatio_factor,
+        price_info=price_info,
     ) or {"success": False, "symbol": symbol, "error": "委员会返回空结果"}
 
     if not result.get("success"):
@@ -1500,6 +1526,7 @@ def _run_latest_committee_for_row(row: Dict[str, Any]) -> Dict[str, Any]:
             account="committee",
         )
         shadow_result = apply_limit_up_guard(shadow_result, price_info=price_info)
+        shadow_result["price_info"] = price_info
         ledger.record_decision(shadow_result, account="committee", analysis_id=analysis_id)
         ledger.apply_committee_result(shadow_result, price=current_price)
         result["shadow_result"] = shadow_result

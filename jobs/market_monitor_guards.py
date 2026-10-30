@@ -253,6 +253,12 @@ def apply_repeated_trade_guard(
 ) -> Dict[str, Any]:
     if account not in {"real", "committee"}:
         raise ValueError("account must be real or committee")
+    from core.transaction_cost_portfolio import MODEL_KEY
+    if (result.get("portfolio_optimizer") or {}).get("model") == MODEL_KEY:
+        # Remaining units are bounded by a persisted weekly order and ledger
+        # fills. Price-trigger cooldowns must not prevent completing that order.
+        # T+1, cash, stale-quote and limit checks remain enforced downstream.
+        return result
     direction = _result_direction(result)
     if direction is None:
         return result

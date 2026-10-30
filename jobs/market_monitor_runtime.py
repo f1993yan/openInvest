@@ -302,6 +302,20 @@ def run_monitor_round():
         ledger.ensure_initialized(config)
         account_stocks = ledger.stocks_for_committee_input(config, account=REAL_ACCOUNT)
         config = _sync_config_account_fields(config, account_stocks)
+        configured = {s["symbol"] for s in config.get("holdings", [])+config.get("watchlist", [])}
+        real_by_symbol = {h["symbol"]: h for h in ledger.list_holdings(REAL_ACCOUNT)}
+        orphaned = []
+        for h in list(real_by_symbol.values())+ledger.list_holdings("committee"):
+            if _safe_num(h.get("units")) <= 0 or h["symbol"] in configured:
+                continue
+            real = real_by_symbol.get(h["symbol"], {})
+            units = _safe_num(real.get("units"))
+            cost = _safe_num(real.get("avg_cost"))
+            orphaned.append({**h, "units": units, "cost": cost,
+                             "position_pct": units*cost/max(_safe_num(config.get("total_assets")), 1)*100})
+            configured.add(h["symbol"])
+        if orphaned:
+            config["holdings"] = list(config.get("holdings", []))+orphaned
     except Exception as e:
         ledger = None
         log.warning(f"双账户账本初始化/读取失败，回退配置持仓: {e}")
@@ -321,7 +335,7 @@ def run_monitor_round():
     if ledger is not None:
         try:
             real_summary = ledger.account_summary("real")
-            cash = float(real_summary.get("cash_cny", cash) or cash)
+            cash = float(real_summary.get("cash_cny", cash))
             t2_pending_cash = float(real_summary.get("t2_pending_cash_cny", t2_pending_cash) or 0)
         except Exception:
             pass
@@ -329,7 +343,7 @@ def run_monitor_round():
             shadow_stocks = ledger.stocks_for_committee_input(config, account="committee")
             shadow_stocks = apply_sector_cache_to_stocks(shadow_stocks, sector_mapping)
             committee_summary = ledger.account_summary("committee")
-            shadow_cash = float(committee_summary.get("cash_cny", cash) or cash)
+            shadow_cash = float(committee_summary.get("cash_cny", cash))
             shadow_available_cash = shadow_cash
             shadow_t2_pending = float(committee_summary.get("t2_pending_cash_cny", 0) or 0)
         except Exception as e:
@@ -355,6 +369,35 @@ def run_monitor_round():
     log.info(f"拉取 {len(all_symbols)} 只标的最新行情...")
     prices = fetch_sina_prices(all_symbols)
     log.info(f"获取到 {len(prices)} 只标的价格")
+    from services.ashare_allocation import (
+        enabled as portfolio_enabled, is_ashare, prepare_account_plan, preview_active_decision,
+    )
+    use_portfolio = portfolio_enabled(config)
+    portfolio_errors = {}
+    if use_portfolio:
+        for account in ("real", "committee"):
+            try:
+                if ledger is None:
+                    raise RuntimeError("account_ledger_unavailable")
+                account_summary = ledger.account_summary(account)
+                account_holdings = ledger.list_holdings(account)
+                missing = [h["symbol"] for h in account_holdings if _safe_num(h.get("units")) > 0 and h["symbol"] not in prices]
+                if missing:
+                    prices.update(fetch_sina_prices(missing))
+                prepare_account_plan(account=account, holdings=account_holdings,
+                    trades=ledger.list_trades(account, limit=100000),
+                    cash=account_summary.get("cash_cny", 0),
+                    pending_cash=account_summary.get("t2_pending_cash_cny", 0),
+                    prices=prices, factors=behavioral_factors,
+                    trading_mode=config.get("trading_mode", DEFAULT_TRADING_MODE), now=round_dt)
+            except Exception as exc:
+                log.warning("A股组合计划暂停 %s: %s", account, type(exc).__name__)
+                portfolio_errors[account] = {"model": "ashare_transaction_cost_regularized_v1",
+                    "verdict": "WAIT", "units": 0, "alloc_cny": 0, "reason": "portfolio_plan_unavailable"}
+        # Release existing positions before using their actual cash for entries.
+        all_stocks = sorted(all_stocks, key=lambda s: (
+            0 if is_ashare(s)
+            and not (behavioral_factors.get(s["symbol"]) or {}).get("selected") else 1))
     price_sentinel: Dict[str, Dict[str, Any]] = {}
     try:
         from jobs.market_price_sentinel import IntradayPriceSentinel
@@ -456,6 +499,13 @@ def run_monitor_round():
             shadow_t2_pending=shadow_t2_pending,
             behavioral_factor=behavioral_factors.get(str(sym).upper()),
             hk_spatio_factor=hk_spatio_factors.get(normalize_hk_symbol(sym)),
+            price_info=price_info,
+            portfolio_decision=(portfolio_errors.get("real") or preview_active_decision(
+                sym, account="real", price_info=price_info, ledger=ledger, now=round_dt)
+                if use_portfolio and is_ashare(stock) else None),
+            shadow_portfolio_decision=(portfolio_errors.get("committee") or preview_active_decision(
+                sym, account="committee", price_info=price_info, ledger=ledger, now=round_dt)
+                if use_portfolio and is_ashare(stock) else None),
         )
         if isinstance(result, dict):
             result["price_sentinel"] = sentinel_status
@@ -507,6 +557,7 @@ def run_monitor_round():
                     account="committee",
                 )
                 shadow_res = apply_limit_up_guard(shadow_res, price_info=price_info)
+                shadow_res["price_info"] = price_info
                 result["shadow_result"] = shadow_res
 
                 if ledger is not None:
@@ -517,7 +568,9 @@ def run_monitor_round():
                             analysis_id=analysis_id,
                             trade_date=round_dt.date().isoformat(),
                         )
-                        trade = ledger.apply_committee_result(shadow_res, price=price_info["price"])
+                        from services.ashare_allocation import _clock, _local
+                        market_open = not shadow_res.get("portfolio_optimizer") or _clock(_local(round_dt))[2]
+                        trade = ledger.apply_committee_result(shadow_res, price=price_info["price"]) if market_open else None
                         if trade:
                             log.info(
                                 f"影子账户执行 {trade.direction} {trade.symbol} "
@@ -603,6 +656,9 @@ def run_monitor_round():
         trading_mode=trading_mode,
         monitor_action_email_enabled=action_email_enabled,
     )
+    if use_portfolio:
+        from core.transaction_cost_portfolio import MODEL_KEY
+        window_snapshot["allocation_model"] = MODEL_KEY
     write_monitor_window_snapshot(window_snapshot)
 
     # 4. 写报告
@@ -746,6 +802,9 @@ def run_monitor_round():
 def main():
     """主入口：循环执行监控"""
     log.info("=== OpenInvest 盘中监控启动 ===")
+    from services.ashare_allocation import enabled
+    from core.transaction_cost_portfolio import MODEL_KEY
+    log.info("A股仓位引擎: %s", MODEL_KEY if enabled() else "legacy")
     log.info(f"交易时间: {TRADING_START}-{LUNCH_START}, {LUNCH_END}-{TRADING_END}, 间隔: {INTERVAL_MINUTES}分钟")
     log.info("委员会分析: 直接 Python 调用（无需后端端口）")
 

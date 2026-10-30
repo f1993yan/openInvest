@@ -127,3 +127,23 @@ def test_hk_history_prefers_tencent_route_before_akshare(monkeypatch):
 
     pd.testing.assert_frame_equal(result, expected)
 
+
+def test_required_through_refreshes_even_historical_cache_hit(monkeypatch):
+    from types import SimpleNamespace
+    import utils.akshare_data as ak
+
+    cached = pd.DataFrame({"Close": [10.0]*180}, index=pd.bdate_range(end="2026-10-29", periods=180))
+    fresh = pd.concat([cached, pd.DataFrame({"Close": [10.1]}, index=pd.to_datetime(["2026-10-30"]))])
+    fetched = []
+    monkeypatch.setattr(ak, "_STORE", SimpleNamespace(get_history_df=lambda *a, **kw: cached.copy()))
+    monkeypatch.setattr(ak, "_cache_is_fresh", lambda df: True)
+    monkeypatch.setattr(ak, "_save_to_cache", lambda *a, **kw: None)
+    def fetch(*args):
+        fetched.append(args)
+        return fresh.copy()
+    monkeypatch.setattr(ak, "_fetch_a_share", fetch)
+    old = ak.get_history_data("600001", "2y", as_of_date="2026-10-31")
+    assert str(old.index[-1].date()) == "2026-10-29" and not fetched
+    new = ak.get_history_data("600001", "2y", as_of_date="2026-10-31", required_through="2026-10-30")
+    assert str(new.index[-1].date()) == "2026-10-30" and len(fetched) == 1
+

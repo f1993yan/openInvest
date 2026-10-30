@@ -16,6 +16,7 @@ CLI 脚本入口 + 一次性维护工具。**不在生产 cron 里跑**（生产
 | `clean_pnl_history.py` `check_benchmark_freshness.py` | PnL 数据维护工具 | 按需 |
 | `backtest_committee.py` | 历史窗口内回测委员会决策（offline） | 研究用 |
 | `diagnose.py` | 健康检查（memory / .env / DB / yfinance 全链路 ping） | 排错用 |
+| `activate_ashare_allocation.py` | 备份后生成 A 股交易成本组合计划、刷新窗口并启用模型；不下单、不发邮件，重复调用不重开已完成订单 | 升级/迁移后按需 |
 | `test_gemini_cli.py` | Gemini CLI 集成 smoke test | 偶尔 |
 
 ## 与其他目录的关系

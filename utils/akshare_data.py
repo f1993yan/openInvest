@@ -515,8 +515,13 @@ def get_history_data(
     symbol: str,
     period: str = "2y",
     as_of_date: Optional[str] = None,
+    *,
+    required_through: Optional[str] = None,
 ) -> pd.DataFrame:
-    """拉行情历史数据（替代 yfinance 的 get_history_data）"""
+    """拉历史数据；可选 required_through 要求缓存覆盖该完整交易日。
+
+    as_of_date 是排他的历史截点，未指定 required_through 时保留原缓存策略。
+    """
     if RUNNING_ON_PHONE:
         import requests
         try:
@@ -546,9 +551,11 @@ def get_history_data(
     cache_days = _period_to_days(period) + 10
     cached = _STORE.get_history_df(symbol, days=cache_days)
     cached = _apply_cutoff(_apply_period_filter(cached, period), as_of_date)
-    if as_of_date and not cached.empty:
+    complete = (not required_through or (not cached.empty
+                and str(cached.index.max())[:10] >= required_through))
+    if as_of_date and not cached.empty and complete:
         return cached
-    if _cache_is_fresh(cached):
+    if _cache_is_fresh(cached) and complete:
         return cached
 
     # 路由优先级：指数 > A股 > 港股（指数代码可能与 A 股代码冲突，如 000001）

@@ -62,6 +62,7 @@ def synthesize_decision(
     is_holding: bool = False,
     execution_blocked: bool = False,
     execution_block_reason: str = "",
+    portfolio_optimizer: Optional[Dict[str, Any]] = None,
 ) -> DecisionSynthesis:
     parsed = parsed or {}
     entry_exit_points = entry_exit_points or {}
@@ -155,6 +156,39 @@ def synthesize_decision(
         is_holding=is_holding,
         execution_blocked=execution_blocked,
     )
+    if portfolio_optimizer:
+        evidence = [
+            f"组合目标仓位 {float(portfolio_optimizer.get('target_weight_pct', 0)):.1f}%",
+            "入选本周因子前四" if portfolio_optimizer.get("selected") else "不在本周因子前四",
+        ]
+        if expected_return is not None and portfolio_optimizer.get("selected"):
+            evidence.append(f"因子20日预期收益 {float(expected_return):+.1f}%")
+        if portfolio_optimizer.get("data_as_of"):
+            evidence.append(f"组合风险数据截至 {portfolio_optimizer['data_as_of']}")
+        if right_side_gate and optimizer_action in {"BUY", "ACCUMULATE"}:
+            evidence.append("新建仓趋势条件通过" if right_side_gate.get("allow") else "等待新建仓趋势条件通过")
+        reason = str(portfolio_optimizer.get("reason") or "")
+        if reason == "outside_top4_exit":
+            primary_reason = "已退出本周前四，按组合计划卖出并腾出资金"
+        elif final_action in {"BUY", "ACCUMULATE", "TRIM", "SELL"}:
+            primary_reason = "按本周组合计划调仓，已计入交易成本和整体风险"
+        elif reason == "weekly_plan_complete":
+            primary_reason = "本周计划已完成，等待下一次调仓"
+        else:
+            primary_reason = {
+                "a_share_t1_wait": "当天买入的A股暂不可卖，等待下一交易日",
+                "waiting_for_cash_or_board_lot": "等待可用现金或满足一手交易单位",
+                "waiting_for_effective_time": "组合计划尚未到生效时间",
+                "market_closed": "当前休市，开盘后继续检查组合计划",
+                "weekly_plan_expired": "等待本周新组合计划",
+                "portfolio_plan_not_ready": "组合计划尚未生成，暂不交易",
+                "portfolio_plan_unavailable": "组合计划不可用，暂不交易",
+                "stale_quote": "行情已过期，等待最新报价",
+                "limit_down_sell_blocked": "当前接近跌停，等待可卖条件满足",
+                "waiting_for_mode_plan": "交易模式已切换，等待新组合计划",
+                "missing_price": "缺少有效报价，暂不交易",
+            }.get(reason, "等待组合计划和交易条件满足")
+        strategy = "先完成卖出，再按实际到账现金买入；本周已完成的订单不自动重建。"
     return DecisionSynthesis(
         final_action=final_action,
         action_label=ACTION_LABELS.get(final_action, final_action),

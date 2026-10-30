@@ -142,6 +142,9 @@ class CommitteeRequest(BaseModel):
         default_factory=dict,
         description="可选的港股时空动量横截面评估；与A股行为因子完全独立",
     )
+    portfolio_decision: Dict[str, Any] = Field(default_factory=dict)
+    shadow_portfolio_decision: Dict[str, Any] = Field(default_factory=dict)
+    price_info: Dict[str, Any] = Field(default_factory=dict)
     # === 影子账户（Committee）字段 ===
     shadow_position_pct: float = Field(0.0, description="影子账户该股仓位百分比")
     shadow_cost: float = Field(0.0, description="影子账户成本均价")
@@ -182,6 +185,7 @@ class CommitteeResponse(BaseModel):
     buy_signal_backtest: Dict[str, Any] = Field(default_factory=dict)
     behavioral_factor: Dict[str, Any] = Field(default_factory=dict)
     hk_spatio_factor: Dict[str, Any] = Field(default_factory=dict)
+    portfolio_optimizer: Dict[str, Any] = Field(default_factory=dict)
     error: str = ""
     elapsed_sec: float = 0.0
     # === 影子账户结果 ===
@@ -748,6 +752,13 @@ def run_committee_direct(req: CommitteeRequest) -> CommitteeResponse:
     algorithm_only = decision_mode == ALGORITHM_ONLY
 
     try:
+        from services.ashare_allocation import enabled as portfolio_enabled
+        use_portfolio = (req.market or "a").lower() == "a" and portfolio_enabled()
+        if use_portfolio and not req.price_info:
+            from utils.market_data_provider import fetch_prices
+            req.price_info = fetch_prices([req.symbol]).get(req.symbol) or {"is_stale": True}
+            if req.price_info.get("price", 0) > 0:
+                req.current_price = float(req.price_info["price"])
         # 0. 科创板自动检测：688xxx 首次买入最低200股
         if req.symbol.startswith("688") and req.position_pct == 0:
             req.min_lot_size = max(req.min_lot_size, 200)
@@ -886,6 +897,7 @@ def run_committee_direct(req: CommitteeRequest) -> CommitteeResponse:
             position_pct_val: float,
             cost_val: float,
             holdings_list: List[Holding],
+            allocation_account: str = "real",
         ) -> Dict[str, Any]:
             temp_req = CommitteeRequest(
                 symbol=req.symbol,
@@ -1016,28 +1028,44 @@ def run_committee_direct(req: CommitteeRequest) -> CommitteeResponse:
             from core.entry_exit_points import compute_entry_exit_points
             from core.right_side_trend_gate import evaluate_right_side_trend_gate
 
-            opt = optimize_committee_decision(
-                parsed=parsed,
-                metrics=metrics,
-                symbol=req.symbol,
-                regime_brief=regime_brief,
-                current_price=current_price,
-                total_assets=req.total_assets,
-                available_cash=available_cash_val if available_cash_val > 0 else cash_val,
-                position_pct=position_pct_val,
-                min_lot_size=req.min_lot_size,
-                bl_anchor_target_pct=req.target_position_pct,
-                market=req.market,
-                risk_preference=req.risk_preference,
-                regime_probability=regime_probability,
-                conditional_return_stats=conditional_return_stats,
-                fundamental_assessment=fundamental_assessment,
-                position_exit_policy=None,
-                behavioral_assessment=behavioral_assessment,
-                hk_spatio_assessment=hk_spatio_assessment,
-                require_a_share_behavioral=True,
-                require_hk_spatio=True,
-            )
+            from services.ashare_allocation import preview_active_decision
+            portfolio_decision = {}
+            if use_portfolio:
+                from core.transaction_cost_portfolio import portfolio_decision_as_optimizer
+                supplied = req.portfolio_decision if allocation_account == "real" else req.shadow_portfolio_decision
+                # Requests may pause execution, but cannot supply executable
+                # orders: inventory and remaining units come from the ledger.
+                portfolio_decision = preview_active_decision(
+                    req.symbol, account=allocation_account,
+                    price_info={**req.price_info, "price": current_price})
+                if supplied.get("verdict") == "WAIT" and not supplied.get("units"):
+                    portfolio_decision = {**portfolio_decision, "verdict": "WAIT", "units": 0,
+                                          "alloc_cny": 0, "reason": "portfolio_plan_unavailable"}
+                opt = portfolio_decision_as_optimizer(portfolio_decision, price=current_price or 0,
+                                                      factor=behavioral_assessment)
+            else:
+                opt = optimize_committee_decision(
+                    parsed=parsed,
+                    metrics=metrics,
+                    symbol=req.symbol,
+                    regime_brief=regime_brief,
+                    current_price=current_price,
+                    total_assets=req.total_assets,
+                    available_cash=available_cash_val if available_cash_val > 0 else cash_val,
+                    position_pct=position_pct_val,
+                    min_lot_size=req.min_lot_size,
+                    bl_anchor_target_pct=req.target_position_pct,
+                    market=req.market,
+                    risk_preference=req.risk_preference,
+                    regime_probability=regime_probability,
+                    conditional_return_stats=conditional_return_stats,
+                    fundamental_assessment=fundamental_assessment,
+                    position_exit_policy=None,
+                    behavioral_assessment=behavioral_assessment,
+                    hk_spatio_assessment=hk_spatio_assessment,
+                    require_a_share_behavioral=True,
+                    require_hk_spatio=True,
+                )
 
             entry_exit_plan = compute_entry_exit_points(
                 symbol=req.symbol,
@@ -1062,7 +1090,10 @@ def run_committee_direct(req: CommitteeRequest) -> CommitteeResponse:
                 is_holding=position_pct_val > 0,
             )
 
-            opt_audit_text = opt.audit_text()
+            opt_audit_text = (
+                "\n[PORTFOLIO_OPTIMIZER]\n"+json.dumps(portfolio_decision, ensure_ascii=False)
+                if portfolio_decision else opt.audit_text()
+            )
             entry_exit_audit_text = entry_exit_plan.audit_text()
             right_side_gate_text = right_side_gate.audit_text()
 
@@ -1091,7 +1122,7 @@ def run_committee_direct(req: CommitteeRequest) -> CommitteeResponse:
                 and current_price
                 and current_price < cost_val
             )
-            if (not algorithm_only) and has_loss and opt.verdict in ("SELL", "TRIM"):
+            if (not algorithm_only) and not portfolio_decision and has_loss and opt.verdict in ("SELL", "TRIM"):
                 c_memo += (
                     f"\n[FLOATING_LOSS_PROTECT] 持仓浮亏({(current_price/cost_val-1)*100:.1f}%)，"
                     f"优化器{opt.verdict}→保留LLM裁决，需人工判断"
@@ -1150,6 +1181,7 @@ def run_committee_direct(req: CommitteeRequest) -> CommitteeResponse:
                 optimizer_review=optimizer_review,
                 current_price=current_price,
                 is_holding=position_pct_val > 0,
+                portfolio_optimizer=portfolio_decision,
             )
             c_memo += decision_synthesis.audit_text()
 
@@ -1170,6 +1202,7 @@ def run_committee_direct(req: CommitteeRequest) -> CommitteeResponse:
                 "buy_signal_backtest": buy_signal_backtest,
                 "behavioral_factor": behavioral_assessment,
                 "hk_spatio_factor": hk_spatio_assessment,
+                "portfolio_optimizer": portfolio_decision,
             }
 
         # 6. 跑真实账户（Real）的评估
@@ -1210,6 +1243,7 @@ def run_committee_direct(req: CommitteeRequest) -> CommitteeResponse:
                 position_pct_val=req.shadow_position_pct,
                 cost_val=req.shadow_cost,
                 holdings_list=req.shadow_holdings,
+                allocation_account="committee",
             )
             if shadow_res.get("success"):
                 shadow_report = shadow_res["report"]
@@ -1230,6 +1264,7 @@ def run_committee_direct(req: CommitteeRequest) -> CommitteeResponse:
                     "right_side_trend_gate": shadow_res["right_side_gate"].as_dict(),
                     "optimizer_review": shadow_res["optimizer_review"],
                     "decision_mode": shadow_res["decision_mode"],
+                    "portfolio_optimizer": shadow_res["portfolio_optimizer"],
                     "decision_synthesis": shadow_res["decision_synthesis"].as_dict(),
                     "buy_signal_backtest": shadow_res["buy_signal_backtest"].as_dict(),
                     "behavioral_factor": (
@@ -1262,6 +1297,7 @@ def run_committee_direct(req: CommitteeRequest) -> CommitteeResponse:
             right_side_trend_gate=real_res["right_side_gate"].as_dict(),
             optimizer_review=real_res["optimizer_review"][:500],
             decision_mode=real_res["decision_mode"],
+            portfolio_optimizer=real_res["portfolio_optimizer"],
             hk_spatio_factor=(
                 real_res["hk_spatio_factor"].as_dict()
                 if real_res.get("hk_spatio_factor") is not None else {}
@@ -1305,6 +1341,7 @@ def run_committee_direct(req: CommitteeRequest) -> CommitteeResponse:
             optimizer_review=real_res["optimizer_review"],
             decision_mode=real_res["decision_mode"],
             decision_synthesis=real_res["decision_synthesis"].as_dict(),
+            portfolio_optimizer=real_res["portfolio_optimizer"],
             buy_signal_backtest=real_res["buy_signal_backtest"].as_dict(),
             behavioral_factor=(
                 real_res["behavioral_factor"].as_dict()

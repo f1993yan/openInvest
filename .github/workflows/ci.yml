@@ -68,6 +68,9 @@ jobs:
           uv run python -c "from services.news_sources.rss_feed import load_default_feeds"
           uv run python -c "from jobs.event_watch import run as event_watch_run"
           uv run python -c "from core.committee_runner import _resolve_event_brief, format_event_brief"
+          uv run python -c "from core.transaction_cost_portfolio import optimize_transaction_cost_portfolio"
+          uv run python -c "from services.ashare_allocation import prepare_account_plan, preview_active_decision"
+          uv run python -c "import scripts.activate_ashare_allocation"
 
       - name: 脱敏聚合输出无敏感字段（金融视角红线）
         # PM-Growth 妥协方案：accuracy_summary.json 公开数据绝不能含 symbol / threshold / verdict 等

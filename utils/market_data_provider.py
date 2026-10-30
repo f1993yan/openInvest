@@ -265,6 +265,8 @@ def get_history_data(
     symbol: str,
     period: str = "1y",
     as_of_date: Optional[str] = None,
+    *,
+    required_through: Optional[str] = None,
 ) -> pd.DataFrame:
     """获取标的历史日线行情 DataFrame。
     
@@ -294,7 +296,10 @@ def get_history_data(
     if akshare_symbol is not None:
         try:
             from utils.akshare_data import get_history_data as _ak_get_history_data
-            df = _ak_get_history_data(akshare_symbol, period, as_of_date=as_of_date)
+            kwargs = {"as_of_date": as_of_date}
+            if required_through:
+                kwargs["required_through"] = required_through
+            df = _ak_get_history_data(akshare_symbol, period, **kwargs)
             if df is not None and not df.empty:
                 return df
         except Exception as e:

@@ -673,6 +673,7 @@ def select_optimal_actionable_alerts(
     trading_mode: str = DEFAULT_TRADING_MODE,
     same_day_bought_units_by_symbol: Optional[Dict[str, float]] = None,
     recent_real_trades_by_symbol: Optional[Dict[str, Dict[str, Any]]] = None,
+    buy_cash_limit: Optional[float] = None,
 ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
     """Pick executable alerts under cash and risk-distribution budgets.
 
@@ -682,6 +683,31 @@ def select_optimal_actionable_alerts(
     sector-concentration penalties, so the selected basket is diversified rather
     than merely the highest raw score that fits the cash budget.
     """
+    from core.transaction_cost_portfolio import MODEL_KEY, PARAMETERS
+    planned = [r for r in results if r and (r.get("portfolio_optimizer") or {}).get("model") == MODEL_KEY]
+    if planned:
+        # Portfolio weights are already jointly optimized: do not re-score the
+        # basket with single-name heuristics or the old 5pp no-trade band.
+        selected, suppressed = select_portfolio_plan_alerts(
+            results=planned, prices=prices, cash=cash, stocks=stocks, max_alerts=max_alerts,
+            portfolio_value=portfolio_value, same_day_bought_units_by_symbol=same_day_bought_units_by_symbol)
+        planned_symbols = {r.get("symbol") for r in planned}
+        remaining = [r for r in results if r and r.get("symbol") not in planned_symbols]
+        if remaining:
+            used = sum(float(r["suggested_alloc_cny"])*(1+PARAMETERS.fee_rate+PARAMETERS.slippage_rate)
+                       + PARAMETERS.minimum_fee_cny for r in selected if float(r.get("suggested_alloc_cny", 0)) > 0)
+            reserve = max((float((r.get("portfolio_optimizer") or {}).get("equity_at_creation", 0))
+                           *float((r.get("portfolio_optimizer") or {}).get("cash_reserve", .05)) for r in planned), default=0)
+            other, hidden = select_optimal_actionable_alerts(results=remaining, prices=prices,
+                cash=max(0, cash-used), stocks=stocks, entry_exit_state=entry_exit_state,
+                max_alerts=max(0, max_alerts-len(selected)), portfolio_value=portfolio_value,
+                max_single_position_pct=max_single_position_pct, max_sector_position_pct=max_sector_position_pct,
+                trading_mode=trading_mode, same_day_bought_units_by_symbol=same_day_bought_units_by_symbol,
+                recent_real_trades_by_symbol=recent_real_trades_by_symbol,
+                buy_cash_limit=max(0, cash-used-reserve))
+            selected.extend(other)
+            suppressed.extend(hidden)
+        return selected[:max_alerts], suppressed
     stock_by_symbol = {str(s.get("symbol", "")).upper(): s for s in stocks}
     mode = normalize_trading_mode(trading_mode)
     mode_label = trading_mode_label(mode)
@@ -693,6 +719,8 @@ def select_optimal_actionable_alerts(
     base_portfolio_value = max(_safe_num(portfolio_value), inferred_portfolio_value)
     reserve_cash = base_portfolio_value * trading_mode_cash_reserve_ratio(mode)
     buy_cash_budget = max(0.0, _safe_num(cash) - reserve_cash)
+    if buy_cash_limit is not None:
+        buy_cash_budget = min(buy_cash_budget, max(0, buy_cash_limit))
     buy_threshold = trading_mode_buy_threshold(mode)
     buy_value_adjustment = trading_mode_buy_value_adjustment(mode)
     buy_lot_multiplier = trading_mode_buy_lot_multiplier(mode)
@@ -948,3 +976,69 @@ def select_optimal_actionable_alerts(
     selected = sell_alerts + selected_buys
     selected.sort(key=lambda r: _safe_num(r.get("alert_score")), reverse=True)
     return selected[:max_alerts], suppressed
+
+
+def select_portfolio_plan_alerts(
+    *, results, prices, cash, stocks, max_alerts=4, portfolio_value=None,
+    same_day_bought_units_by_symbol=None,
+):
+    """Execute only remaining plan units; never spend hypothetical sell cash."""
+    from core.transaction_cost_portfolio import PARAMETERS
+
+    by_symbol = {str(s.get("symbol", "")).upper(): s for s in stocks}
+    equity = max((float((r.get("portfolio_optimizer") or {}).get("equity_at_creation", 0)) for r in results), default=0)
+    reserve = max((float((r.get("portfolio_optimizer") or {}).get("cash_reserve", .05)) for r in results), default=.05)
+    budget = max(0, float(cash)-equity*reserve)
+    selected, suppressed = [], []
+    ordered = sorted(results, key=lambda r: (
+        float(r.get("suggested_alloc_cny", 0)) > 0,
+        -abs(float(r.get("suggested_alloc_cny", 0)))))
+    for result in ordered:
+        symbol = str(result.get("symbol", "")).upper()
+        plan = result.get("portfolio_optimizer") or {}
+        stock = by_symbol.get(symbol, {})
+        info = prices.get(symbol, {})
+        price = _safe_num(info.get("price"))
+        verdict = str(result.get("verdict", "")).upper()
+        units = max(0, _safe_num(plan.get("units")))
+        reason = ""
+        if result.get("execution_blocked") or not result.get("success"):
+            reason = "execution_guard"
+        elif price <= 0 or info.get("is_stale"):
+            reason = "missing_or_stale_price"
+        elif verdict not in {"BUY", "ACCUMULATE", "TRIM", "SELL"} or units <= 0:
+            continue
+        elif verdict in {"BUY", "ACCUMULATE"}:
+            if _is_limit_up_buy_blocked(result, info):
+                reason = "limit_up_buy_blocked"
+            affordable = max(0, budget-PARAMETERS.minimum_fee_cny)/(price*(1+PARAMETERS.fee_rate+PARAMETERS.slippage_rate))
+            units = int(min(units, affordable)//100)*100
+            if symbol.startswith("688") and _safe_num(stock.get("units")) <= 0 and units < 200:
+                units = 0
+            if units <= 0:
+                reason = reason or "cash_reserve_insufficient"
+        else:
+            sellable = max(0, _safe_num(stock.get("units"))-_safe_num((same_day_bought_units_by_symbol or {}).get(symbol)))
+            units = min(units, sellable)
+            limit = (30 if symbol.startswith(("4", "8", "92")) else
+                     20 if symbol.startswith(("300", "301", "688", "689")) else
+                     5 if "ST" in str(stock.get("name", "")).upper() else 10)
+            if _safe_num(info.get("change_pct")) <= -limit+.15:
+                reason = "limit_down_sell_blocked"
+            elif units <= 0:
+                reason = "same_day_a_share_t1_sell_blocked"
+        if len(selected) >= max_alerts:
+            reason = reason or "plan_order_queued"
+        if reason:
+            suppressed.append({"symbol": symbol, "name": result.get("name"), "reason": reason})
+            continue
+        units = int(units)
+        signed = units*price*(1 if verdict in {"BUY", "ACCUMULATE"} else -1)
+        if signed > 0:
+            budget -= signed*(1+PARAMETERS.fee_rate+PARAMETERS.slippage_rate)+PARAMETERS.minimum_fee_cny
+        selected.append({**result, "suggested_alloc_cny": signed,
+            "portfolio_optimizer": {**plan, "units": units, "alloc_cny": signed},
+            "execution_units": units, "optimizer_lots": units//100, "alert_selected_lots": units//100,
+            "llm_review_lots": units//100, "alert_score": 100,
+            "alert_source": "transaction_cost_portfolio", "alert_triggers": []})
+    return selected, suppressed

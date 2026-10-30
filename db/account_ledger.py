@@ -454,6 +454,40 @@ class AccountLedger:
         price: float,
         trade_date: Optional[str] = None,
     ) -> Optional[ExecutedTrade]:
+        from core.transaction_cost_portfolio import MODEL_KEY
+
+        audit = result.get("portfolio_optimizer") or {}
+        if audit.get("model") != MODEL_KEY:
+            return self._apply_committee_result(result, price=price, trade_date=trade_date)
+        if result.get("execution_blocked"):
+            return None
+        import portalocker
+        from services.ashare_allocation import STATE_PATH, preview_active_decision
+
+        # Serialize plan fills across the monitor and desktop processes. A
+        # second caller sees the first fill before it can reuse the same order.
+        with portalocker.Lock(str(STATE_PATH)+".lock", timeout=30):
+            fresh = preview_active_decision(str(result.get("symbol", "")), account=COMMITTEE_ACCOUNT,
+                price_info={**result.get("price_info", {}), "price": price}, ledger=self,
+                state_path=STATE_PATH)
+            buy = str(result.get("verdict", "")).upper() in {"BUY", "ACCUMULATE"}
+            fresh_buy = fresh.get("verdict") in {"BUY", "ACCUMULATE"}
+            if (audit.get("account") != COMMITTEE_ACCOUNT
+                    or audit.get("plan_revision") != fresh.get("plan_revision") or buy != fresh_buy
+                    or fresh.get("units", 0) <= 0):
+                return None
+            units = min(float(audit.get("units", 0)), float(fresh["units"]))
+            result = {**result, "suggested_alloc_cny": units*price*(1 if buy else -1),
+                      "portfolio_optimizer": {**fresh, "units": units}}
+            return self._apply_committee_result(result, price=price, trade_date=trade_date)
+
+    def _apply_committee_result(
+        self,
+        result: Dict[str, Any],
+        *,
+        price: float,
+        trade_date: Optional[str] = None,
+    ) -> Optional[ExecutedTrade]:
         """Apply committee recommendation to the shadow account if executable."""
         if not result.get("success"):
             return None
@@ -479,11 +513,26 @@ class AccountLedger:
         lot = int((holding or {}).get("min_lot_size") or 100)
         raw_units = abs(alloc) / price
         units = _round_down_to_lot(raw_units, lot)
+        from core.transaction_cost_portfolio import MODEL_KEY
+        plan = result.get("portfolio_optimizer") or {}
+        if plan.get("model") != MODEL_KEY:
+            plan = {}
+        if plan:
+            units = min(float(plan.get("units", 0) or 0), raw_units+1e-6)
+            if direction == "BUY" or not plan.get("allow_odd_lot_exit"):
+                units = _round_down_to_lot(units+1e-6, lot)
         if units <= 0:
             return None
         if direction == "BUY":
             cash = float(self.account_summary(COMMITTEE_ACCOUNT).get("cash_cny", 0) or 0)
             units = _round_down_to_lot(min(units, cash / price), lot)
+            if plan:
+                from core.transaction_cost_portfolio import PARAMETERS
+                reserve = float(plan.get("equity_at_creation", 0))*float(plan.get("cash_reserve", .05))
+                available = max(0, cash-reserve-PARAMETERS.minimum_fee_cny)
+                units = _round_down_to_lot(min(units, available/(price*(1+PARAMETERS.fee_rate+PARAMETERS.slippage_rate))), lot)
+            if symbol.startswith("688") and float((holding or {}).get("units", 0)) <= 0 and units < 200:
+                return None
         else:
             held = float((holding or {}).get("units", 0) or 0)
             sellable = self._sellable_units_for_trade_date(
@@ -493,7 +542,7 @@ class AccountLedger:
                 current_units=held,
                 market=str((holding or {}).get("market") or ""),
             )
-            units = _round_down_to_lot(min(units, sellable), lot)
+            units = min(units, sellable) if plan.get("allow_odd_lot_exit") else _round_down_to_lot(min(units, sellable), lot)
         if units <= 0:
             return None
         return self._apply_trade(

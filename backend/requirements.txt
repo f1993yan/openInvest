@@ -10,3 +10,5 @@ python-frontmatter>=1.0
 portalocker>=3.0
 requests>=2.31
 playwright>=1.40
+cvxpy==1.7.5
+clarabel==0.11.1
