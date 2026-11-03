@@ -3,10 +3,10 @@ from __future__ import annotations
 
 import json
 import re
-import sys
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, Dict, List
 
 from core.hk_spatio_temporal_factor import normalize_hk_symbol
@@ -45,7 +45,68 @@ from jobs.market_monitor_quotes import (
     fetch_sina_prices,
 )
 from jobs.market_monitor_snapshot import build_monitor_window_snapshot, write_monitor_window_snapshot, write_report
+from jobs.market_monitor_news import MonitorNewsCache
 from jobs.trading_mode import DEFAULT_TRADING_MODE, normalize_trading_mode
+
+_NEWS_CACHE = MonitorNewsCache()
+
+
+def _refresh_stale_prices(prices: Dict, symbols: List[str]) -> None:
+    from utils.market_data_provider import quote_is_stale
+
+    stale = [s for s in dict.fromkeys(symbols) if quote_is_stale(prices.get(s) or {})]
+    if not stale:
+        return
+    try:
+        refreshed = fetch_sina_prices(stale) or {}
+    except Exception as exc:
+        log.warning("监控报价刷新失败: %s", type(exc).__name__)
+        refreshed = {}
+    for symbol in stale:
+        quote = refreshed.get(symbol) or {}
+        if quote_is_stale(quote):
+            prices[symbol] = {**prices.get(symbol, {}), "is_stale": True}
+        else:
+            prices[symbol] = quote
+    log.info("已重新核对 %s 只标的的过期报价", len(stale))
+
+
+def _recheck_portfolio_result(result: Dict, *, price_info: Dict, ledger: Any,
+                            is_holding: bool, account: str = "real") -> None:
+    """Revalidate frozen orders after slow analysis, keeping entry permissions."""
+    from core.transaction_cost_portfolio import MODEL_KEY, portfolio_decision_as_optimizer
+    from core.decision_synthesis import synthesize_decision
+    from services.ashare_allocation import preview_active_decision
+
+    audit = result.get("portfolio_optimizer") or {}
+    if (audit.get("model") != MODEL_KEY or not result.get("success")
+            or result.get("execution_blocked") or ledger is None
+            or audit.get("reason") == "portfolio_plan_unavailable"):
+        return
+    decision = preview_active_decision(result["symbol"], account=account,
+                                       price_info=price_info, ledger=ledger)
+    if audit.get("plan_revision") != decision.get("plan_revision"):
+        decision = {**decision, "verdict": "WAIT", "units": 0, "alloc_cny": 0,
+                    "reason": "portfolio_plan_unavailable"}
+    optimizer = portfolio_decision_as_optimizer(decision, price=_safe_num(price_info.get("price")),
+        factor=SimpleNamespace(**(result.get("behavioral_factor") or {})))
+    verdict, alloc = optimizer.verdict, optimizer.alloc_cny
+    gate = result.get("right_side_trend_gate") or {}
+    if verdict in {"BUY", "ACCUMULATE"} and not gate.get("allow", False):
+        verdict, alloc = "HOLD", 0
+    result.update(verdict=verdict, confidence=optimizer.confidence, suggested_alloc_cny=alloc,
+                  portfolio_optimizer=decision, price_info=price_info)
+    synthesis = synthesize_decision(symbol=result["symbol"], name=result.get("name", ""),
+        optimizer=optimizer, parsed={"verdict": verdict, "alloc_cny": alloc},
+        entry_exit_points=result.get("entry_exit_points") or {}, right_side_gate=gate,
+        optimizer_review=result.get("optimizer_review", ""), is_holding=is_holding,
+        current_price=_safe_num(price_info.get("price")), portfolio_optimizer=decision)
+    result["decision_synthesis"] = synthesis.as_dict()
+    memo = result.get("cio_memo") or ""
+    memo = re.sub(r"(?m)^\[PORTFOLIO_OPTIMIZER\]\n[^\n]*",
+                  lambda _: "[PORTFOLIO_OPTIMIZER]\n" + json.dumps(decision, ensure_ascii=False), memo)
+    memo = memo.split("\n\n[DECISION_SYNTHESIS]", 1)[0]
+    result["cio_memo"] = memo + synthesis.audit_text()
 
 
 def _config_bool(value: Any, default: bool = False) -> bool:
@@ -293,6 +354,8 @@ def run_monitor_round():
     round_dt = datetime.now()
     round_time = round_dt.strftime("%H:%M")
     log.info(f"=== 开始监控轮次 {round_time} ===")
+    news_items = _NEWS_CACHE.get(enabled=settings.get("news_refresh_enabled", True),
+                                 max_age_seconds=max(1, int(INTERVAL_MINUTES))*60)
 
     config = load_config()
     sector_mapping = load_sector_cache_mapping()
@@ -389,7 +452,7 @@ def run_monitor_round():
                     cash=account_summary.get("cash_cny", 0),
                     pending_cash=account_summary.get("t2_pending_cash_cny", 0),
                     prices=prices, factors=behavioral_factors,
-                    trading_mode=config.get("trading_mode", DEFAULT_TRADING_MODE), now=round_dt)
+                    trading_mode=config.get("trading_mode", DEFAULT_TRADING_MODE))
             except Exception as exc:
                 log.warning("A股组合计划暂停 %s: %s", account, type(exc).__name__)
                 portfolio_errors[account] = {"model": "ashare_transaction_cost_regularized_v1",
@@ -404,7 +467,7 @@ def run_monitor_round():
 
         sentinel = IntradayPriceSentinel()
         try:
-            price_sentinel = sentinel.evaluate_round(prices, all_stocks, now=round_dt)
+            price_sentinel = sentinel.evaluate_round(prices, all_stocks, now=datetime.now())
         finally:
             sentinel.close()
         triggered = [symbol for symbol, item in price_sentinel.items() if item.get("triggered")]
@@ -413,20 +476,11 @@ def run_monitor_round():
     except Exception as e:
         log.warning(f"盘中价格哨兵不可用，本轮继续常规委员会: {e}")
 
-    # 1.5 拉取国内新闻
-    news_items = []
-    try:
-        sys.path.insert(0, str(_PROJECT_ROOT))
-        from services.news_sources import fetch_all
-        news_items = fetch_all(domestic=True, max_per_source=8, timeout_sec=20)
-        log.info(f"新闻: {len(news_items)} 条")
-    except Exception as e:
-        log.warning(f"新闻拉取失败: {e}")
-
     # 2. 逐只跑委员会
     results = []
     for stock in all_stocks:
         sym = stock["symbol"]
+        _refresh_stale_prices(prices, [sym])
         price_info = prices.get(sym)
 
         if not price_info or price_info["price"] <= 0:
@@ -501,10 +555,10 @@ def run_monitor_round():
             hk_spatio_factor=hk_spatio_factors.get(normalize_hk_symbol(sym)),
             price_info=price_info,
             portfolio_decision=(portfolio_errors.get("real") or preview_active_decision(
-                sym, account="real", price_info=price_info, ledger=ledger, now=round_dt)
+                sym, account="real", price_info=price_info, ledger=ledger)
                 if use_portfolio and is_ashare(stock) else None),
             shadow_portfolio_decision=(portfolio_errors.get("committee") or preview_active_decision(
-                sym, account="committee", price_info=price_info, ledger=ledger, now=round_dt)
+                sym, account="committee", price_info=price_info, ledger=ledger)
                 if use_portfolio and is_ashare(stock) else None),
         )
         if isinstance(result, dict):
@@ -518,6 +572,12 @@ def run_monitor_round():
             result.setdefault("market", stock.get("market", "a"))
             result.setdefault("sector", stock.get("sector", ""))
             result.setdefault("industry", stock.get("industry", ""))
+            result["analysis_id"] = analysis_id
+            if result.get("portfolio_optimizer"):
+                _refresh_stale_prices(prices, [sym])
+                price_info = prices[sym]
+                _recheck_portfolio_result(result, price_info=price_info, ledger=ledger,
+                    is_holding=_safe_num(stock.get("units")) > 0 or _safe_num(stock.get("position_pct")) > 0)
             result = apply_repeated_trade_guard(
                 result,
                 stock=stock,
@@ -529,7 +589,7 @@ def run_monitor_round():
             # 涨停追高护栏必须在下单前：改写 verdict→HOLD，使 apply_committee_result
             # 真正拦下影子买单（仅在 select_optimal_actionable_alerts 抑制提醒不够）。
             result = apply_limit_up_guard(result, price_info=price_info)
-            if ledger is not None:
+            if ledger is not None and not result.get("portfolio_optimizer"):
                 try:
                     ledger.record_decision(
                         result,
@@ -546,6 +606,8 @@ def run_monitor_round():
                 shadow_res.setdefault("symbol", sym)
                 shadow_res.setdefault("name", stock["name"])
                 shadow_res.setdefault("market", stock.get("market", "a"))
+                _recheck_portfolio_result(shadow_res, price_info=price_info, ledger=ledger,
+                    is_holding=shadow_pos_pct > 0, account="committee")
 
                 # Apply guards to shadow result
                 shadow_res = apply_repeated_trade_guard(
@@ -569,7 +631,7 @@ def run_monitor_round():
                             trade_date=round_dt.date().isoformat(),
                         )
                         from services.ashare_allocation import _clock, _local
-                        market_open = not shadow_res.get("portfolio_optimizer") or _clock(_local(round_dt))[2]
+                        market_open = not shadow_res.get("portfolio_optimizer") or _clock(_local())[2]
                         trade = ledger.apply_committee_result(shadow_res, price=price_info["price"]) if market_open else None
                         if trade:
                             log.info(
@@ -599,6 +661,23 @@ def run_monitor_round():
 
         # 避免过快连续请求
         time.sleep(1)
+
+    # Early symbols may have aged while later symbols were analysed.
+    portfolio_results = [r for r in results if r.get("portfolio_optimizer") and r.get("success")]
+    _refresh_stale_prices(prices, [r["symbol"] for r in portfolio_results])
+    stocks_by_symbol = {s["symbol"]: s for s in all_stocks}
+    for result in portfolio_results:
+        sym = result["symbol"]
+        stock = stocks_by_symbol[sym]
+        _recheck_portfolio_result(result, price_info=prices.get(sym) or {}, ledger=ledger,
+            is_holding=_safe_num(stock.get("units")) > 0 or _safe_num(stock.get("position_pct")) > 0)
+        result.update(apply_limit_up_guard(result, price_info=prices.get(sym) or {}))
+        if ledger is not None:
+            try:
+                ledger.record_decision(result, account="real", analysis_id=result.get("analysis_id"),
+                                       trade_date=datetime.now().date().isoformat())
+            except Exception as exc:
+                log.warning("真实账户决策记录失败 %s: %s", sym, type(exc).__name__)
 
     # 3. 组合级提醒优化：现金预算 + 交易约束 + LLM/点位质量
     trading_mode = normalize_trading_mode(config.get("trading_mode", DEFAULT_TRADING_MODE))

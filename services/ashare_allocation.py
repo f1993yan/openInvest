@@ -260,16 +260,9 @@ def plan_decision(
         units, reason = 0, "waiting_for_effective_time"
     if require_market_open and not open_now:
         units, reason = 0, "market_closed"
-    if price_info.get("is_stale"):
+    from utils.market_data_provider import quote_is_stale
+    if price > 0 and quote_is_stale(price_info, now=moment, require_timestamp=False):
         units, reason = 0, "stale_quote"
-    if price_info.get("fetched_at"):
-        try:
-            fetched = _local(datetime.fromisoformat(str(price_info["fetched_at"]).replace("Z", "+00:00")))
-            age = (moment-fetched).total_seconds()
-            if age > int(os.getenv("INVEST_INTRADAY_QUOTE_MAX_AGE_SECONDS", "180")) or age < -60:
-                units, reason = 0, "stale_quote"
-        except (TypeError, ValueError):
-            units, reason = 0, "stale_quote"
     action = ("BUY" if held <= 0 else "ACCUMULATE") if remaining > 0 else ("SELL" if units >= held-0.001 else "TRIM")
     return {"model": MODEL_KEY, "plan_revision": plan.get("revision", ""), "account": plan.get("account"),
             "verdict": action if units > 0 else "HOLD", "units": units,

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+import math
 import os
 import time
 from datetime import datetime, timezone
@@ -12,22 +13,33 @@ import requests
 log = logging.getLogger(__name__)
 
 _PRICE_CACHE: Dict[str, Dict[str, Any]] = {}
-_QUOTE_CACHE_MAX_AGE_SECONDS = int(os.getenv("INVEST_INTRADAY_QUOTE_MAX_AGE_SECONDS", "180"))
+
+
+def quote_is_stale(item: Dict[str, Any], *, now: Optional[datetime] = None,
+                   require_timestamp: bool = True) -> bool:
+    """Check the original fetch time without extending a cached quote's life."""
+    try:
+        price = float(item.get("price", 0))
+        if item.get("is_stale") or not math.isfinite(price) or price <= 0:
+            return True
+        fetched_at = item.get("fetched_at")
+        if not fetched_at:
+            return require_timestamp
+        fetched = datetime.fromisoformat(str(fetched_at).replace("Z", "+00:00"))
+        if fetched.tzinfo is None:
+            fetched = fetched.replace(tzinfo=timezone.utc)
+        moment = now or datetime.now(timezone.utc)
+        if moment.tzinfo is None:
+            moment = moment.replace(tzinfo=timezone.utc)
+        age = (moment - fetched).total_seconds()
+        return age > int(os.getenv("INVEST_INTRADAY_QUOTE_MAX_AGE_SECONDS", "180")) or age < -60
+    except (TypeError, ValueError, OverflowError):
+        return True
 
 
 def _cached_quote(item: Dict[str, Any]) -> Dict[str, Any]:
     cached = dict(item)
-    fetched_at = cached.get("fetched_at")
-    stale = True
-    if fetched_at:
-        try:
-            ts = datetime.fromisoformat(str(fetched_at).replace("Z", "+00:00"))
-            if ts.tzinfo is None:
-                ts = ts.replace(tzinfo=timezone.utc)
-            stale = (datetime.now(timezone.utc) - ts.astimezone(timezone.utc)).total_seconds() > _QUOTE_CACHE_MAX_AGE_SECONDS
-        except ValueError:
-            stale = True
-    cached["is_stale"] = bool(cached.get("is_stale")) or stale
+    cached["is_stale"] = quote_is_stale(cached)
     cached["cache_reused"] = True
     return cached
 

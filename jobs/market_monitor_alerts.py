@@ -984,6 +984,7 @@ def select_portfolio_plan_alerts(
 ):
     """Execute only remaining plan units; never spend hypothetical sell cash."""
     from core.transaction_cost_portfolio import PARAMETERS
+    from utils.market_data_provider import quote_is_stale
 
     by_symbol = {str(s.get("symbol", "")).upper(): s for s in stocks}
     equity = max((float((r.get("portfolio_optimizer") or {}).get("equity_at_creation", 0)) for r in results), default=0)
@@ -1004,7 +1005,7 @@ def select_portfolio_plan_alerts(
         reason = ""
         if result.get("execution_blocked") or not result.get("success"):
             reason = "execution_guard"
-        elif price <= 0 or info.get("is_stale"):
+        elif quote_is_stale(info, require_timestamp=False):
             reason = "missing_or_stale_price"
         elif verdict not in {"BUY", "ACCUMULATE", "TRIM", "SELL"} or units <= 0:
             continue
