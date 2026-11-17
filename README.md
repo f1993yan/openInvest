@@ -98,11 +98,11 @@ backend_err.log
 *.db
 ```
 
-`jobs/market_monitor_config.example.json` 是盘中监控配置模板。真实的 `jobs/market_monitor_config.json` 可能包含现金、持仓、自选股和账户同步设置，必须留在本地。
+`jobs/market_monitor_config.example.json` 是盘中监控配置模板。真实的 `jobs/market_monitor_config.json` 可能包含现金、持仓、自选股和账户设置，必须留在本地。
 
-可选 HTTP 后端需要跨机器访问时，可在 `.env` 设置 `INVEST_API_TOKEN`。未设置时保持旧接口行为；设置后除 `/api/health` 外请求需带 `Authorization: Bearer <token>`。桌面远程服务器 token 不同时使用 `INVEST_REMOTE_API_TOKEN`。配置/账本覆盖前的备份默认写入已忽略的 `data/backups/`。
+可选 HTTP 后端需要跨机器访问时，可在 `.env` 设置 `INVEST_API_TOKEN`。未设置时保持旧接口行为；设置后除 `/api/health` 外请求需带 `Authorization: Bearer <token>`。配置/账本覆盖前的备份默认写入已忽略的 `data/backups/`。
 
-桌面端执行“从服务器同步”时，会先下载并备份普通配置，再停止本项目的后端和后台任务以释放 Windows 下的 `accounts.db` 文件锁；账本通过校验并原子恢复后，由 `AccountLedger` 统一回写监控配置和窗口快照。同步前若检测到本机后端正在运行，完成后会通过 `scripts/start_invest_backend.py --no-window --with-backend` 静默恢复；账本失败时会明确提示“部分成功”，不会把配置同步成功误报成账本也成功。
+桌面端不再提供配置、持仓或账本的服务器上传/下载功能，也不再读取 `INVEST_REMOTE_SERVER_URL` 或 `INVEST_REMOTE_API_TOKEN`。修改持仓、手动记账及修正可用现金或 T+2 待交收资金后，仅保存本地数据并刷新窗口，不弹出服务器同步确认；账本到本地配置和快照的更新仍然保留。移动端及可选 HTTP 后端的接口不受此次桌面端调整影响。
 
 交易模式字段在本地配置中为：
 

@@ -16,14 +16,18 @@ class MonitorNewsCache:
         self._thread: threading.Thread | None = None
         self._items: list = []
         self._updated_at: float | None = None
+        self._last_attempt_at: float | None = None
 
     def get(self, *, enabled: bool = True, max_age_seconds: float = 600) -> list:
         if not enabled:
             return []
         with self._lock:
-            age = time.monotonic() - self._updated_at if self._updated_at is not None else float("inf")
+            now = time.monotonic()
+            age = now - self._updated_at if self._updated_at is not None else float("inf")
             fresh = age <= max_age_seconds
-            if not fresh and (self._thread is None or not self._thread.is_alive()):
+            retry_due = self._last_attempt_at is None or now - self._last_attempt_at >= max_age_seconds
+            if not fresh and retry_due and (self._thread is None or not self._thread.is_alive()):
+                self._last_attempt_at = now
                 self._thread = threading.Thread(target=self._refresh, name="monitor-news", daemon=True)
                 self._thread.start()
             return list(self._items) if age <= max(3600, max_age_seconds) else []

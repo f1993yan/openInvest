@@ -10,7 +10,6 @@ from __future__ import annotations
 import argparse
 import json
 import math
-import os
 import queue
 import sys
 import threading
@@ -40,16 +39,6 @@ from scripts.monitor_window_news import MonitorNewsMixin
 from scripts.monitor_window_selection import MonitorSelectionMixin
 from scripts.monitor_window_trade import MonitorTradeMixin
 from scripts.monitor_window_tray import TrayController
-
-
-def _account_ledger_db_path() -> Path:
-    from db.account_ledger import DB_PATH
-
-    return Path(DB_PATH)
-
-
-def _config_has_targets(config: Dict[str, Any]) -> bool:
-    return bool((config.get("holdings") or []) or (config.get("watchlist") or []))
 
 
 class MonitorWindow(MonitorNewsMixin, MonitorSelectionMixin, MonitorTradeMixin, MonitorAnalysisMixin):
@@ -123,7 +112,6 @@ class MonitorWindow(MonitorNewsMixin, MonitorSelectionMixin, MonitorTradeMixin, 
         self.tray_commands: queue.Queue[str] = queue.Queue()
         self.tray_controller: Optional[TrayController] = None
         load_dotenv(ROOT / ".env")
-        self.remote_server_url = os.getenv("INVEST_REMOTE_SERVER_URL")
         self._build_ui()
         self._setup_tray_icon()
 
@@ -336,29 +324,6 @@ class MonitorWindow(MonitorNewsMixin, MonitorSelectionMixin, MonitorTradeMixin, 
             fg=MUTED,
             font=("Microsoft YaHei UI", 8, "bold"),
         ).pack(side=tk.LEFT, padx=(0, 8))
-
-        # Pack actions on the right of selection_bar for horizontal bottom-alignment.
-        self.upload_fab = CircleButton(
-            self.selection_bar,
-            text="↑",
-            command=self.upload_data,
-            size=32,
-            color="#10b981",
-            hover_color="#059669",
-            font=("Segoe UI", 12, "bold"),
-        )
-        self.upload_fab.pack(side=tk.RIGHT, padx=(6, 0))
-
-        self.sync_fab = CircleButton(
-            self.selection_bar,
-            text="↓",
-            command=self.sync_data,
-            size=32,
-            color="#f59e0b",
-            hover_color="#d97706",
-            font=("Segoe UI", 12, "bold"),
-        )
-        self.sync_fab.pack(side=tk.RIGHT, padx=(6, 0))
 
         self.trade_fab = CircleButton(
             self.selection_bar,
@@ -696,212 +661,6 @@ class MonitorWindow(MonitorNewsMixin, MonitorSelectionMixin, MonitorTradeMixin, 
         self.last_payload_signature = ()
         self.refresh()
 
-    def upload_data(self) -> None:
-        if not self.remote_server_url:
-            messagebox.showinfo("跳过上传", "未配置远程服务器 (INVEST_REMOTE_SERVER_URL)。\n本地配置文件已由监控服务自动保存。")
-            return
-
-        config_path = ROOT / "jobs" / "market_monitor_config.json"
-
-        if not config_path.exists():
-            messagebox.showerror("错误", f"配置文件不存在: {config_path}")
-            return
-
-        import requests
-        try:
-            try:
-                from db.account_ledger import AccountLedger
-
-                with AccountLedger() as ledger:
-                    ledger.sync_to_config_and_snapshot()
-                    try:
-                        ledger.conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
-                        ledger.conn.commit()
-                    except Exception as checkpoint_err:
-                        print(f"Failed to checkpoint account ledger before upload: {checkpoint_err}")
-            except Exception as ledger_err:
-                print(f"Failed to refresh config from ledger before upload: {ledger_err}")
-
-            with open(config_path, "r", encoding="utf-8") as f:
-                config_data = json.load(f)
-
-            url = f"{self.remote_server_url.rstrip('/')}/api/config/monitor_config"
-            try:
-                resp = requests.post(url, json=config_data, headers=_remote_api_headers(), timeout=60)
-            except requests.exceptions.ConnectionError:
-                messagebox.showwarning("连接失败", f"无法连接到服务器 {url}。\n本地数据已自动保存，无需上传。")
-                return
-            if resp.status_code != 200:
-                messagebox.showerror("错误", f"上传监控配置失败: HTTP {resp.status_code}\n{resp.text}")
-                return
-
-            # 1. 上传 data/sector_cache.json
-            sector_cache_path = ROOT / "data" / "sector_cache.json"
-            if sector_cache_path.exists():
-                try:
-                    with open(sector_cache_path, "r", encoding="utf-8") as f:
-                        sector_data = json.load(f)
-                    url_sector = f"{self.remote_server_url.rstrip('/')}/api/config/sector_cache"
-                    resp_sector = requests.post(
-                        url_sector,
-                        json=sector_data,
-                        headers=_remote_api_headers(),
-                        timeout=10,
-                    )
-                    if resp_sector.status_code != 200:
-                        print(f"Failed to upload sector cache to server: {resp_sector.status_code}")
-                except Exception as se_err:
-                    print(f"Failed to read/upload sector cache: {se_err}")
-
-            # 2. 上传真实双账户账本 db/accounts.db
-            db_path = _account_ledger_db_path()
-            if db_path.exists():
-                try:
-                    url_ledger = f"{self.remote_server_url.rstrip('/')}/api/config/account_ledger"
-                    from utils.safe_persistence import create_sqlite_export
-
-                    export_path = create_sqlite_export(
-                        db_path,
-                        required_tables=("accounts", "holdings", "trades", "daily_pnl"),
-                    )
-                    try:
-                        with open(export_path, "rb") as f:
-                            resp_ledger = requests.post(
-                                url_ledger,
-                                files={"file": f},
-                                headers=_remote_api_headers(),
-                                timeout=30,
-                            )
-                    finally:
-                        export_path.unlink(missing_ok=True)
-                    if resp_ledger.status_code != 200:
-                        print(f"Failed to upload account ledger to server: {resp_ledger.status_code}")
-                except Exception as db_err:
-                    print(f"Failed to read/upload account ledger: {db_err}")
-
-            messagebox.showinfo("成功", "所有配置文件及账本数据库上传成功！")
-        except Exception as e:
-            messagebox.showerror("错误", f"上传过程中发生异常: {str(e)}")
-
-    def sync_data(self) -> None:
-        if not self.remote_server_url:
-            messagebox.showinfo("跳过同步", "未配置远程服务器 (INVEST_REMOTE_SERVER_URL)。\n本地数据无需同步。")
-            return
-
-        if not messagebox.askyesno("确认同步", "确认从服务器同步持仓/关注/参数数据及账本数据库？这将覆盖本地的相同数据！"):
-            return
-
-        import requests
-        try:
-            config_path = ROOT / "jobs" / "market_monitor_config.json"
-            config_received = False
-            url_config = f"{self.remote_server_url.rstrip('/')}/api/config/monitor_config"
-            resp_config = requests.get(url_config, headers=_remote_api_headers(), timeout=10)
-            config_data: Dict[str, Any] = {}
-            if resp_config.status_code == 200:
-                config_received = True
-                config_data = resp_config.json()
-                if _config_has_targets(config_data):
-                    from utils.safe_persistence import backup_and_atomic_write_json
-
-                    backup_and_atomic_write_json(
-                        config_path,
-                        config_data,
-                        reason="desktop-remote-monitor-config-sync",
-                    )
-            elif resp_config.status_code == 404:
-                pass
-            else:
-                messagebox.showerror("错误", f"同步监控配置失败: HTTP {resp_config.status_code}\n{resp_config.text}")
-                return
-
-            # 1. 同步 data/sector_cache.json
-            try:
-                url_sector = f"{self.remote_server_url.rstrip('/')}/api/config/sector_cache"
-                resp_sector = requests.get(url_sector, headers=_remote_api_headers(), timeout=10)
-                if resp_sector.status_code == 200:
-                    sector_cache_path = ROOT / "data" / "sector_cache.json"
-                    from utils.safe_persistence import backup_and_atomic_write_json
-
-                    backup_and_atomic_write_json(
-                        sector_cache_path,
-                        resp_sector.json(),
-                        reason="desktop-remote-sector-cache-sync",
-                    )
-            except Exception as sector_err:
-                print(f"Failed to sync sector cache: {sector_err}")
-
-            # 2. 同步真实双账户账本 db/accounts.db，再由账本回写 config/snapshot
-            ledger_synced = False
-            ledger_error_msg = None
-
-            try:
-                url_ledger = f"{self.remote_server_url.rstrip('/')}/api/config/account_ledger"
-                resp_ledger = requests.get(url_ledger, headers=_remote_api_headers(), timeout=30)
-                if resp_ledger.status_code == 200:
-                    db_path = _account_ledger_db_path()
-                    db_path.parent.mkdir(parents=True, exist_ok=True)
-
-                    # Clear read-only attribute if present
-                    if db_path.exists():
-                        try:
-                            import stat
-                            mode = db_path.stat().st_mode
-                            if not (mode & stat.S_IWRITE):
-                                db_path.chmod(mode | stat.S_IWRITE)
-                        except Exception:
-                            pass
-
-                    try:
-                        from utils.safe_persistence import restore_sqlite_bytes
-
-                        restore_sqlite_bytes(
-                            db_path,
-                            resp_ledger.content,
-                            reason="desktop-remote-account-ledger-sync",
-                            required_tables=("accounts", "holdings", "trades", "daily_pnl"),
-                            nonempty_tables=("accounts", "holdings"),
-                            live=True,
-                        )
-                        ledger_synced = True
-                    except Exception as replace_err:
-                        ledger_error_msg = f"账本数据库同步失败。\n详细错误: {replace_err}"
-                        raise
-            except Exception as db_err:
-                print(f"Failed to sync account ledger: {db_err}")
-                if not ledger_error_msg:
-                    ledger_error_msg = str(db_err)
-
-            try:
-                from db.account_ledger import AccountLedger
-
-                with AccountLedger() as ledger:
-                    if ledger_synced:
-                        if config_received and not _config_has_targets(config_data) and not config_path.exists():
-                            from utils.safe_persistence import backup_and_atomic_write_json
-
-                            backup_and_atomic_write_json(
-                                config_path,
-                                config_data,
-                                reason="desktop-ledger-empty-config-sync",
-                            )
-                        ledger.sync_to_config_and_snapshot()
-                    elif _config_has_targets(config_data):
-                        ledger.ensure_initialized(config_data)
-                        ledger.sync_to_config_and_snapshot()
-                    elif config_data:
-                        print("Remote monitor config has no targets and no ledger was synced; keeping local target list unchanged.")
-            except Exception as le:
-                print(f"Failed to refresh ledger/config after sync: {le}")
-
-            if ledger_error_msg:
-                messagebox.showwarning("部分成功", f"配置文件同步成功，但账本数据库同步失败！\n\n原因: {ledger_error_msg}")
-            else:
-                messagebox.showinfo("成功", "所有配置文件及账本数据库同步成功！")
-            self.refresh()
-        except Exception as e:
-            messagebox.showerror("错误", f"同步过程中发生异常: {str(e)}")
-
     def _resize_to_rows(self, row_count: int) -> None:
         screen_h = self.root.winfo_screenheight()
         screen_w = self.root.winfo_screenwidth()
@@ -914,10 +673,9 @@ class MonitorWindow(MonitorNewsMixin, MonitorSelectionMixin, MonitorTradeMixin, 
         self.root.after(10, self._redraw_action_fabs)
 
     def _redraw_action_fabs(self) -> None:
-        for attr in ("upload_fab", "sync_fab", "trade_fab"):
-            button = getattr(self, attr, None)
-            if button is not None:
-                button._draw(button.color)
+        button = getattr(self, "trade_fab", None)
+        if button is not None:
+            button._draw(button.color)
 
     def _on_canvas_configure(self, event: tk.Event) -> None:
         self.canvas.itemconfigure(self.cards_window, width=event.width)
@@ -1756,10 +1514,6 @@ class MonitorWindow(MonitorNewsMixin, MonitorSelectionMixin, MonitorTradeMixin, 
                 self.status_text.set("可用现金/待交收现金修正成功")
                 self.refresh()
                 self._close_cash_correction_popover()
-
-                if not self.demo and self.remote_server_url:
-                    if messagebox.askyesno("上传数据", "现金修正执行成功，是否上传最新的持仓配置数据到远程服务器？"):
-                        self.upload_data()
 
                 return "break"
             except Exception as exc:

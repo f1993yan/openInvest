@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import re
+import sys
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -355,7 +356,7 @@ def run_monitor_round():
     round_time = round_dt.strftime("%H:%M")
     log.info(f"=== 开始监控轮次 {round_time} ===")
     news_items = _NEWS_CACHE.get(enabled=settings.get("news_refresh_enabled", True),
-                                 max_age_seconds=max(1, int(INTERVAL_MINUTES))*60)
+        max_age_seconds=max(1, int(settings.get("news_frequency_minutes", 10)))*60)
 
     config = load_config()
     sector_mapping = load_sector_cache_mapping()
@@ -885,6 +886,9 @@ def main():
     from core.transaction_cost_portfolio import MODEL_KEY
     log.info("A股仓位引擎: %s", MODEL_KEY if enabled() else "legacy")
     log.info(f"交易时间: {TRADING_START}-{LUNCH_START}, {LUNCH_END}-{TRADING_END}, 间隔: {INTERVAL_MINUTES}分钟")
+    from jobs.market_monitor_common import load_crawler_settings
+    news_interval = max(1, int(load_crawler_settings().get("news_frequency_minutes", 10)))
+    log.info("新闻后台刷新最短间隔: %s分钟，已有任务运行时跳过", news_interval)
     log.info("委员会分析: 直接 Python 调用（无需后端端口）")
 
     # 交易时段启动时立即执行一轮；主循环随后必须等待下一个间隔，

@@ -59,6 +59,7 @@ def test_news_cache_failure_does_not_discard_recent_completed_batch():
     cache.get()
     cache._thread.join(2)
     cache._updated_at -= 601
+    cache._last_attempt_at -= 601
     cache._fetcher = MagicMock(side_effect=RuntimeError("offline"))
     assert cache.get() == ["news"]
     cache._thread.join(2)
@@ -72,6 +73,27 @@ def test_disabled_news_never_starts_a_worker():
     assert cache.get(enabled=False) == []
     assert cache._thread is None
     fetch.assert_not_called()
+
+
+@pytest.mark.parametrize("fails", [False, True])
+def test_four_minute_poll_does_not_accelerate_news_or_failed_retries(monkeypatch, fails):
+    import jobs.market_monitor_news as news
+
+    clock = [0]
+    monkeypatch.setattr(news.time, "monotonic", lambda: clock[0])
+    fetch = MagicMock(side_effect=RuntimeError("offline")) if fails else MagicMock(return_value=["news"])
+    cache = MonitorNewsCache(fetch)
+    cache.get(max_age_seconds=600)
+    cache._thread.join(2)
+    assert fetch.call_count == 1
+    for elapsed in (240, 480):
+        clock[0] = elapsed
+        cache.get(max_age_seconds=600)
+        assert fetch.call_count == 1
+    clock[0] = 720
+    cache.get(max_age_seconds=600)
+    cache._thread.join(2)
+    assert fetch.call_count == 2
 
 
 @pytest.mark.parametrize("refreshed", [{}, {"600001": quote(age=181)}, {"600001": {"price": 12}}])
@@ -164,7 +186,12 @@ def test_slow_monitor_round_rechecks_exits_before_publishing(monkeypatch, refres
     config = {"holdings": stocks, "watchlist": [], "cash": 1000, "total_assets": 10000,
               "monitor_action_email_enabled": False}
     monkeypatch.setattr(runtime, "load_config", lambda: config)
-    monkeypatch.setattr(common, "load_crawler_settings", lambda: {"news_refresh_enabled": False})
+    monkeypatch.setattr(common, "load_crawler_settings", lambda: {"frequency_minutes": 4,
+        "news_frequency_minutes": 10, "news_refresh_enabled": False})
+    news_cache = MagicMock()
+    news_cache.get.return_value = []
+    monkeypatch.setattr(runtime, "_NEWS_CACHE", news_cache)
+    monkeypatch.setattr(runtime, "INTERVAL_MINUTES", 4)
     monkeypatch.setattr(runtime, "load_sector_cache_mapping", lambda: {})
     monkeypatch.setattr(runtime, "load_entry_exit_alert_state", lambda: {})
     monkeypatch.setattr(runtime, "build_behavioral_factor_context", lambda stocks: {})
@@ -209,6 +236,7 @@ def test_slow_monitor_round_rechecks_exits_before_publishing(monkeypatch, refres
     finally:
         FrozenClock.moment = NOW
     snapshot = published[0]
+    news_cache.get.assert_called_once_with(enabled=False, max_age_seconds=600)
     assert snapshot["counts"]["action_required"] == (2 if refresh_ok else 0)
     if refresh_ok:
         assert [r["symbol"] for r in snapshot["actionable"]] == ["600001", "600002"]

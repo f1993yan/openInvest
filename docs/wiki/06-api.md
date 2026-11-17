@@ -282,9 +282,9 @@ POST body schema：
 这里有两个 FastAPI surface，不能混为一谈：
 
 - `connectors.web_api` 的生产拓扑仍以 `127.0.0.1 + Caddy + Cloudflare Access` 为外层鉴权。
-- 桌面/移动同步使用的 `backend.server` 支持可选 `INVEST_API_TOKEN`。留空保持旧行为；配置后除 `/api/health` 和 CORS preflight 外，所有路由都要求 `Authorization: Bearer <token>`。
+- 移动端等可选客户端使用的 `backend.server` 支持可选 `INVEST_API_TOKEN`。留空保持旧行为；配置后除 `/api/health` 和 CORS preflight 外，所有路由都要求 `Authorization: Bearer <token>`。
 
-桌面端远程 token 读取 `INVEST_REMOTE_API_TOKEN`，留空再回退 `INVEST_API_TOKEN`。不要把真实 token 写进 `.env.example` 或 Git。
+客户端应携带服务端配置的 Bearer token，不要把真实 token 写进 `.env.example` 或 Git。桌面监控窗口已移除服务器上传/下载功能，不再使用远程地址或 token 设置。
 
 `backend.server` 的配置恢复端点还执行内容校验：空 monitor config、空账本、缺少关键表、SQLite header/quick-check 失败默认拒绝；只有显式 `force=true` 才允许清空。覆盖前备份落在 `data/backups/<backup_id>/`，manifest 只记录校验和、大小和 schema 版本。
 

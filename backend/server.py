@@ -1370,6 +1370,7 @@ def run_committee_direct(req: CommitteeRequest) -> CommitteeResponse:
 
 class CrawlerSettings(BaseModel):
     frequency_minutes: int = Field(60, ge=1, description="爬网频率（分钟）")
+    news_frequency_minutes: int = Field(10, ge=1, description="新闻后台刷新最短间隔（分钟）")
     target_refresh_enabled: bool = Field(True, description="开启标的刷新")
     news_refresh_enabled: bool = Field(True, description="开启周末新闻")
 
@@ -1420,8 +1421,13 @@ async def update_crawler_config(settings: CrawlerSettings):
     try:
         settings_path = _PROJECT_ROOT / "jobs" / "crawler_settings.json"
         settings_path.parent.mkdir(parents=True, exist_ok=True)
-        settings_path.write_text(json.dumps(settings.model_dump(), ensure_ascii=False, indent=2), encoding="utf-8")
-        return {"ok": True, "settings": settings.model_dump()}
+        payload = settings.model_dump()
+        if settings_path.exists() and "news_frequency_minutes" not in settings.model_fields_set:
+            previous = json.loads(settings_path.read_text(encoding="utf-8"))
+            payload["news_frequency_minutes"] = previous.get("news_frequency_minutes", 10)
+        from utils.safe_persistence import atomic_write_json
+        atomic_write_json(settings_path, payload)
+        return {"ok": True, "settings": payload}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to save settings: {str(e)}")
 
@@ -1432,9 +1438,10 @@ async def get_crawler_config():
     try:
         settings_path = _PROJECT_ROOT / "jobs" / "crawler_settings.json"
         if settings_path.exists():
-            return json.loads(settings_path.read_text(encoding="utf-8"))
+            return {"news_frequency_minutes": 10, **json.loads(settings_path.read_text(encoding="utf-8"))}
         return {
             "frequency_minutes": 60,
+            "news_frequency_minutes": 10,
             "target_refresh_enabled": True,
             "news_refresh_enabled": True
         }

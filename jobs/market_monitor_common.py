@@ -76,6 +76,7 @@ def load_crawler_settings() -> Dict[str, Any]:
     settings_path = _PROJECT_ROOT / "jobs" / "crawler_settings.json"
     defaults = {
         "frequency_minutes": 60,
+        "news_frequency_minutes": 10,
         "target_refresh_enabled": True,
         "news_refresh_enabled": True
     }

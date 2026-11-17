@@ -27,12 +27,6 @@ REMINDER_IGNORE_TTL_SECONDS = 60 * 60
 log = logging.getLogger(__name__)
 
 
-def _remote_api_headers() -> Dict[str, str]:
-    """Return optional Bearer auth without changing unauthenticated installs."""
-    token = str(os.getenv("INVEST_REMOTE_API_TOKEN") or os.getenv("INVEST_API_TOKEN") or "").strip()
-    return {"Authorization": f"Bearer {token}"} if token else {}
-
-
 def _safe_num(value: Any, default: float = 0.0) -> float:
     try:
         if value is None:
@@ -1545,7 +1539,6 @@ __all__ = [
     "clear_symbol_reminder_ignore",
     "is_symbol_reminder_ignored",
     "reminder_ignore_remaining_seconds",
-    "_remote_api_headers",
     "_stop_background_services",
     "_fmt_price",
     "_fmt_money",
